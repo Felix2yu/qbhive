@@ -1,0 +1,63 @@
+name: Release
+
+# 在 GitHub 上发布 release 时，交叉编译各平台二进制并挂到 release 上。
+# QBHive 是纯 Go 项目，CGO_ENABLED=0 出完全静态二进制，
+# 所有目标平台在同一个 Linux runner 上交叉编译即可。
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 编译各平台二进制
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go vet + go build 冒烟
+        run: |
+          go vet ./...
+          go build ./...
+
+      - name: 交叉编译
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          build() {
+            local goos="$1" goarch="$2"
+            echo "── ${goos}/${goarch}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags="-s -w" -o "dist/qbhive-${goos}-${goarch}" ./cmd/server
+          }
+          build linux amd64
+          build linux arm64
+          build darwin arm64
+          build darwin amd64
+          ls -lh dist
+
+      - name: 生成校验和
+        run: (cd dist && sha256sum qbhive-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: qbhive-binaries
+          path: dist/*
+          retention-days: 7
+
+      - name: 挂到 release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/qbhive-*
+            dist/SHA256SUMS.txt

@@ -1,0 +1,123 @@
+name: Build
+
+# QBHive 是纯 Go 项目，CGO_ENABLED=0 出完全静态二进制，
+# 所有架构能在同一个 Linux runner 上交叉编译。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: 测试
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # 工具链版本从 go.mod 读取，升级只改声明
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./... -coverprofile=coverage.out || true
+
+      - name: 上传覆盖率到 Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unittests
+          fail_ci_if_error: false
+
+  docker:
+    name: 镜像 ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04,       label: amd64 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm, label: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 仓库名转小写
+        id: repo
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ghcr.io/${{ steps.repo.outputs.name }}:${{ matrix.label }}
+          pull: true
+          cache-from: type=gha,scope=${{ matrix.label }}
+          cache-to: type=gha,scope=${{ matrix.label }},mode=max
+
+  # 合成多架构 manifest，拉取端不用关心机器架构
+  docker-manifest:
+    name: 合并镜像 manifest
+    runs-on: ubuntu-24.04
+    needs: docker
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 仓库名转小写
+        id: repo
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: 创建并推送 manifest
+        run: |
+          image=ghcr.io/${{ steps.repo.outputs.name }}
+          docker buildx imagetools create \
+            --tag "$image:latest" \
+            "$image:amd64" "$image:arm64"
+          docker buildx imagetools create \
+            --tag "$image:${{ github.sha }}" \
+            "$image:amd64" "$image:arm64"
