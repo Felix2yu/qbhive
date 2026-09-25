@@ -13,3 +13,5 @@ vendor/
 # 本地数据
 data/
 *.db
+.tmp
+/config.json
