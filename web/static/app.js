@@ -300,8 +300,64 @@ async function saveRSS(rss) {
 }
 
 // ---------- 设置 ----------
+// settings 页的当前配置对象（模块级，避免每次操作都重建页面丢值）
+let _settingsCfg = null;
+
+// 把当前 DOM 里 settings 页所有输入同步回 _settingsCfg
+function syncFormToCfg() {
+  if (!_settingsCfg) return;
+  const c = _settingsCfg;
+  c.qbittorrent.url = $("#qb-url").value;
+  c.qbittorrent.username = $("#qb-user").value;
+  // 掩码值 "********" 不覆盖原值；用户清空密码字段时原样保存（后端会保留原值）
+  const pwd = $("#qb-pass").value;
+  if (pwd && pwd !== "********") c.qbittorrent.password = pwd;
+  const key = $("#qb-apikey").value;
+  if (key && key !== "********") c.qbittorrent.apiKey = key;
+  c.server.listen = $("#srv-listen").value;
+  c.limiter.enabled = $("#lim-enabled").checked;
+  c.limiter.interval = parseInt($("#lim-interval").value || "10", 10);
+  c.limiter.rules = $$("[data-lm-name]").map(n => {
+    const i = n.dataset.lmName;
+    return {
+      id: c.limiter.rules[i]?.id || genID(),
+      enabled: document.querySelector(`[data-lm-enabled="${i}"]`).checked,
+      name: n.value,
+      match: document.querySelector(`[data-lm-match="${i}"]`).value,
+      uploadLimit: parseInt(document.querySelector(`[data-lm-limit="${i}"]`).value || "0", 10),
+    };
+  });
+  c.notifier.enabled = $("#nt-enabled").checked;
+  c.notifier.appriseUrls = $("#nt-urls").value.split("\n").map(s => s.trim()).filter(Boolean);
+  c.fileManager.enabled = $("#fm-enabled").checked;
+  c.fileManager.scanInterval = parseInt($("#fm-interval").value || "15", 10);
+}
+
+// 只重渲 limiter 规则那一块（加/删规则时调用，不碰整页）
+function renderLimiterRules() {
+  if (!_settingsCfg) return;
+  const box = $("#limiter-rules");
+  if (!box) return;
+  const rules = _settingsCfg.limiter.rules || [];
+  box.innerHTML = rules.length === 0
+    ? `<div class="empty">暂无规则</div>`
+    : rules.map((r, i) => `
+      <div class="rule-block">
+        <div class="rule-header">
+          <input type="checkbox" data-lm-enabled="${i}" ${r.enabled !== false ? "checked" : ""}>
+          <input type="text" data-lm-name="${i}" value="${r.name}" style="flex:1;margin:0 12px" />
+          <button class="btn danger small" data-lm-del="${i}">删除</button>
+        </div>
+        <div class="form-row"><label>匹配正则</label><input type="text" data-lm-match="${i}" value="${r.match}" placeholder="如 \\.mkv$ 或 4k" /></div>
+        <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-lm-limit="${i}" value="${r.uploadLimit}" min="0" style="width:150px"/> <div class="hint">0 = 无限制</div></div>
+      </div>`).join("");
+  // 重新绑定删除按钮（checkbox/input 的 change 不丢值，不需要重绑）
+  $$("[data-lm-del]", box).forEach(b => b.addEventListener("click", onLimDel));
+}
+
 async function renderSettings(root) {
   const cfg = (await api("GET", "/config")).data;
+  _settingsCfg = cfg;
 
   root.innerHTML = `
     <!-- qBittorrent -->
@@ -337,17 +393,7 @@ async function renderSettings(root) {
           <button class="btn" id="lim-add">+ 添加规则</button>
         </div>
       </div>
-      ${(!cfg.limiter.rules || cfg.limiter.rules.length === 0) ? `<div class="empty">暂无规则</div>` :
-        cfg.limiter.rules.map((r, i) => `
-        <div class="rule-block">
-          <div class="rule-header">
-            <input type="checkbox" data-lm-enabled="${i}" ${r.enabled !== false ? "checked" : ""}>
-            <input type="text" data-lm-name="${i}" value="${r.name}" style="flex:1;margin:0 12px" />
-            <button class="btn danger small" data-lm-del="${i}">删除</button>
-          </div>
-          <div class="form-row"><label>匹配正则</label><input type="text" data-lm-match="${i}" value="${r.match}" placeholder="如 \\.mkv$ 或 4k" /></div>
-          <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-lm-limit="${i}" value="${r.uploadLimit}" min="0" style="width:150px"/> <div class="hint">0 = 无限制</div></div>
-        </div>`).join("")}
+      <div id="limiter-rules"></div>
     </div>
 
     <!-- 通知 -->
@@ -358,7 +404,7 @@ async function renderSettings(root) {
       </div>
       <div class="form-row"><label>通知 URL</label>
         <div style="flex:1">
-          <textarea id="nt-urls" placeholder="每行一个 Apprise URL，例如：&#10;telegram://BOT_TOKEN/CHAT_ID&#10;discord://WEBHOOK_ID/WEBHOOK_TOKEN&#10;gotify://TOKEN@HOST:PORT&#10;https://hooks.slack.com/services/...">${(cfg.notifier.appriseUrls || []).join("\n")}</textarea>
+          <textarea id="nt-urls" placeholder="每行一个 Apprise URL，例如：\ntelegram://BOT_TOKEN/CHAT_ID\ndiscord://WEBHOOK_ID/WEBHOOK_TOKEN\ngotify://TOKEN@HOST:PORT\nhttps://hooks.slack.com/services/...">${(cfg.notifier.appriseUrls || []).join("\n")}</textarea>
           <div class="hint">使用 <a href="https://github.com/unraid/apprise-go" target="_blank">Apprise-Go</a>，原生支持上百种渠道（Telegram / Discord / Slack / 企业微信 / 邮件 / Gotify / Bark ...）。每行填一个 URL，格式参见 <a href="https://github.com/caronc/apprise/wiki" target="_blank">Apprise Wiki</a>。</div>
         </div>
       </div>
@@ -381,74 +427,55 @@ async function renderSettings(root) {
     </div>
   `;
 
-  // 事件
+  // 首次渲染 limiter 规则
+  renderLimiterRules();
+
+  // --- 事件 ---
   $("#qb-test").onclick = async () => {
     const r = await api("POST", "/test-qb", {
-      url: $("#qb-url").value, username: $("#qb-user").value, password: $("#qb-pass").value, apiKey: $("#qb-apikey").value
+      url: $("#qb-url").value, username: $("#qb-user").value,
+      password: $("#qb-pass").value, apiKey: $("#qb-apikey").value,
     });
     toast(r.success ? "连接成功 ✓" : (r.message || "连接失败"), r.success ? "ok" : "err");
     if (r.success) updateStatus("ok", "qb 已连接");
   };
 
-  let limCount = (cfg.limiter.rules || []).length;
   $("#lim-add").onclick = () => {
-    cfg.limiter.rules = cfg.limiter.rules || [];
-    cfg.limiter.rules.push({ id: genID(), name: "规则 " + (cfg.limiter.rules.length + 1), enabled: true, match: "", uploadLimit: 0 });
-    limCount++;
-    renderSettings(root);
+    syncFormToCfg();
+    _settingsCfg.limiter.rules.push({ id: genID(), name: `规则 ${(_settingsCfg.limiter.rules.length + 1)}`, enabled: true, match: "", uploadLimit: 0 });
+    renderLimiterRules();
   };
 
+  $$("[data-lm-del]").forEach(b => b.addEventListener("click", onLimDel));
+
   $("#nt-test").onclick = async () => {
-    const urls = $("#nt-urls").value.split("\n").map(s => s.trim()).filter(Boolean);
+    syncFormToCfg();
+    const urls = _settingsCfg.notifier.appriseUrls;
     if (urls.length === 0) { toast("请先填写通知 URL", "err"); return; }
     toast("正在发送测试通知...");
-    const r = await api("POST", "/notify/test", { enabled: $("#nt-enabled").checked, appriseUrls: urls });
+    const r = await api("POST", "/notify/test", { enabled: _settingsCfg.notifier.enabled, appriseUrls: urls });
     toast(r.message || (r.success ? "测试通知已发送 ✓" : "失败"), r.success ? "ok" : "err");
   };
 
   $("#save-all").onclick = async () => {
-    const out = {
-      qbittorrent: {
-        url: $("#qb-url").value, username: $("#qb-user").value,
-        password: $("#qb-pass").value,
-        apiKey: $("#qb-apikey").value,
-      },
-      server: { listen: $("#srv-listen").value },
-      limiter: {
-        enabled: $("#lim-enabled").checked,
-        interval: parseInt($("#lim-interval").value || "10", 10),
-        rules: ($$("[data-lm-name]").map(n => {
-          const i = n.dataset.lmName;
-          return {
-            enabled: document.querySelector(`[data-lm-enabled="${i}"]`).checked,
-            name: n.value,
-            match: document.querySelector(`[data-lm-match="${i}"]`).value,
-            uploadLimit: parseInt(document.querySelector(`[data-lm-limit="${i}"]`).value || "0", 10),
-          };
-        })),
-      },
-      notifier: {
-        enabled: $("#nt-enabled").checked,
-        appriseUrls: $("#nt-urls").value.split("\n").map(s => s.trim()).filter(Boolean),
-      },
-      fileManager: {
-        enabled: $("#fm-enabled").checked,
-        scanInterval: parseInt($("#fm-interval").value || "15", 10),
-      },
-      rss: cfg.rss, // 保持之前的值
-    };
+    syncFormToCfg();
+    const out = _settingsCfg; // 掩码值已在 syncFormToCfg 里被忽略，后端会保留原密码/apiKey
     const res = await api("POST", "/config", out);
     toast(res.success ? "设置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
+    // 保存成功后重新 GET 一次，让密码/API key 回到掩码状态
+    if (res.success) {
+      const fresh = (await api("GET", "/config")).data;
+      _settingsCfg = fresh;
+    }
   };
-
-  // 限速规则删除
-  $$("[data-lm-del]").forEach(b => b.addEventListener("click", () => {
-    const idx = parseInt(b.dataset.lmDel, 10);
-    cfg.limiter.rules.splice(idx, 1);
-    renderSettings(root);
-  }));
 }
 
+function onLimDel() {
+  syncFormToCfg();
+  const idx = parseInt(this.dataset.lmDel, 10);
+  _settingsCfg.limiter.rules.splice(idx, 1);
+  renderLimiterRules();
+}
 // ---------- 状态 ----------
 async function updateStatus() {
   try {
