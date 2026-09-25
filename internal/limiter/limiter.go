@@ -99,7 +99,7 @@ func (l *Limiter) Stop() {
 
 func (l *Limiter) apply() {
 	rules := l.cfg.Get().Limiter.Rules
-	torrents, err := l.client.GetTorrents("all", "", "")
+	torrents, err := l.client.GetTorrents("all")
 	if err != nil {
 		logger.Warn.Printf("Limiter get torrents failed: %v", err)
 		return

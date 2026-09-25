@@ -303,7 +303,6 @@ func (c *Client) RenameFile(hash, oldPath, newPath string) error {
 	}
 	return nil
 }
-
 func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int) error {
 	var buf bytes.Buffer
 	boundary := "qbhive"

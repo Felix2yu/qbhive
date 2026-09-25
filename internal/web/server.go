@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/limiter"
@@ -33,6 +36,38 @@ type Server struct {
 
 	// 鉴权 token（从环境变量 QBHIVE_TOKEN 读取；空则不鉴权，向后兼容）
 	authToken string
+
+	// torrents 缓存：key = "filter|sort|reverse"，value = cachedResult
+	tcacheMu sync.Mutex
+	tcache   map[string]*cacheEntry
+
+	// stats 缓存（概览用，刷新频率更高）
+	scacheMu sync.Mutex
+	scache   *cacheEntry
+}
+
+type cacheEntry struct {
+	data      interface{}
+	expiresAt time.Time
+}
+
+const (
+	torrentCacheTTL = 5 * time.Second
+	statsCacheTTL   = 3 * time.Second
+	defaultLimit    = 500
+	maxLimit        = 2000
+)
+
+// 预定义的窄 filter：把前端友好名转成 qBittorrent 原生 filter
+var narrowFilters = map[string]string{
+	"active":      "active",
+	"downloading": "downloading",
+	"seeding":     "seeding",
+	"pausedDL":    "pausedDL",
+	"pausedUP":    "pausedUP",
+	"stalledUP":   "stalledUP",
+	"completed":   "completed",
+	"all":         "all",
 }
 
 func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngine *rss.Engine, not *notifier.Notifier, sch *scheduler.Scheduler) *Server {
@@ -111,6 +146,7 @@ func (s *Server) Start(webRoot string) error {
 		api.POST("/test-qb", s.testQB)
 
 		api.GET("/torrents", s.listTorrents)
+		api.GET("/torrents/stats", s.torrentsStats)
 		api.POST("/torrents/:hash/limit", s.setTorrentLimit)
 
 		api.POST("/rss/force", s.forceRSS)
@@ -301,17 +337,135 @@ func (s *Server) testQB(c *gin.Context) {
 }
 
 func (s *Server) listTorrents(c *gin.Context) {
-	list, err := s.qbClient.GetTorrents()
+	filter := c.Query("filter")
+	if filter == "" {
+		filter = "active"
+	}
+	// 把前端友好的别名转成 qBittorrent 原生 filter
+	if raw, ok := narrowFilters[filter]; ok {
+		filter = raw
+	}
+
+	sortField := c.Query("sort")
+	if sortField == "" {
+		sortField = "added_time" // 默认按添加时间倒序，新任务排前
+	}
+	reverse := c.Query("reverse")
+	if reverse == "" {
+		reverse = "true"
+	}
+
+	// limit 处理：默认 500，最大 2000，0 表示全量（加 warning）
+	var limit int
+	limitStr := c.Query("limit")
+	if limitStr == "" {
+		limit = defaultLimit
+	} else if n, e := strconv.Atoi(limitStr); e == nil {
+		switch {
+		case n == 0:
+			// 显式要全量
+			c.Header("X-Warning", "full list requested, may be slow with thousands of torrents")
+		case n > 0 && n <= maxLimit:
+			limit = n
+		case n > maxLimit:
+			limit = maxLimit
+			c.Header("X-Warning", fmt.Sprintf("limit capped at %d", maxLimit))
+		default:
+			limit = defaultLimit
+		}
+	} else {
+		limit = defaultLimit
+	}
+
+	// 缓存 key（不含 limit：limit 只做上层截断，缓存存完整 filter 结果）
+	cacheKey := filter + "|" + sortField + "|" + reverse
+
+	// 查缓存
+	s.tcacheMu.Lock()
+	if ent, ok := s.tcache[cacheKey]; ok && time.Now().Before(ent.expiresAt) {
+		cached := ent.data.([]models.QBTorrent)
+		s.tcacheMu.Unlock()
+		if limit > 0 && limit < len(cached) {
+			cached = cached[:limit]
+		}
+		c.JSON(200, models.APIResponse{Success: true, Data: cached})
+		return
+	}
+	s.tcacheMu.Unlock()
+
+	// 缓存 miss → 拉 qBittorrent
+	list, err := s.qbClient.GetTorrents(filter, sortField, reverse)
 	if err != nil {
 		c.JSON(502, models.APIResponse{Success: false, Message: err.Error()})
 		return
 	}
+
+	// 写缓存（完整 filter 结果，不带 limit）
+	s.tcacheMu.Lock()
+	s.tcache[cacheKey] = &cacheEntry{
+		data:      list,
+		expiresAt: time.Now().Add(torrentCacheTTL),
+	}
+	s.tcacheMu.Unlock()
+
+
+	// limit 截断
+	if limit > 0 && limit < len(list) {
+		list = list[:limit]
+	}
+
 	c.JSON(200, models.APIResponse{Success: true, Data: list})
+}
+
+// torrentsStats 是概览页用的轻量统计，不走 info 大接口。
+// 拉一次 transfer info（全局速度） + active/pausedUP 的数量，3 秒缓存。
+
+func (s *Server) torrentsStats(c *gin.Context) {
+	// 查缓存
+	s.scacheMu.Lock()
+	if ent := s.scache; ent != nil && time.Now().Before(ent.expiresAt) {
+		out := ent.data.(map[string]interface{})
+		s.scacheMu.Unlock()
+		c.JSON(200, models.APIResponse{Success: true, Data: out})
+		return
+	}
+	s.scacheMu.Unlock()
+
+	// 拉速度（轻量，单次）
+	ti, err := s.qbClient.GetTransferInfo()
+	if err != nil {
+		c.JSON(502, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+
+	// 拉三个窄 filter 的数量（用 listTorrents 内部的缓存逻辑，这里直接调 qb client）
+	activeList, _ := s.qbClient.GetTorrents("active", "", "")
+	pausedUpList, _ := s.qbClient.GetTorrents("pausedUP", "", "") // 最常看的历史
+	pausedDlList, _ := s.qbClient.GetTorrents("pausedDL", "", "")  // 暂停下载的未完成任务
+
+	out := map[string]interface{}{
+		"dlSpeed":     ti.DlSpeed,
+		"upSpeed":     ti.UpSpeed,
+		"activeCount": len(activeList),
+		"pausedUp":    len(pausedUpList),
+		"pausedDL":    len(pausedDlList),
+	}
+
+	// 写缓存
+	s.scacheMu.Lock()
+	s.scache = &cacheEntry{
+		data:      out,
+		expiresAt: time.Now().Add(statsCacheTTL),
+	}
+	s.scacheMu.Unlock()
+
+	c.JSON(200, models.APIResponse{Success: true, Data: out})
 }
 
 type limitPayload struct {
 	UploadLimit int `json:"uploadLimit"`
 }
+
 
 func (s *Server) setTorrentLimit(c *gin.Context) {
 	hash := c.Param("hash")

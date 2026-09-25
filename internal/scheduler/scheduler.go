@@ -20,11 +20,11 @@ import (
 
 // Scheduler 是所有后台模块的统一调度入口，同时负责完成通知事件
 type Scheduler struct {
-	cfg       *config.Manager
-	client    *qb.Client
-	notifier  *notifier.Notifier
-	limiter   *limiter.Limiter
-	fileMgr   *filemgr.Manager
+	cfg      *config.Manager
+	client   *qb.Client
+	notifier *notifier.Notifier
+	limiter  *limiter.Limiter
+	fileMgr  *filemgr.Manager
 	rssEngine *rss.Engine
 	stop      chan struct{}
 	mu        sync.Mutex
