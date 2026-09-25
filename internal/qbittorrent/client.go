@@ -245,6 +245,7 @@ func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 	}
 	var list []models.QBTorrent
 	if err := json.Unmarshal(data, &list); err != nil {
+		logger.Warn.Printf("GetTorrents JSON parse failed filter=%q sort=%q reverse=%q body-first-200=%q err=%v", filter, sort, reverse, string(data[:min(len(data), 200)]), err)
 		return nil, err
 	}
 	return list, nil
