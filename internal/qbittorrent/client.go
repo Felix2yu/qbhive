@@ -136,14 +136,32 @@ func (c *Client) TestConnection() error {
 	return nil
 }
 
-// GetTorrents 返回 torrent 列表。filter 透传给 qBittorrent 的 /api/v2/torrents/info，
-// 支持 active / downloading / seeding / completed / paused 等；空字符串或 "all" 表示全部。
-func (c *Client) GetTorrents(filter ...string) ([]models.QBTorrent, error) {
+// GetTorrents 拉 torrent 列表，透传给 qBittorrent 原生参数：
+//   - filter: active/downloading/seeding/completed/paused/all 等
+//   - sort:   name/size/progress/upspeed/dlspeed/added_time 等
+//   - reverse: 1 或 true 表示倒序
+// 所有参数都是可选的；filter/sort 为空或 all 时不拼 query。
+// 注意：qBittorrent 原生不支持 limit/offset，分页由上层（server 或前端）负责。
+// GetTorrents 拉 torrent 列表。参数顺序：filter, sort, reverse；都是可选的，
+// 用 variadic 兼容旧调用点。支持值见 qBittorrent WebUI API 文档。
+func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
+	var filter, sort, reverse string
+	if len(params) > 0 { filter = params[0] }
+	if len(params) > 1 { sort = params[1] }
+	if len(params) > 2 { reverse = params[2] }
+	v := url.Values{}
+	if f := strings.TrimSpace(filter); f != "" && f != "all" {
+		v.Set("filter", f)
+	}
+	if s := strings.TrimSpace(sort); s != "" {
+		v.Set("sort", s)
+	}
+	if r := strings.TrimSpace(reverse); r != "" {
+		v.Set("reverse", r)
+	}
 	path := "/api/v2/torrents/info"
-	if len(filter) > 0 {
-		if f := strings.TrimSpace(filter[0]); f != "" && f != "all" {
-			path += "?filter=" + url.QueryEscape(f)
-		}
+	if len(v) > 0 {
+		path += "?" + v.Encode()
 	}
 	resp, err := c.do("GET", path, nil, "")
 	if err != nil {
@@ -159,6 +177,32 @@ func (c *Client) GetTorrents(filter ...string) ([]models.QBTorrent, error) {
 		return nil, err
 	}
 	return list, nil
+}
+
+// TransferInfo 是 qBittorrent /api/v2/transfer/info 的返回
+type TransferInfo struct {
+	DlSpeed      int64 `json:"dl_speed"`
+	UpSpeed      int64 `json:"up_speed"`
+	DlSpeedLimit int64 `json:"dl_speed_limit"`
+	UpSpeedLimit int64 `json:"up_speed_limit"`
+}
+
+// GetTransferInfo 拉全局速度信息（很轻量，不走 info 大接口）
+func (c *Client) GetTransferInfo() (*TransferInfo, error) {
+	resp, err := c.do("GET", "/api/v2/transfer/info", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var ti TransferInfo
+	if err := json.Unmarshal(data, &ti); err != nil {
+		return nil, err
+	}
+	return &ti, nil
 }
 
 func (c *Client) GetTorrentFiles(hash string) ([]models.QBFile, error) {
@@ -244,7 +288,7 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 }
 
 func (c *Client) applyLatestUploadLimit(uploadLimitKB int) {
-	list, err := c.GetTorrents("downloading")
+	list, err := c.GetTorrents("downloading", "", "")
 	if err != nil || len(list) == 0 {
 		return
 	}
