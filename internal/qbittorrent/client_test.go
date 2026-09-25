@@ -327,7 +327,9 @@ func TestClient_AuthFailureString_AutoRelogin(t *testing.T) {
 }
 
 // 非认证失败的字符串（比如 qB 500 报错）不应触发重登循环
-func TestClient_NonAuthErrorString_NotAutoRelogin(t *testing.T) {
+// TestClient_NonAuthErrorString_ReloginAndRetry 验证 qBittorrent 返回任何非数组的
+// JSON string（不管是不是认证失败）时，GetTorrents 层都自动重登 + 重试一次。
+func TestClient_NonAuthErrorString_ReloginAndRetry(t *testing.T) {
 	loginCount := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
@@ -335,22 +337,33 @@ func TestClient_NonAuthErrorString_NotAutoRelogin(t *testing.T) {
 		w.Header().Set("Set-Cookie", "SID=test")
 		w.Write([]byte("Ok."))
 	})
+	callCount := 0
 	mux.HandleFunc("/api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
-		// 非认证失败的 JSON string 值（包含 "error" 但不含 auth 关键词）
-		w.WriteHeader(200)
-		w.Write([]byte(`"internal error"`))
+		callCount++
+		if callCount == 1 {
+			// 第一次：qB 吐了一个非数组的 JSON string（不管什么原因）
+			w.WriteHeader(200)
+			w.Write([]byte(`"internal error"`))
+		} else {
+			// 第二次（重登后重试）：返回正常数组
+			w.WriteHeader(200)
+			w.Write([]byte(`[{"name":"t"},{"name":"s"}]`))
+		}
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	cli := New(srv.URL, "u", "p", "")
-	_, err := cli.GetTorrents()
-	if err == nil {
-		t.Error("expected error response")
+	list, err := cli.GetTorrents()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	// 只应调用 login 一次（初始的），"internal error" 不该触发重登
-	if loginCount != 1 {
-		t.Errorf("expected only 1 login (no auto relogin), got %d", loginCount)
+	if len(list) != 2 {
+		t.Errorf("expected 2 torrents after retry, got %d", len(list))
+	}
+	// 初始 login + 重登 login = 2 次
+	if loginCount != 2 {
+		t.Errorf("expected 2 logins (initial + retry), got %d", loginCount)
 	}
 }
 

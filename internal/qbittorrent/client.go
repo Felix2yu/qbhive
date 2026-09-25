@@ -215,37 +215,81 @@ func (c *Client) TestConnection() error {
 // 注意：qBittorrent 原生不支持 limit/offset，分页由上层（server 或前端）负责。
 // GetTorrents 拉 torrent 列表。参数顺序：filter, sort, reverse；都是可选的，
 // 用 variadic 兼容旧调用点。支持值见 qBittorrent WebUI API 文档。
+// qBittorrent 认证失败/参数错误的特征：返回 200 OK + 纯 JSON string 值而不是数组/对象。
+// 比如 ""Fails."" / ""Unauthorized"" / ""Invalid sort field""。
+// 这种情况下前端拿到的是 {"success":false,"message":"invalid character '"' looking for beginning of value"}
+// 完全无法分辨；这里我们在 JSON parse 失败时自动重登 + 重试一次。
+func isQBErrorString(data []byte) bool {
+	s := strings.TrimSpace(string(data))
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		// 看起来像 JSON string。进一步判断：去掉首尾引号后如果是纯字符串且以 / \ " 之外的字符开头，
+		// 大概率是 qBittorrent 返回的错误字符串（"Fails." / "Unauthorized" / "Invalid..." 等）。
+		inner := s[1 : len(s)-1]
+		// 排除 JSON 转义引号开头 / 空字符串
+		if len(inner) == 0 {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 	var filter, sort, reverse string
 	if len(params) > 0 { filter = params[0] }
 	if len(params) > 1 { sort = params[1] }
 	if len(params) > 2 { reverse = params[2] }
 	v := url.Values{}
-	if f := strings.TrimSpace(filter); f != "" && f != "all" {
-		v.Set("filter", f)
-	}
-	if s := strings.TrimSpace(sort); s != "" {
-		v.Set("sort", s)
-	}
-	if r := strings.TrimSpace(reverse); r != "" {
-		v.Set("reverse", r)
-	}
+	if f := strings.TrimSpace(filter); f != "" && f != "all" { v.Set("filter", f) }
+	if s := strings.TrimSpace(sort); s != "" { v.Set("sort", s) }
+	if r := strings.TrimSpace(reverse); r != "" { v.Set("reverse", r) }
 	path := "/api/v2/torrents/info"
-	if len(v) > 0 {
-		path += "?" + v.Encode()
+	if len(v) > 0 { path += "?" + v.Encode() }
+
+	parseOnce := func(data []byte) ([]models.QBTorrent, error) {
+		var list []models.QBTorrent
+		if err := json.Unmarshal(data, &list); err != nil {
+			return nil, err
+		}
+		return list, nil
 	}
-	resp, err := c.do("GET", path, nil, "")
+
+	runOnce := func() ([]models.QBTorrent, []byte, error) {
+		resp, err := c.do("GET", path, nil, "")
+		if err != nil {
+			return nil, nil, err
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, nil, err
+		}
+		list, err := parseOnce(data)
+		return list, data, err
+	}
+
+	// 第一次尝试
+	list, data, err := runOnce()
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var list []models.QBTorrent
-	if err := json.Unmarshal(data, &list); err != nil {
-		logger.Warn.Printf("GetTorrents JSON parse failed filter=%q sort=%q reverse=%q body-first-200=%q err=%v", filter, sort, reverse, string(data[:min(len(data), 200)]), err)
+		// 非 JSON 错误：判断是不是 qBittorrent 返回了错误字符串
+		if data != nil && isQBErrorString(data) {
+			logger.Warn.Printf("GetTorrents: qB returned error string %q (filter=%q sort=%q reverse=%q), forcing re-login + retry",
+				strings.TrimSpace(string(data)), filter, sort, reverse)
+			c.cookie = ""
+			if err2 := c.login(); err2 != nil {
+				return nil, fmt.Errorf("initial parse error: %w; auto re-login failed: %v", err, err2)
+			}
+			// 重试一次
+			list2, _, err2 := runOnce()
+			if err2 != nil {
+				logger.Warn.Printf("GetTorrents retry still failed: %v", err2)
+				return nil, fmt.Errorf("parse error (filter=%q sort=%q reverse=%q): %v (qB raw body: %s)", filter, sort, reverse, err2, string(data[:min(len(data), 200)]))
+			}
+			return list2, nil
+		}
+		// 其他 parse error（不是 qB 认证/参数错误）
+		logger.Warn.Printf("GetTorrents JSON parse failed filter=%q sort=%q reverse=%q body-first-200=%q err=%v",
+			filter, sort, reverse, string(data[:min(len(data), 200)]), err)
 		return nil, err
 	}
 	return list, nil
