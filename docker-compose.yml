@@ -1,17 +1,15 @@
 services:
   qbhive:
-    build: .
-    image: qbhive:latest
+    image: ghcr.io/felix2yu/qbhive:latest
     container_name: qbhive
     restart: unless-stopped
+    pull_policy: always
     ports:
       - "8088:8088"
     volumes:
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
-      # 如果 qBittorrent 也在 docker 网络内，可以用 service name 访问
-      # - QBHIVE_QB_URL=http://qbittorrent:8080
     networks:
       - torrent-net
 
