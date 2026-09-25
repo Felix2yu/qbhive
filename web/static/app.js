@@ -12,6 +12,45 @@ function toast(msg, type = "ok") {
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 2500);
 }
+// --- 工具函数 ---
+function debounce(fn, wait = 300) {
+  let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
+}
+function chunkRender(items, perFrame, renderItem, container, done) {
+  let i = 0; container.innerHTML = "";
+  function step() {
+    const frag = document.createDocumentFragment();
+    const end = Math.min(i + perFrame, items.length);
+    for (; i < end; i++) frag.appendChild(renderItem(items[i], i));
+    container.appendChild(frag);
+    if (i < items.length) requestAnimationFrame(step);
+    else done && done();
+  }
+  requestAnimationFrame(step);
+}
+function paginate(total, page, pageSize) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  page = Math.max(1, Math.min(page, pages));
+  return { pages, page, start: (page - 1) * pageSize, end: Math.min(page * pageSize, total) };
+}
+function pageNav(total, page, pageSize, onChange) {
+  const { pages, page: cur } = paginate(total, page, pageSize);
+  if (pages <= 1) return "";
+  const btn = (label, target, cls = "") =>
+    `<button class="btn small ${cls}" ${target === cur ? "disabled" : ""} data-p="${target}">${label}</button>`;
+  const parts = [btn("«", 1), btn("‹", cur - 1)];
+  // 省略号逻辑：只显示前3、后3、当前页附近1页
+  const windowSet = new Set([1, 2, 3, pages - 2, pages - 1, pages, cur - 1, cur, cur + 1].filter(x => x >= 1 && x <= pages));
+  let last = 0;
+  for (const n of [...windowSet].sort((a, b) => a - b)) {
+    if (n > last + 1) parts.push(`<span style="color:var(--text-dim)">…</span>`);
+    parts.push(btn(String(n), n, n === cur ? "primary" : ""));
+    last = n;
+  }
+  parts.push(btn("›", cur + 1), btn("»", pages));
+  return `<div class="actions-bar" style="justify-content:center;margin-top:12px;gap:4px">${parts.join("")}</div>`;
+}
+
 
 async function api(method, path, body) {
   const opts = { method, headers: {} };
@@ -65,29 +104,36 @@ $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.v
 let _refreshRunning = false;
 
 async function renderDashboard(root) {
-  // 概览只拉活跃任务：qBittorrent filter=active 只返回速度>0 的任务，
-  // 避开数千历史任务让 JSON+DOM 崩溃
-  const t = await api("GET", "/torrents?filter=active");
-  const list = t.data || [];
-  const active  = list.filter(x => ["downloading", "stalledDL", "metaDL", "checkingDL"].includes(x.state)).length;
-  const seeding = list.filter(x => ["uploading", "stalledUP"].includes(x.state)).length;
-  const dlSpeed = list.reduce((s, x) => s + (x.dlspeed || 0), 0);
-  const upSpeed = list.reduce((s, x) => s + (x.upspeed || 0), 0);
+  const t = await api("GET", "/torrents/stats");
+  const s = t.data || {};
+  const active  = s.activeCount || 0;
+  const paused  = s.pausedUp || 0;
+  const dlSpeed = s.dlSpeed || 0;
+  const upSpeed = s.upSpeed || 0;
 
   root.innerHTML = `
     <div class="grid grid-2">
-      <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">下载中</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${seeding}</div><div class="lbl">做种中</div></div></div>
+      <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">活跃任务</div></div></div>
+      <div class="card"><div class="stat"><div class="num">${paused}</div><div class="lbl">已完成历史</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(dlSpeed)}</div><div class="lbl">当前下载速度</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(upSpeed)}</div><div class="lbl">当前上传速度</div></div></div>
     </div>
-
     <div class="card">
-      <h2>活跃任务（最近 ${Math.min(list.length, 10)} 条）</h2>
-      ${torrentTable(list.slice(0, 10), false)}
+      <h2>最近活跃任务</h2>
+      <div id="dash-latest"><div style="color:var(--text-dim)">加载中…</div></div>
     </div>
   `;
+
+  // 概览只拉 top 10 active，分块渲避免卡
+  const top10 = await api("GET", "/torrents?filter=active&limit=10&sort=added_time&reverse=true");
+  const list = top10.data || [];
+  if (list.length === 0) {
+    $("#dash-latest").innerHTML = '<div class="empty">当前没有活跃任务</div>';
+  } else {
+    $("#dash-latest").innerHTML = torrentTable(list, false);
+  }
 }
+
 
 function stateTag(s) {
   const map = {
@@ -106,43 +152,73 @@ function stateTag(s) {
 }
 
 function torrentTable(list, withActions) {
-  if (!list.length) return '<div class="empty">暂无任务</div>';
-  const rows = list.map(t => {
-    const pct = (t.progress * 100).toFixed(1);
-    return `
-      <tr>
-        <td><div title="${t.name}">${t.name.length > 40 ? t.name.slice(0, 40) + "…" : t.name}</div>
-            <div style="color:var(--text-dim);font-size:11px">${humanSize(t.size)} · ${t.category || "-"}</div>
-        </td>
-        <td>${stateTag(t.state)}</td>
-        <td>
-          <div style="display:flex;align-items:center">
-            <div class="progress-bar"><div style="width:${pct}%"></div></div>
-            <span class="progress-text">${pct}%</span>
-          </div>
-        </td>
-        <td style="white-space:nowrap">${humanSpeed(t.dlspeed)} / ${humanSpeed(t.upspeed)}</td>
-        ${withActions ? `
-        <td>
-          <div class="speed-input">
-            <input type="number" min="0" max="102400" placeholder="KB/s" id="limit-${t.hash}" />
-            <button class="btn small" data-limit="${t.hash}">应用</button>
-          </div>
-        </td>` : ""}
-      </tr>`;
-  }).join("");
-  return `<table>
-    <thead><tr>
-      <th>名称</th><th>状态</th><th>进度</th><th>速度 (下/上)</th>
-      ${withActions ? "<th>上传限速 (KB/s, 0 清除)</th>" : ""}
-    </tr></thead>
-    <tbody>${rows}</tbody></table>`;
+  if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
+  const rows = list.map(t => torrentRow(t, withActions)).join("");
+  return `<table class="torrent-table"><thead><tr>
+    <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
+    <th>下速</th><th>上速</th><th>分类</th>${withActions ? "<th>限速</th>" : ""}
+  </tr></thead><tbody>${rows}</tbody></table>`;
 }
+function torrentRow(t, withActions) {
+  const pct = (t.progress * 100).toFixed(1);
+  return `<tr>
+    <td><div title="${t.name}">${t.name.length > 40 ? t.name.slice(0, 40) + "…" : t.name}</div>
+        <div style="color:var(--text-dim);font-size:11px">${humanSize(t.size)} · ${t.category || "-"}</div></td>
+    <td>${stateTag(t.state)}</td>
+    <td><div class="bar"><div style="width:${pct}%"></div></div>${pct}%</td>
+    <td>${humanSize(t.downloaded)}/${humanSize(t.size)}</td>
+    <td>${humanSpeed(t.dlspeed)}</td>
+    <td>${humanSpeed(t.upspeed)}</td>
+    <td>${t.category || "-"}</td>
+    ${withActions ? `<td><input type="number" id="limit-${t.hash}" style="width:80px" placeholder="KB/s"/>
+        <button class="btn small" data-limit="${t.hash}">应用</button></td>` : ""}
+  </tr>`;
+}
+function filterList(list, kw) {
+  if (!kw) return list;
+  return list.filter(t =>
+    (t.name || "").toLowerCase().includes(kw) ||
+    (t.category || "").toLowerCase().includes(kw) ||
+    (t.tags || "").toLowerCase().includes(kw)
+  );
+}
+function bindLimitButtons() {
+  $$("[data-limit]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
+    btn.addEventListener("click", async () => {
+      const hash = btn.dataset.limit;
+      const input = document.getElementById("limit-" + hash);
+      const v = parseInt(input.value || "0", 10);
+      const r = await api("POST", `/torrents/${hash}/limit`, { uploadLimit: v });
+      toast(r.success ? "已应用限速" : (r.message || "失败"), r.success ? "ok" : "err");
+    });
+  });
+}
+
 
 // ---------- 任务 ----------
 // 任务列表状态（模块级，切 filter/limit 不丢）
-let _torrentsFilter = "active";
-let _torrentsLimit  = 200;
+let _torrentsState = {
+  filter: "active",
+  limit: 500,
+  page: 1,
+  pageSize: 50,
+  search: "",
+  sort: "added_time",
+  reverse: "true",
+  rawList: [],    // 后端返回的原始列表（未过滤未分页）
+};
+
+// 前端友好的窄 filter 选项（带中文标签）
+const torrentFilterOptions = [
+  { value: "active",      label: "活跃（下载+做种）" },
+  { value: "downloading", label: "下载中" },
+  { value: "pausedDL",    label: "暂停下载（未完成）" },
+  { value: "pausedUP",    label: "已完成历史（暂停）" },
+  { value: "stalledUP",   label: "历史（做种停滞）" },
+  { value: "completed",   label: "所有已完成" },
+  { value: "all",         label: "全部（⚠️ 可能很慢）" },
+];
 
 async function renderTorrents(root) {
   root.innerHTML = `
@@ -150,47 +226,100 @@ async function renderTorrents(root) {
       <h2>下载任务 <span class="badge">可配置单任务上传限速</span></h2>
       <div class="actions-bar" style="margin:12px 0 16px 0;gap:12px;flex-wrap:wrap">
         <div class="form-row" style="margin:0"><label>状态</label>
-          <select id="tf-filter" style="min-width:120px">
-            ${["active","downloading","seeding","completed","paused","all"].map(v =>
-              `<option value="${v}" ${v===_torrentsFilter?"selected":""}>${({active:"活跃",downloading:"下载中",seeding:"做种中",completed:"已完成",paused:"暂停",all:"全部"})[v]}</option>`
+          <select id="tf-filter" style="min-width:160px">
+            ${torrentFilterOptions.map(o =>
+              `<option value="${o.value}" ${o.value===_torrentsState.filter?"selected":""}>${o.label}</option>`
             ).join("")}
           </select>
         </div>
         <div class="form-row" style="margin:0"><label>Top</label>
           <select id="tf-limit" style="min-width:100px">
-            ${[50,100,200,500,1000].map(n =>
-              `<option value="${n}" ${n===_torrentsLimit?"selected":""}>${n}</option>`
+            ${[100, 200, 500, 1000, 0].map(n =>
+              `<option value="${n}" ${n===_torrentsState.limit?"selected":""}>${n===0?"全量":n}</option>`
             ).join("")}
           </select>
         </div>
-        <div class="spacer"></div>
+        <div class="form-row" style="margin:0;flex:1"><label>搜索</label>
+          <input type="text" id="tf-search" value="${_torrentsState.search}" placeholder="按任务名 / 分类 / 标签过滤…" style="flex:1;min-width:200px" />
+        </div>
         <button class="btn small" id="tf-reload">刷新</button>
       </div>
+      <div id="tf-progress" style="color:var(--text-dim);font-size:12px;margin-bottom:8px"></div>
       <div id="tf-body"><div style="color:var(--text-dim)">加载中…</div></div>
     </div>
   `;
 
-  const fetchAndRender = async () => {
-    const t = await api("GET", `/torrents?filter=${_torrentsFilter}&limit=${_torrentsLimit}`);
-    const list = t.data || [];
-    $("#tf-body").innerHTML = torrentTable(list, true);
-    $$("[data-limit]", $("#tf-body")).forEach(btn => {
-      btn.addEventListener("click", async () => {
-        const hash = btn.dataset.limit;
-        const input = document.getElementById("limit-" + hash);
-        const v = parseInt(input.value || "0", 10);
-        const r = await api("POST", `/torrents/${hash}/limit`, { uploadLimit: v });
-        toast(r.success ? "已应用限速" : (r.message || "失败"), r.success ? "ok" : "err");
+  // 全量警告
+  if (_torrentsState.filter === "all" || _torrentsState.filter === "completed") {
+    $("#tf-progress").textContent = _torrentsState.filter === "all"
+      ? "⚠️ 全量模式可能加载数千条任务，首次请求会较慢；后端会返回完整列表后再前端分页。"
+      : "⚠️ 已完成包含暂停+做种+停滞，数量可能很多；建议用「已完成历史（暂停）」替代。";
+  }
+
+  // 事件绑定
+  $("#tf-filter").onchange = e => { _torrentsState.filter = e.target.value; _torrentsState.page = 1; fetchTorrents(); };
+  $("#tf-limit").onchange  = e => { _torrentsState.limit  = parseInt(e.target.value, 10); _torrentsState.page = 1; fetchTorrents(); };
+  $("#tf-reload").onclick  = fetchTorrents;
+  $("#tf-search").oninput  = debounce(e => {
+    _torrentsState.search = e.target.value.trim().toLowerCase();
+    _torrentsState.page = 1;
+    renderPage();
+  }, 300);
+
+  async function fetchTorrents() {
+    $("#tf-progress").textContent = "拉取中…";
+    const t = await api("GET",
+      `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
+    if (!t.success) {
+      $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${t.message || "未知错误"}</div>`;
+      $("#tf-progress").textContent = "";
+      return;
+    }
+    _torrentsState.rawList = t.data || [];
+    $("#tf-progress").textContent = `已加载 ${_torrentsState.rawList.length} 条`;
+    renderPage();
+  }
+
+  function renderPage() {
+    const list = filterList(_torrentsState.rawList, _torrentsState.search);
+    const { pages, page, start, end } = paginate(list.length, _torrentsState.page, _torrentsState.pageSize);
+    const pageSlice = list.slice(start, end);
+
+    $("#tf-progress").textContent =
+      `已加载 ${_torrentsState.rawList.length} 条${_torrentsState.search ? `，搜索命中 ${list.length} 条` : ""} · 显示 ${start + 1}-${Math.min(end, list.length)} / ${list.length}`;
+
+    if (pageSlice.length === 0) {
+      $("#tf-body").innerHTML = `<div class="empty">${_torrentsState.search ? "搜索无匹配" : "当前没有任务"}</div>`;
+      return;
+    }
+
+    // 分块渲染表格，每帧 30 行（表格 DOM 重，不能一次渲完）
+    const container = document.createElement("div");
+    chunkRender(pageSlice, 30, (tor, idx) => {
+      const tr = document.createElement("div");
+      tr.innerHTML = torrentTable([tor], true); // 传单个，torrentTable 会包 <table>
+      // 抽出里面的 <tbody> 内容（去掉外层 table 包装）
+      const tbody = tr.querySelector("tbody");
+      return tbody.children[0]; // 直接返回 <tr>
+    }, container, () => {
+      // 包裹成完整 table
+      $("#tf-body").innerHTML = torrentTableHeader(pageSlice.length) + container.innerHTML + pageNav(list.length, page, _torrentsState.pageSize, p => {
+        _torrentsState.page = p; renderPage();
       });
+      bindLimitButtons();
     });
-  };
+  }
 
-  $("#tf-filter").onchange = e => { _torrentsFilter = e.target.value; fetchAndRender(); };
-  $("#tf-limit").onchange  = e => { _torrentsLimit  = parseInt(e.target.value, 10); fetchAndRender(); };
-  $("#tf-reload").onclick  = fetchAndRender;
-
-  fetchAndRender();
+  fetchTorrents();
 }
+
+function torrentTableHeader(count) {
+  return `<table class="torrent-table"><thead><tr>
+    <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
+    <th>下速</th><th>上速</th><th>分类</th>${count > 0 ? "<th>限速</th>" : ""}
+  </tr></thead><tbody>`;
+}
+
 
 // ---------- RSS ----------
 async function renderRSS(root) {
@@ -512,15 +641,21 @@ function onLimDel() {
 // ---------- 状态 ----------
 async function updateStatus() {
   try {
-    const r = await api("GET", "/torrents?filter=active");
+    const r = await api("GET", "/torrents/stats");
     const el = $("#qb-status");
-    if (r.success) { el.textContent = "qb 已连接 · " + (r.data?.length || 0) + " 活跃"; el.className = "status ok"; }
-    else { el.textContent = "qb 未连接"; el.className = "status bad"; }
+    if (r.success) {
+      const s = r.data || {};
+      el.textContent = "qb 已连接 · 活跃 " + (s.activeCount || 0) + " · 历史 " + (s.pausedUp || 0);
+      el.className = "status ok";
+    } else {
+      el.textContent = "qb 未连接"; el.className = "status bad";
+    }
   } catch {
     const el = $("#qb-status");
     el.textContent = "服务异常"; el.className = "status bad";
   }
 }
+
 
 // ---------- 启动 ----------
 switchView("dashboard");
