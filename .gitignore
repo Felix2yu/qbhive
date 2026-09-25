@@ -1,0 +1,15 @@
+# macOS / Linux
+./bthive
+./config.json
+
+# Go vendor
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 本地数据
+data/
+*.db

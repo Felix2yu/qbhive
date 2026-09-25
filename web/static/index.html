@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QBHive — qBittorrent 辅助助手</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <h1>QBHive</h1>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-view="dashboard">概览</button>
+      <button class="tab" data-view="torrents">任务</button>
+      <button class="tab" data-view="rss">RSS</button>
+      <button class="tab" data-view="settings">设置</button>
+    </nav>
+    <div class="status" id="qb-status">…</div>
+  </header>
+
+  <main id="content"></main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
