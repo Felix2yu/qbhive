@@ -61,28 +61,29 @@ async function switchView(name) {
 $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.view)));
 
 // ---------- 概览 ----------
+// 防抖：同一时刻只跑一次自动刷新
+let _refreshRunning = false;
+
 async function renderDashboard(root) {
-  const t = await api("GET", "/torrents");
+  // 概览只拉活跃任务：qBittorrent filter=active 只返回速度>0 的任务，
+  // 避开数千历史任务让 JSON+DOM 崩溃
+  const t = await api("GET", "/torrents?filter=active");
   const list = t.data || [];
-  const total = list.length;
-  const active = list.filter(x => ["downloading", "stalledDL", "metaDL"].includes(x.state)).length;
-  const uploading = list.filter(x => x.state === "uploading").length;
-  const done = list.filter(x => x.state === "pausedUP" || x.state === "stalledUP" || x.state === "uploading").length;
+  const active  = list.filter(x => ["downloading", "stalledDL", "metaDL", "checkingDL"].includes(x.state)).length;
+  const seeding = list.filter(x => ["uploading", "stalledUP"].includes(x.state)).length;
   const dlSpeed = list.reduce((s, x) => s + (x.dlspeed || 0), 0);
   const upSpeed = list.reduce((s, x) => s + (x.upspeed || 0), 0);
 
   root.innerHTML = `
-    <div class="grid grid-3">
-      <div class="card"><div class="stat"><div class="num">${total}</div><div class="lbl">任务总数</div></div></div>
+    <div class="grid grid-2">
       <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">下载中</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${uploading}</div><div class="lbl">做种中</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${done}</div><div class="lbl">已完成</div></div></div>
+      <div class="card"><div class="stat"><div class="num">${seeding}</div><div class="lbl">做种中</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(dlSpeed)}</div><div class="lbl">当前下载速度</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(upSpeed)}</div><div class="lbl">当前上传速度</div></div></div>
     </div>
 
     <div class="card">
-      <h2>最近的任务</h2>
+      <h2>活跃任务（最近 ${Math.min(list.length, 10)} 条）</h2>
       ${torrentTable(list.slice(0, 10), false)}
     </div>
   `;
@@ -139,24 +140,56 @@ function torrentTable(list, withActions) {
 }
 
 // ---------- 任务 ----------
+// 任务列表状态（模块级，切 filter/limit 不丢）
+let _torrentsFilter = "active";
+let _torrentsLimit  = 200;
+
 async function renderTorrents(root) {
-  const t = await api("GET", "/torrents");
-  const list = t.data || [];
   root.innerHTML = `
     <div class="card">
       <h2>下载任务 <span class="badge">可配置单任务上传限速</span></h2>
-      ${torrentTable(list, true)}
+      <div class="actions-bar" style="margin:12px 0 16px 0;gap:12px;flex-wrap:wrap">
+        <div class="form-row" style="margin:0"><label>状态</label>
+          <select id="tf-filter" style="min-width:120px">
+            ${["active","downloading","seeding","completed","paused","all"].map(v =>
+              `<option value="${v}" ${v===_torrentsFilter?"selected":""}>${({active:"活跃",downloading:"下载中",seeding:"做种中",completed:"已完成",paused:"暂停",all:"全部"})[v]}</option>`
+            ).join("")}
+          </select>
+        </div>
+        <div class="form-row" style="margin:0"><label>Top</label>
+          <select id="tf-limit" style="min-width:100px">
+            ${[50,100,200,500,1000].map(n =>
+              `<option value="${n}" ${n===_torrentsLimit?"selected":""}>${n}</option>`
+            ).join("")}
+          </select>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn small" id="tf-reload">刷新</button>
+      </div>
+      <div id="tf-body"><div style="color:var(--text-dim)">加载中…</div></div>
     </div>
   `;
-  $$("[data-limit]").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const hash = btn.dataset.limit;
-      const input = document.getElementById("limit-" + hash);
-      const v = parseInt(input.value || "0", 10);
-      const r = await api("POST", `/torrents/${hash}/limit`, { uploadLimit: v });
-      toast(r.success ? "已应用限速" : (r.message || "失败"), r.success ? "ok" : "err");
+
+  const fetchAndRender = async () => {
+    const t = await api("GET", `/torrents?filter=${_torrentsFilter}&limit=${_torrentsLimit}`);
+    const list = t.data || [];
+    $("#tf-body").innerHTML = torrentTable(list, true);
+    $$("[data-limit]", $("#tf-body")).forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const hash = btn.dataset.limit;
+        const input = document.getElementById("limit-" + hash);
+        const v = parseInt(input.value || "0", 10);
+        const r = await api("POST", `/torrents/${hash}/limit`, { uploadLimit: v });
+        toast(r.success ? "已应用限速" : (r.message || "失败"), r.success ? "ok" : "err");
+      });
     });
-  });
+  };
+
+  $("#tf-filter").onchange = e => { _torrentsFilter = e.target.value; fetchAndRender(); };
+  $("#tf-limit").onchange  = e => { _torrentsLimit  = parseInt(e.target.value, 10); fetchAndRender(); };
+  $("#tf-reload").onclick  = fetchAndRender;
+
+  fetchAndRender();
 }
 
 // ---------- RSS ----------
@@ -479,9 +512,9 @@ function onLimDel() {
 // ---------- 状态 ----------
 async function updateStatus() {
   try {
-    const r = await api("GET", "/torrents");
+    const r = await api("GET", "/torrents?filter=active");
     const el = $("#qb-status");
-    if (r.success) { el.textContent = "qb 已连接 · " + (r.data?.length || 0) + " 任务"; el.className = "status ok"; }
+    if (r.success) { el.textContent = "qb 已连接 · " + (r.data?.length || 0) + " 活跃"; el.className = "status ok"; }
     else { el.textContent = "qb 未连接"; el.className = "status bad"; }
   } catch {
     const el = $("#qb-status");
@@ -493,7 +526,11 @@ async function updateStatus() {
 switchView("dashboard");
 updateStatus();
 setInterval(updateStatus, 30000);
-// 概览/任务页自动刷新
-setInterval(() => {
-  if (currentView === "dashboard" || currentView === "torrents") switchView(currentView);
-}, 15000);
+// 概览/任务页自动刷新（防抖：上次请求没回来就跳过；间隔 8s，active 下足够快）
+setInterval(async () => {
+  if (_refreshRunning) return;
+  if (currentView === "dashboard" || currentView === "torrents") {
+    _refreshRunning = true;
+    try { await switchView(currentView); } finally { _refreshRunning = false; }
+  }
+}, 8000);
