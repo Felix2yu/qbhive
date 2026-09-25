@@ -283,3 +283,89 @@ func TestClient_GetTorrentFiles_SuccessAndParseError(t *testing.T) {
 		t.Error("expected parse error on bad JSON")
 	}
 }
+
+// ============ 认证失败字符串嗅探自动重登（用户报的 P0 级 bug） ============
+
+// 模拟 qB 先返回 "Fails."（200 OK + 认证失败字符串），然后重登成功正常返回 JSON 数组
+func TestClient_AuthFailureString_AutoRelogin(t *testing.T) {
+	loginCount := 0
+	infoCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		loginCount++
+		w.Header().Set("Set-Cookie", "SID=test")
+		w.Write([]byte("Ok."))
+	})
+	mux.HandleFunc("/api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
+		infoCount++
+		// 第一次返回 qBittorrent 典型的认证失败字符串（200 OK + 纯 JSON string）
+		if infoCount == 1 {
+			w.WriteHeader(200)
+			w.Write([]byte(`"Fails."`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-bittorrent")
+		w.Write([]byte(`[{"hash":"h1","name":"OK.mkv","state":"downloading","progress":1}]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "u", "p", "")
+	list, err := cli.GetTorrents()
+	if err != nil {
+		t.Fatalf("GetTorrents should auto re-login: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "OK.mkv" {
+		t.Errorf("expected auto-relogin to return real data: %v", list)
+	}
+	if loginCount != 2 {
+		t.Errorf("expected 2 logins (initial + auto relogin), got %d", loginCount)
+	}
+	if infoCount != 2 {
+		t.Errorf("expected 2 info calls (fails + success), got %d", infoCount)
+	}
+}
+
+// 非认证失败的字符串（比如 qB 500 报错）不应触发重登循环
+func TestClient_NonAuthErrorString_NotAutoRelogin(t *testing.T) {
+	loginCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		loginCount++
+		w.Header().Set("Set-Cookie", "SID=test")
+		w.Write([]byte("Ok."))
+	})
+	mux.HandleFunc("/api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
+		// 非认证失败的 JSON string 值（包含 "error" 但不含 auth 关键词）
+		w.WriteHeader(200)
+		w.Write([]byte(`"internal error"`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "u", "p", "")
+	_, err := cli.GetTorrents()
+	if err == nil {
+		t.Error("expected error response")
+	}
+	// 只应调用 login 一次（初始的），"internal error" 不该触发重登
+	if loginCount != 1 {
+		t.Errorf("expected only 1 login (no auto relogin), got %d", loginCount)
+	}
+}
+
+// 认证接口自身（login）不应触发嗅探重登死循环
+func TestClient_LoginAPI_NoAuthSniff(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		// 故意返回 "Fails." 但 login 是白名单接口，不会触发重登
+		w.Write([]byte(`"Fails."`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "u", "p", "")
+	if err := cli.login(); err == nil {
+		t.Error("expected login failure")
+	}
+}

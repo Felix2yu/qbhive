@@ -174,16 +174,6 @@ func setupTestServer(t *testing.T, qbURL string, authToken string) *Server {
 	return srv
 }
 
-// ginRecorder 方便构造 httptest 调用
-func ginTest(cb func(c *gin.Context)) (*httptest.ResponseRecorder, *gin.Engine) {
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	r.GET("/test", cb)
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/test", nil)
-	r.ServeHTTP(w, req)
-	return w, r
-}
 
 func TestAuthMiddleware_NoTokenAllowsAll(t *testing.T) {
 	s := setupTestServer(t, "", "")

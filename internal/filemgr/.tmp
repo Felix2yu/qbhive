@@ -1,0 +1,31 @@
+{
+  "qbittorrent": {
+    "url": "http://127.0.0.1:8080",
+    "username": "admin",
+    "password": "admin",
+    "apiKey": ""
+  },
+  "server": {
+    "listen": ":8088"
+  },
+  "notifier": {
+    "enabled": false,
+    "appriseUrls": null,
+    "filterTitle": ""
+  },
+  "rss": {
+    "enabled": false,
+    "interval": 15,
+    "proxies": null,
+    "feeds": null
+  },
+  "limiter": {
+    "enabled": false,
+    "interval": 10,
+    "rules": null
+  },
+  "fileManager": {
+    "enabled": false,
+    "scanInterval": 15
+  }
+}

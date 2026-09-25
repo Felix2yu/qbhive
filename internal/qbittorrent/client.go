@@ -48,10 +48,72 @@ func (c *Client) SetCredentials(baseURL, user, pass, apiKey string) {
 func (c *Client) usesAPIKey() bool { return c.apiKey != "" }
 
 func (c *Client) do(method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	resp, err := c._doRaw(method, path, body, contentType)
+	if err != nil {
+		return nil, err
+	}
+
+	// qBittorrent 在 cookie 过期时**不一定返回 401/403**，可能返回 200 + `"Fails."` / `"Unauthorized"` 字符串
+	// 这里统一嗅探 body：如果看起来是认证失败，自动重登 + 重试一次
+	if path != "/api/v2/auth/login" && c._looksAuthFailure(resp) {
+		_ = resp.Body.Close()
+		logger.Warn.Printf("qb: auth failure detected (status=%d body-sniffed), re-login and retry %s %s", resp.StatusCode, method, path)
+		c.cookie = ""
+		if c.login() != nil {
+			return nil, fmt.Errorf("auto re-login failed")
+		}
+		return c._doRaw(method, path, body, contentType)
+	}
+	return resp, nil
+}
+
+// _looksAuthFailure 嗅探 qBittorrent 响应体前 200 字节，判断是否为认证失败字符串
+// qBittorrent 在 cookie / API key 失效时会返回 200 OK + 类似 "Fails." / "Unauthorized" 这种纯 JSON string 值
+// 这会让我们的 json.Unmarshal(..., &[]models.QBTorrent) 报 "invalid character '"' looking for beginning of value"
+func (c *Client) _looksAuthFailure(resp *http.Response) bool {
+	// 先嗅探 200 字节，同时把完整 body 用 tee 存到 buffer 里，让后续 ReadAll 正常读到
+	peek := make([]byte, 200)
+	n, _ := io.ReadFull(resp.Body, peek)
+	if n == 0 {
+		return false
+	}
+	sniff := strings.ToLower(string(peek[:n]))
+	// 认证失败特征：以 " 开头（JSON string）且包含 fails / unauthorized / access / forbidden
+	if peek[0] == '"' && (strings.Contains(sniff, "fails") || strings.Contains(sniff, "unauthorized") || strings.Contains(sniff, "access") || strings.Contains(sniff, "forbidden")) {
+		// 把 peek 的内容 + 剩余 body 拼回去
+		rest, _ := io.ReadAll(resp.Body)
+		resp.Body = io.NopCloser(bytes.NewReader(append(peek[:n], rest...)))
+		return true
+	}
+	// 把 peek 拼回去让后续正常 Read
+	rest, _ := io.ReadAll(resp.Body)
+	resp.Body = io.NopCloser(bytes.NewReader(append(peek[:n], rest...)))
+	return false
+}
+
+// _doRaw 执行一次 HTTP 请求（含 cookie 自动登录 / 401-403 重登），返回原始 response
+func (c *Client) _doRaw(method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	// body 可能是一次性 Reader（如 POST 表单），如果为重登需要重放则必须可 rewind
+	// 这里用 teeReader 先把 body 整体读到内存，后续两次请求都从内存读
+	var bodyBytes []byte
+	if body != nil {
+		b, err := io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyBytes = b
+	}
+	makeBody := func() io.Reader {
+		if bodyBytes == nil {
+			return nil
+		}
+		return bytes.NewReader(bodyBytes)
+	}
+
 	var req *http.Request
 	var err error
 	if c.usesAPIKey() {
-		req, err = http.NewRequest(method, c.baseURL+path, body)
+		req, err = http.NewRequest(method, c.baseURL+path, makeBody())
 		if err != nil {
 			return nil, err
 		}
@@ -62,7 +124,7 @@ func (c *Client) do(method, path string, body io.Reader, contentType string) (*h
 				return nil, err
 			}
 		}
-		req, err = http.NewRequest(method, c.baseURL+path, body)
+		req, err = http.NewRequest(method, c.baseURL+path, makeBody())
 		if err != nil {
 			return nil, err
 		}
@@ -84,7 +146,7 @@ func (c *Client) do(method, path string, body io.Reader, contentType string) (*h
 		if err := c.login(); err != nil {
 			return nil, err
 		}
-		req2, err := http.NewRequest(method, c.baseURL+path, body)
+		req2, err := http.NewRequest(method, c.baseURL+path, makeBody())
 		if err != nil {
 			return nil, err
 		}
