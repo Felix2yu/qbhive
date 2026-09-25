@@ -25,8 +25,6 @@ type Client struct {
 	cookie  string
 }
 
-// New 创建客户端。apiKey 非空时优先走 Bearer 认证（qBittorrent v5.2.0+），
-// 否则走 cookie 会话方式，user/pass 必填。
 func New(baseURL, user, pass, apiKey string) *Client {
 	jar, _ := cookiejar.New(nil)
 	return &Client{
@@ -38,17 +36,21 @@ func New(baseURL, user, pass, apiKey string) *Client {
 	}
 }
 
-// usesAPIKey 判断是否走 Bearer 模式
-func (c *Client) usesAPIKey() bool {
-	return c.apiKey != ""
+// SetCredentials 热替换 qB 连接参数（配置改动时调用，避免重建 client 指针）
+func (c *Client) SetCredentials(baseURL, user, pass, apiKey string) {
+	c.baseURL = strings.TrimRight(baseURL, "/")
+	c.user = user
+	c.pass = pass
+	c.apiKey = strings.TrimSpace(apiKey)
+	c.cookie = "" // 换凭据后必须重新登录
 }
+
+func (c *Client) usesAPIKey() bool { return c.apiKey != "" }
 
 func (c *Client) do(method, path string, body io.Reader, contentType string) (*http.Response, error) {
 	var req *http.Request
 	var err error
-
 	if c.usesAPIKey() {
-		// Bearer 模式：无状态，直接带 Authorization 头，跳过 login/cookie
 		req, err = http.NewRequest(method, c.baseURL+path, body)
 		if err != nil {
 			return nil, err
@@ -66,7 +68,6 @@ func (c *Client) do(method, path string, body io.Reader, contentType string) (*h
 		}
 		req.Header.Set("Cookie", c.cookie)
 	}
-
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -77,8 +78,6 @@ func (c *Client) do(method, path string, body io.Reader, contentType string) (*h
 		}
 		return nil, err
 	}
-
-	// cookie 模式下遇到 401/403，重新 login 重试一次
 	if !c.usesAPIKey() && (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized) {
 		c.cookie = ""
 		_ = resp.Body.Close()
@@ -132,10 +131,7 @@ func (c *Client) login() error {
 	return nil
 }
 
-func mustParse(s string) *url.URL {
-	u, _ := url.Parse(s)
-	return u
-}
+func mustParse(s string) *url.URL { u, _ := url.Parse(s); return u }
 
 func (c *Client) TestConnection() error {
 	resp, err := c.do("GET", "/api/v2/app/version", nil, "")
@@ -149,9 +145,34 @@ func (c *Client) TestConnection() error {
 	return nil
 }
 
-// GetTorrents 获取 torrent 列表
-func (c *Client) GetTorrents() ([]models.QBTorrent, error) {
-	resp, err := c.do("GET", "/api/v2/torrents/info", nil, "")
+// GetTorrents 拉 torrent 列表，透传给 qBittorrent 原生参数：
+//   - filter: active/downloading/seeding/completed/paused/all 等
+//   - sort:   name/size/progress/upspeed/dlspeed/added_time 等
+//   - reverse: 1 或 true 表示倒序
+// 所有参数都是可选的；filter/sort 为空或 all 时不拼 query。
+// 注意：qBittorrent 原生不支持 limit/offset，分页由上层（server 或前端）负责。
+// GetTorrents 拉 torrent 列表。参数顺序：filter, sort, reverse；都是可选的，
+// 用 variadic 兼容旧调用点。支持值见 qBittorrent WebUI API 文档。
+func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
+	var filter, sort, reverse string
+	if len(params) > 0 { filter = params[0] }
+	if len(params) > 1 { sort = params[1] }
+	if len(params) > 2 { reverse = params[2] }
+	v := url.Values{}
+	if f := strings.TrimSpace(filter); f != "" && f != "all" {
+		v.Set("filter", f)
+	}
+	if s := strings.TrimSpace(sort); s != "" {
+		v.Set("sort", s)
+	}
+	if r := strings.TrimSpace(reverse); r != "" {
+		v.Set("reverse", r)
+	}
+	path := "/api/v2/torrents/info"
+	if len(v) > 0 {
+		path += "?" + v.Encode()
+	}
+	resp, err := c.do("GET", path, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +188,32 @@ func (c *Client) GetTorrents() ([]models.QBTorrent, error) {
 	return list, nil
 }
 
-// GetTorrentFiles 获取 torrent 的文件列表
+// TransferInfo 是 qBittorrent /api/v2/transfer/info 的返回
+type TransferInfo struct {
+	DlSpeed      int64 `json:"dl_speed"`
+	UpSpeed      int64 `json:"up_speed"`
+	DlSpeedLimit int64 `json:"dl_speed_limit"`
+	UpSpeedLimit int64 `json:"up_speed_limit"`
+}
+
+// GetTransferInfo 拉全局速度信息（很轻量，不走 info 大接口）
+func (c *Client) GetTransferInfo() (*TransferInfo, error) {
+	resp, err := c.do("GET", "/api/v2/transfer/info", nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var ti TransferInfo
+	if err := json.Unmarshal(data, &ti); err != nil {
+		return nil, err
+	}
+	return &ti, nil
+}
+
 func (c *Client) GetTorrentFiles(hash string) ([]models.QBFile, error) {
 	resp, err := c.do("GET", "/api/v2/torrents/files?hash="+url.QueryEscape(hash), nil, "")
 	if err != nil {
@@ -185,8 +231,6 @@ func (c *Client) GetTorrentFiles(hash string) ([]models.QBFile, error) {
 	return list, nil
 }
 
-// SetUploadLimit 对单个 torrent 设置上传速度限制（bytes/s）
-// limit 为 -1 表示无限制
 func (c *Client) SetUploadLimit(hash string, limitBytesPerSec int64) error {
 	form := url.Values{}
 	form.Set("hashes", hash)
@@ -204,7 +248,62 @@ func (c *Client) SetUploadLimit(hash string, limitBytesPerSec int64) error {
 	return nil
 }
 
-// AddTorrent 上传 torrent 文件
+// PauseTorrents 暂停一个或多个 torrent（hashes 逗号分隔）
+func (c *Client) PauseTorrents(hashes ...string) error {
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	resp, err := c.do("POST", "/api/v2/torrents/pause",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("pause status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// ResumeTorrents 恢复一个或多个 torrent
+func (c *Client) ResumeTorrents(hashes ...string) error {
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	resp, err := c.do("POST", "/api/v2/torrents/resume",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("resume status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// RenameFile 通过 qB API 重命名 torrent 内的文件/子目录（qB 4.6+）。
+// oldPath/newPath 是 torrent 内的相对路径（例："Movie/Video.mkv" -> "Video.mkv"）。
+// 调用前应先暂停 torrent，避免做种中断。
+func (c *Client) RenameFile(hash, oldPath, newPath string) error {
+	form := url.Values{}
+	form.Set("hash", hash)
+	form.Set("oldPath", oldPath)
+	form.Set("newPath", newPath)
+	resp, err := c.do("POST", "/api/v2/torrents/renameFile",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("renameFile status=%d body=%s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int) error {
 	var buf bytes.Buffer
 	boundary := "qbhive"
@@ -220,7 +319,6 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 		}
 		buf.WriteString("\r\n")
 	}
-
 	writeFormField("torrents", "", true, "qbhive.torrent", torrentData)
 	if savePath != "" {
 		writeFormField("savepath", savePath, false, "", nil)
@@ -245,7 +343,6 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 		b, _ := io.ReadAll(resp.Body)
 		logger.Warn.Printf("AddTorrent status=%d body=%s", resp.StatusCode, string(b))
 	}
-
 	if uploadLimitKB > 0 {
 		go func() {
 			time.Sleep(3 * time.Second)
@@ -256,7 +353,7 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 }
 
 func (c *Client) applyLatestUploadLimit(uploadLimitKB int) {
-	list, err := c.GetTorrents()
+	list, err := c.GetTorrents("downloading", "", "")
 	if err != nil || len(list) == 0 {
 		return
 	}

@@ -16,12 +16,43 @@ type Manager struct {
 	cfg    *config.Manager
 	client *qb.Client
 	stop   chan struct{}
+
+	// 运行中的 ticker 控制
+	tickerStop chan struct{}
+
 	// 上一周期已完成的 hash 集合，避免重复通知/处理
 	done map[string]bool
 }
 
 func New(cfg *config.Manager, client *qb.Client) *Manager {
 	return &Manager{cfg: cfg, client: client, stop: make(chan struct{}), done: make(map[string]bool)}
+}
+
+// SetClient 热替换 qb 客户端
+func (m *Manager) SetClient(c *qb.Client) {
+	m.client = c
+}
+
+// Reload 根据最新配置重启（或停止）扫描轮询
+func (m *Manager) Reload(c *qb.Client) {
+	if c != nil {
+		m.client = c
+	}
+	if m.tickerStop != nil {
+		close(m.tickerStop)
+		m.tickerStop = nil
+	}
+	cfg := m.cfg.Get().FileManager
+	if !cfg.Enabled {
+		logger.Info.Println("FileManager disabled (via reload)")
+		return
+	}
+	interval := time.Duration(cfg.ScanInterval) * time.Second
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	logger.Info.Printf("FileManager reloaded, interval=%s", interval)
+	m.runTicker(interval)
 }
 
 func (m *Manager) Start() {
@@ -35,11 +66,19 @@ func (m *Manager) Start() {
 		interval = 15 * time.Second
 	}
 	logger.Info.Printf("FileManager started, interval=%s", interval)
+	m.runTicker(interval)
+}
+
+func (m *Manager) runTicker(interval time.Duration) {
+	m.tickerStop = make(chan struct{})
+	stop := m.tickerStop
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
+			case <-stop:
+				return
 			case <-m.stop:
 				return
 			case <-ticker.C:
@@ -60,7 +99,8 @@ func (m *Manager) scan() {
 		return
 	}
 	for _, t := range list {
-		if t.State != "pausedUP" && t.State != "stalledUP" && t.State != "uploading" {
+		// 只处理已暂停的已完成任务，避免破坏正在做种/下载的 torrent 数据库
+		if t.State != "pausedUP" {
 			continue
 		}
 		if m.done[t.Hash] {
@@ -104,23 +144,50 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 		return
 	}
 
-	src := filepath.Join(torrentDir, files[0].Name())
-	dst := filepath.Join(t.SavePath, files[0].Name())
-	if _, err := os.Stat(dst); err == nil {
-		// 目标已存在，加后缀
-		ext := filepath.Ext(files[0].Name())
-		base := files[0].Name()[:len(files[0].Name())-len(ext)]
-		dst = filepath.Join(t.SavePath, base+"_"+t.Hash[:8]+ext)
+	fileName := files[0].Name()
+	torrentRelativeOld := t.Name + "/" + fileName // qB renameFile 需要的 torrent 内相对路径
+	torrentRelativeNew := fileName                // 目标：直接放到 torrent 根目录（即 savePath 下）
+
+	// 1) 先通过 qB API 暂停 torrent（已经是 pausedUP，这里只是防御）
+	if err := m.client.PauseTorrents(t.Hash); err != nil {
+		logger.Warn.Printf("FileManager pause torrent %s failed: %v", t.Name, err)
+		// 继续尝试，失败再回退
 	}
-	if err := os.Rename(src, dst); err != nil {
-		logger.Warn.Printf("FileManager rename %s -> %s failed: %v", src, dst, err)
-		return
+
+	// 2) 走 qB renameFile API，让 qB 感知文件移动，保护做种一致性
+	done := false
+	if err := m.client.RenameFile(t.Hash, torrentRelativeOld, torrentRelativeNew); err != nil {
+		logger.Warn.Printf("FileManager qB renameFile failed (%s -> %s): %v, falling back to local os.Rename",
+			torrentRelativeOld, torrentRelativeNew, err)
+		// 回退：本地 os.Rename（仅在 qB renameFile 不可用时，且任务已暂停）
+		src := filepath.Join(torrentDir, fileName)
+		dst := filepath.Join(t.SavePath, fileName)
+		if _, e := os.Stat(dst); e == nil {
+			ext := filepath.Ext(fileName)
+			base := fileName[:len(fileName)-len(ext)]
+			dst = filepath.Join(t.SavePath, base+"_"+t.Hash[:8]+ext)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			logger.Warn.Printf("FileManager local rename %s -> %s failed: %v", src, dst, err)
+			// 失败尝试恢复 torrent，避免用户以为还在暂停
+			_ = m.client.ResumeTorrents(t.Hash)
+			return
+		}
+	} else {
+		done = true
 	}
-	// 再尝试移除空目录
+
+	// 3) 恢复 torrent（仅针对 qB renameFile 成功 / 本地回退成功）
+	if err := m.client.ResumeTorrents(t.Hash); err != nil {
+		logger.Warn.Printf("FileManager resume torrent %s failed: %v", t.Name, err)
+	}
+
+	// 4) 尝试移除空目录（qB renameFile 不会自动清理空目录）
 	if err := os.Remove(torrentDir); err != nil {
 		logger.Debug.Printf("FileManager remove dir %s failed: %v", torrentDir, err)
 	} else {
-		logger.Info.Printf("FileManager moved %s -> %s", files[0].Name(), dst)
+		logger.Info.Printf("FileManager moved %s -> %s (%s)", torrentRelativeOld, torrentRelativeNew,
+			map[bool]string{true: "via qB API", false: "fallback local"}[done])
 	}
 }
 

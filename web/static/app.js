@@ -5,6 +5,14 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const API = window.location.origin + "/api";
 const genID = () => Math.random().toString(36).slice(2, 10);
 
+// escapeHTML 防 XSS：把外部可控文本安全地嵌入 innerHTML / 属性
+function escapeHTML(s) {
+  if (s == null) return "";
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
 function toast(msg, type = "ok") {
   const el = document.createElement("div");
   el.className = `toast ${type}`;
@@ -12,16 +20,108 @@ function toast(msg, type = "ok") {
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 2500);
 }
+// --- 工具函数 ---
+function debounce(fn, wait = 300) {
+  let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
+}
+function chunkRender(items, perFrame, renderItem, container, done) {
+  let i = 0; container.innerHTML = "";
+  function step() {
+    const frag = document.createDocumentFragment();
+    const end = Math.min(i + perFrame, items.length);
+    for (; i < end; i++) frag.appendChild(renderItem(items[i], i));
+    container.appendChild(frag);
+    if (i < items.length) requestAnimationFrame(step);
+    else done && done();
+  }
+  requestAnimationFrame(step);
+}
+function paginate(total, page, pageSize) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  page = Math.max(1, Math.min(page, pages));
+  return { pages, page, start: (page - 1) * pageSize, end: Math.min(page * pageSize, total) };
+}
+function pageNav(total, page, pageSize, onChange) {
+  const { pages, page: cur } = paginate(total, page, pageSize);
+  if (pages <= 1) return "";
+  const btn = (label, target, cls = "") =>
+    `<button class="btn small ${cls}" ${target === cur ? "disabled" : ""} data-p="${target}">${label}</button>`;
+  const parts = [btn("«", 1), btn("‹", cur - 1)];
+  // 省略号逻辑：只显示前3、后3、当前页附近1页
+  const windowSet = new Set([1, 2, 3, pages - 2, pages - 1, pages, cur - 1, cur, cur + 1].filter(x => x >= 1 && x <= pages));
+  let last = 0;
+  for (const n of [...windowSet].sort((a, b) => a - b)) {
+    if (n > last + 1) parts.push(`<span style="color:var(--text-dim)">…</span>`);
+    parts.push(btn(String(n), n, n === cur ? "primary" : ""));
+    last = n;
+  }
+  parts.push(btn("›", cur + 1), btn("»", pages));
+  return `<div class="actions-bar" style="justify-content:center;margin-top:12px;gap:4px">${parts.join("")}</div>`;
+}
+
 
 async function api(method, path, body) {
-  const opts = { method, headers: {} };
+  const opts = { method, headers: {}, credentials: "include" };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(API + path, opts);
+  let resp = await fetch(API + path, opts);
+  if (resp.status === 401) {
+    // 需要登录
+    const ok = await showLoginOverlay();
+    if (!ok) {
+      toast("需要 token 才能访问", "err");
+      return { success: false, message: "unauthorized" };
+    }
+    // 登录成功后重试
+    resp = await fetch(API + path, opts);
+  }
   const data = await resp.json();
   return data;
+}
+
+// 登录覆盖层：输入 token，成功后 set cookie
+function showLoginOverlay() {
+  return new Promise(resolve => {
+    const existing = document.getElementById("__qbhive_login__");
+    if (existing) existing.remove();
+
+    const wrap = document.createElement("div");
+    wrap.id = "__qbhive_login__";
+    wrap.innerHTML = `
+      <div style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99999">
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:24px;min-width:320px">
+          <h3 style="margin:0 0 12px">🔒 需要访问 token</h3>
+          <p style="color:var(--text-dim);font-size:12px;margin:0 0 12px">
+            服务端设置了 <code>QBHIVE_TOKEN</code> 环境变量，请输入对应的访问 token。
+          </p>
+          <input id="__qbhive_token__" type="password" placeholder="token" style="width:100%;padding:8px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none" />
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+            <button id="__qbhive_cancel__" class="btn">取消</button>
+            <button id="__qbhive_ok__" class="btn primary">登录</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const input = wrap.querySelector("#__qbhive_token__");
+    input.focus();
+
+    const finish = (ok) => { wrap.remove(); resolve(ok); };
+    wrap.querySelector("#__qbhive_cancel__").onclick = () => finish(false);
+    wrap.querySelector("#__qbhive_ok__").onclick = async () => {
+      const token = input.value.trim();
+      if (!token) return;
+      const r = await fetch(API + "/login", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      finish(r.ok);
+    };
+    input.onkeydown = (e) => { if (e.key === "Enter") wrap.querySelector("#__qbhive_ok__").click(); };
+  });
 }
 
 function humanSize(n) {
@@ -35,6 +135,64 @@ function humanSize(n) {
 function humanSpeed(bps) {
   if (!bps) return "0 KB/s";
   return humanSize(bps) + "/s";
+}
+
+// 前端轻量校验：返回错误消息字符串，空串表示通过
+function validateConfigJS(cfg) {
+  const c = cfg || {};
+  // qB URL
+  if (c.qbittorrent && c.qbittorrent.url && c.qbittorrent.url.trim()) {
+    const u = c.qbittorrent.url.trim();
+    if (!/^https?:\/\//.test(u)) return "qBittorrent URL 必须以 http:// 或 https:// 开头";
+  }
+  // 间隔字段
+  if (c.rss && c.rss.enabled) {
+    if ((c.rss.interval || 0) < 1) return "RSS 刷新间隔必须 ≥ 1 分钟";
+  }
+  if (c.limiter && c.limiter.enabled) {
+    if ((c.limiter.interval || 0) < 1) return "限速器刷新间隔必须 ≥ 1 秒";
+  }
+  if (c.fileManager && c.fileManager.enabled) {
+    if ((c.fileManager.scanInterval || 0) < 1) return "文件管理扫描间隔必须 ≥ 1 秒";
+  }
+  // Apprise URL 协议
+  if (c.notifier) {
+    const urls = (c.notifier.appriseUrls || []).map(s => (s || "").trim()).filter(Boolean);
+    for (const u of urls) {
+      if (!u.includes("://")) return `通知 URL 缺少协议前缀: ${u.slice(0, 60)}`;
+    }
+  }
+  // RSS feeds
+  if (c.rss) {
+    for (const feed of (c.rss.feeds || [])) {
+      if (feed.url && feed.url.trim() && !feed.url.trim().startsWith("http")) {
+        return `RSS 订阅源 "${feed.name || feed.url}" 的 URL 必须以 http 开头`;
+      }
+      for (const r of (feed.rules || [])) {
+        if (r.mode === "regex") {
+          if (r.include && r.include.trim()) {
+            try { new RegExp(r.include); } catch (e) {
+              return `订阅源 ${feed.name || ""} / 规则 ${r.name || ""} 的 include 正则无效: ${e.message}`;
+            }
+          }
+          if (r.exclude && r.exclude.trim()) {
+            try { new RegExp(r.exclude); } catch (e) {
+              return `订阅源 ${feed.name || ""} / 规则 ${r.name || ""} 的 exclude 正则无效: ${e.message}`;
+            }
+          }
+        }
+      }
+    }
+  }
+  // Limiter rules
+  for (const r of ((c.limiter && c.limiter.rules) || [])) {
+    if (r.match && r.match.trim()) {
+      try { new RegExp(r.match); } catch (e) {
+        return `限速规则 "${r.name || ""}" 的 match 正则无效: ${e.message}`;
+      }
+    }
+  }
+  return "";
 }
 
 // ---------- 路由 ----------
@@ -61,32 +219,40 @@ async function switchView(name) {
 $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.view)));
 
 // ---------- 概览 ----------
+// 防抖：同一时刻只跑一次自动刷新
+let _refreshRunning = false;
+
 async function renderDashboard(root) {
-  const t = await api("GET", "/torrents");
-  const list = t.data || [];
-  const total = list.length;
-  const active = list.filter(x => ["downloading", "stalledDL", "metaDL"].includes(x.state)).length;
-  const uploading = list.filter(x => x.state === "uploading").length;
-  const done = list.filter(x => x.state === "pausedUP" || x.state === "stalledUP" || x.state === "uploading").length;
-  const dlSpeed = list.reduce((s, x) => s + (x.dlspeed || 0), 0);
-  const upSpeed = list.reduce((s, x) => s + (x.upspeed || 0), 0);
+  const t = await api("GET", "/torrents/stats");
+  const s = t.data || {};
+  const active  = s.activeCount || 0;
+  const paused  = s.pausedUp || 0;
+  const dlSpeed = s.dlSpeed || 0;
+  const upSpeed = s.upSpeed || 0;
 
   root.innerHTML = `
-    <div class="grid grid-3">
-      <div class="card"><div class="stat"><div class="num">${total}</div><div class="lbl">任务总数</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">下载中</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${uploading}</div><div class="lbl">做种中</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${done}</div><div class="lbl">已完成</div></div></div>
+    <div class="grid grid-2">
+      <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">活跃任务</div></div></div>
+      <div class="card"><div class="stat"><div class="num">${paused}</div><div class="lbl">已完成历史</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(dlSpeed)}</div><div class="lbl">当前下载速度</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(upSpeed)}</div><div class="lbl">当前上传速度</div></div></div>
     </div>
-
     <div class="card">
-      <h2>最近的任务</h2>
-      ${torrentTable(list.slice(0, 10), false)}
+      <h2>最近活跃任务</h2>
+      <div id="dash-latest"><div style="color:var(--text-dim)">加载中…</div></div>
     </div>
   `;
+
+  // 概览只拉 top 10 active，分块渲避免卡
+  const top10 = await api("GET", "/torrents?filter=active&limit=10&sort=added_time&reverse=true");
+  const list = top10.data || [];
+  if (list.length === 0) {
+    $("#dash-latest").innerHTML = '<div class="empty">当前没有活跃任务</div>';
+  } else {
+    $("#dash-latest").innerHTML = torrentTable(list, false);
+  }
 }
+
 
 function stateTag(s) {
   const map = {
@@ -105,50 +271,43 @@ function stateTag(s) {
 }
 
 function torrentTable(list, withActions) {
-  if (!list.length) return '<div class="empty">暂无任务</div>';
-  const rows = list.map(t => {
-    const pct = (t.progress * 100).toFixed(1);
-    return `
-      <tr>
-        <td><div title="${t.name}">${t.name.length > 40 ? t.name.slice(0, 40) + "…" : t.name}</div>
-            <div style="color:var(--text-dim);font-size:11px">${humanSize(t.size)} · ${t.category || "-"}</div>
-        </td>
-        <td>${stateTag(t.state)}</td>
-        <td>
-          <div style="display:flex;align-items:center">
-            <div class="progress-bar"><div style="width:${pct}%"></div></div>
-            <span class="progress-text">${pct}%</span>
-          </div>
-        </td>
-        <td style="white-space:nowrap">${humanSpeed(t.dlspeed)} / ${humanSpeed(t.upspeed)}</td>
-        ${withActions ? `
-        <td>
-          <div class="speed-input">
-            <input type="number" min="0" max="102400" placeholder="KB/s" id="limit-${t.hash}" />
-            <button class="btn small" data-limit="${t.hash}">应用</button>
-          </div>
-        </td>` : ""}
-      </tr>`;
-  }).join("");
-  return `<table>
-    <thead><tr>
-      <th>名称</th><th>状态</th><th>进度</th><th>速度 (下/上)</th>
-      ${withActions ? "<th>上传限速 (KB/s, 0 清除)</th>" : ""}
-    </tr></thead>
-    <tbody>${rows}</tbody></table>`;
+  if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
+  const rows = list.map(t => torrentRow(t, withActions)).join("");
+  return `<table class="torrent-table"><thead><tr>
+    <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
+    <th>下速</th><th>上速</th><th>分类</th>${withActions ? "<th>限速</th>" : ""}
+  </tr></thead><tbody>${rows}</tbody></table>`;
 }
-
-// ---------- 任务 ----------
-async function renderTorrents(root) {
-  const t = await api("GET", "/torrents");
-  const list = t.data || [];
-  root.innerHTML = `
-    <div class="card">
-      <h2>下载任务 <span class="badge">可配置单任务上传限速</span></h2>
-      ${torrentTable(list, true)}
-    </div>
-  `;
+function torrentRow(t, withActions) {
+  const pct = (t.progress * 100).toFixed(1);
+  const safeName = escapeHTML(t.name);
+  const shortName = t.name.length > 40 ? escapeHTML(t.name.slice(0, 40)) + "…" : safeName;
+  const safeCat = escapeHTML(t.category || "-");
+  const safeHash = escapeHTML(t.hash);
+  return `<tr>
+    <td><div title="${safeName}">${shortName}</div>
+        <div style="color:var(--text-dim);font-size:11px">${humanSize(t.size)} · ${safeCat}</div></td>
+    <td>${stateTag(t.state)}</td>
+    <td><div class="progress-bar"><div style="width:${pct}%"></div></div>${pct}%</td>
+    <td>${humanSize(t.downloaded)}/${humanSize(t.size)}</td>
+    <td>${humanSpeed(t.dlspeed)}</td>
+    <td>${humanSpeed(t.upspeed)}</td>
+    <td>${safeCat}</td>
+    ${withActions ? `<td><input type="number" id="limit-${safeHash}" style="width:80px" placeholder="KB/s"/>
+        <button class="btn small" data-limit="${safeHash}">应用</button></td>` : ""}
+  </tr>`;
+}
+function filterList(list, kw) {
+  if (!kw) return list;
+  return list.filter(t =>
+    (t.name || "").toLowerCase().includes(kw) ||
+    (t.category || "").toLowerCase().includes(kw) ||
+    (t.tags || "").toLowerCase().includes(kw)
+  );
+}
+function bindLimitButtons() {
   $$("[data-limit]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
     btn.addEventListener("click", async () => {
       const hash = btn.dataset.limit;
       const input = document.getElementById("limit-" + hash);
@@ -158,6 +317,132 @@ async function renderTorrents(root) {
     });
   });
 }
+
+
+// ---------- 任务 ----------
+// 任务列表状态（模块级，切 filter/limit 不丢）
+let _torrentsState = {
+  filter: "active",
+  limit: 500,
+  page: 1,
+  pageSize: 50,
+  search: "",
+  sort: "added_time",
+  reverse: "true",
+  rawList: [],    // 后端返回的原始列表（未过滤未分页）
+};
+
+// 前端友好的窄 filter 选项（带中文标签）
+const torrentFilterOptions = [
+  { value: "active",      label: "活跃（下载+做种）" },
+  { value: "downloading", label: "下载中" },
+  { value: "pausedDL",    label: "暂停下载（未完成）" },
+  { value: "pausedUP",    label: "已完成历史（暂停）" },
+  { value: "stalledUP",   label: "历史（做种停滞）" },
+  { value: "completed",   label: "所有已完成" },
+  { value: "all",         label: "全部（⚠️ 可能很慢）" },
+];
+
+async function renderTorrents(root) {
+  root.innerHTML = `
+    <div class="card">
+      <h2>下载任务 <span class="badge">可配置单任务上传限速</span></h2>
+      <div class="actions-bar" style="margin:12px 0 16px 0;gap:12px;flex-wrap:wrap">
+        <div class="form-row" style="margin:0"><label>状态</label>
+          <select id="tf-filter" style="min-width:160px">
+            ${torrentFilterOptions.map(o =>
+              `<option value="${o.value}" ${o.value===_torrentsState.filter?"selected":""}>${o.label}</option>`
+            ).join("")}
+          </select>
+        </div>
+        <div class="form-row" style="margin:0"><label>Top</label>
+          <select id="tf-limit" style="min-width:100px">
+            ${[100, 200, 500, 1000, 0].map(n =>
+              `<option value="${n}" ${n===_torrentsState.limit?"selected":""}>${n===0?"全量":n}</option>`
+            ).join("")}
+          </select>
+        </div>
+        <div class="form-row" style="margin:0;flex:1"><label>搜索</label>
+          <input type="text" id="tf-search" value="${_torrentsState.search}" placeholder="按任务名 / 分类 / 标签过滤…" style="flex:1;min-width:200px" />
+        </div>
+        <button class="btn small" id="tf-reload">刷新</button>
+      </div>
+      <div id="tf-progress" style="color:var(--text-dim);font-size:12px;margin-bottom:8px"></div>
+      <div id="tf-body"><div style="color:var(--text-dim)">加载中…</div></div>
+    </div>
+  `;
+
+  // 全量警告
+  if (_torrentsState.filter === "all" || _torrentsState.filter === "completed") {
+    $("#tf-progress").textContent = _torrentsState.filter === "all"
+      ? "⚠️ 全量模式可能加载数千条任务，首次请求会较慢；后端会返回完整列表后再前端分页。"
+      : "⚠️ 已完成包含暂停+做种+停滞，数量可能很多；建议用「已完成历史（暂停）」替代。";
+  }
+
+  // 事件绑定
+  $("#tf-filter").onchange = e => { _torrentsState.filter = e.target.value; _torrentsState.page = 1; fetchTorrents(); };
+  $("#tf-limit").onchange  = e => { _torrentsState.limit  = parseInt(e.target.value, 10); _torrentsState.page = 1; fetchTorrents(); };
+  $("#tf-reload").onclick  = fetchTorrents;
+  $("#tf-search").oninput  = debounce(e => {
+    _torrentsState.search = e.target.value.trim().toLowerCase();
+    _torrentsState.page = 1;
+    renderPage();
+  }, 300);
+
+  async function fetchTorrents() {
+    $("#tf-progress").textContent = "拉取中…";
+    const t = await api("GET",
+      `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
+    if (!t.success) {
+      $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${t.message || "未知错误"}</div>`;
+      $("#tf-progress").textContent = "";
+      return;
+    }
+    _torrentsState.rawList = t.data || [];
+    $("#tf-progress").textContent = `已加载 ${_torrentsState.rawList.length} 条`;
+    renderPage();
+  }
+
+  function renderPage() {
+    const list = filterList(_torrentsState.rawList, _torrentsState.search);
+    const { pages, page, start, end } = paginate(list.length, _torrentsState.page, _torrentsState.pageSize);
+    const pageSlice = list.slice(start, end);
+
+    $("#tf-progress").textContent =
+      `已加载 ${_torrentsState.rawList.length} 条${_torrentsState.search ? `，搜索命中 ${list.length} 条` : ""} · 显示 ${start + 1}-${Math.min(end, list.length)} / ${list.length}`;
+
+    if (pageSlice.length === 0) {
+      $("#tf-body").innerHTML = `<div class="empty">${_torrentsState.search ? "搜索无匹配" : "当前没有任务"}</div>`;
+      return;
+    }
+
+    // 分块渲染表格，每帧 30 行（表格 DOM 重，不能一次渲完）
+    const container = document.createElement("div");
+    chunkRender(pageSlice, 30, (tor, idx) => {
+      const tr = document.createElement("div");
+      tr.innerHTML = torrentTable([tor], true); // 传单个，torrentTable 会包 <table>
+      // 抽出里面的 <tbody> 内容（去掉外层 table 包装）
+      const tbody = tr.querySelector("tbody");
+      return tbody.children[0]; // 直接返回 <tr>
+    }, container, () => {
+      // 包裹成完整 table
+      $("#tf-body").innerHTML = torrentTableHeader(pageSlice.length) + container.innerHTML + pageNav(list.length, page, _torrentsState.pageSize, p => {
+        _torrentsState.page = p; renderPage();
+      });
+      bindLimitButtons();
+    });
+  }
+
+  fetchTorrents();
+}
+
+function torrentTableHeader(count) {
+  return `<table class="torrent-table"><thead><tr>
+    <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
+    <th>下速</th><th>上速</th><th>分类</th>${count > 0 ? "<th>限速</th>" : ""}
+  </tr></thead><tbody>`;
+}
+
 
 // ---------- RSS ----------
 async function renderRSS(root) {
@@ -198,15 +483,17 @@ async function renderRSS(root) {
 }
 
 function renderFeedBlock(f, fi) {
+  const sName = escapeHTML(f.name || "");
+  const sUrl  = escapeHTML(f.url || "");
   return `
   <div class="card">
     <div class="rule-block">
       <div class="rule-header">
         <input type="checkbox" id="f-${f.id}-enabled" ${f.enabled ? "checked" : ""}>
-        <input type="text" id="f-${f.id}-name" value="${f.name}" style="flex:1;margin:0 12px" />
+        <input type="text" id="f-${f.id}-name" value="${sName}" style="flex:1;margin:0 12px" />
         <button class="btn danger small" data-del-feed="${f.id}">删除</button>
       </div>
-      <input type="url" id="f-${f.id}-url" value="${f.url}" placeholder="https://..." />
+      <input type="url" id="f-${f.id}-url" value="${sUrl}" placeholder="https://..." />
     </div>
 
     <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center">
@@ -220,11 +507,17 @@ function renderFeedBlock(f, fi) {
 }
 
 function renderRuleBlock(fid, r, ri) {
+  const sName     = escapeHTML(r.name || ("规则 " + (ri + 1)));
+  const sInclude  = escapeHTML(r.include || "");
+  const sExclude  = escapeHTML(r.exclude || "");
+  const sPath     = escapeHTML(r.savePath || "");
+  const sCategory = escapeHTML(r.category || "");
+  const sTags     = escapeHTML(r.tags || "");
   return `
     <div class="rule-block">
       <div class="rule-header">
         <input type="checkbox" data-rule-enabled="${fid}-${ri}" ${r.enabled !== false ? "checked" : ""}>
-        <input type="text" data-rule-name="${fid}-${ri}" value="${r.name || "规则 " + (ri+1)}" style="flex:1;margin:0 12px" />
+        <input type="text" data-rule-name="${fid}-${ri}" value="${sName}" style="flex:1;margin:0 12px" />
         <button class="btn danger small" data-del-rule="${fid}-${ri}">删除</button>
       </div>
       <div class="form-row"><label>匹配模式</label>
@@ -233,13 +526,13 @@ function renderRuleBlock(fid, r, ri) {
           <option value="regex" ${r.mode === "regex" ? "selected" : ""}>正则表达式</option>
         </select>
       </div>
-      <div class="form-row"><label>匹配（Include）</label><input type="text" data-rule-include="${fid}-${ri}" value="${r.include || ""}" placeholder="${r.mode === "regex" ? "正则，需匹配" : "标题必须包含此关键字"}" /></div>
-      <div class="form-row"><label>排除（Exclude）</label><input type="text" data-rule-exclude="${fid}-${ri}" value="${r.exclude || ""}" placeholder="命中此条件的跳过" /></div>
-      <div class="form-row"><label>保存路径</label><input type="text" data-rule-path="${fid}-${ri}" value="${r.savePath || ""}" placeholder="qBittorrent 保存路径 (可空)" /></div>
+      <div class="form-row"><label>匹配（Include）</label><input type="text" data-rule-include="${fid}-${ri}" value="${sInclude}" placeholder="${r.mode === "regex" ? "正则，需匹配" : "标题必须包含此关键字"}" /></div>
+      <div class="form-row"><label>排除（Exclude）</label><input type="text" data-rule-exclude="${fid}-${ri}" value="${sExclude}" placeholder="命中此条件的跳过" /></div>
+      <div class="form-row"><label>保存路径</label><input type="text" data-rule-path="${fid}-${ri}" value="${sPath}" placeholder="qBittorrent 保存路径 (可空)" /></div>
       <div class="form-row"><label>分类 / 标签</label>
         <div style="display:flex;gap:8px;flex:1">
-          <input type="text" data-rule-category="${fid}-${ri}" value="${r.category || ""}" placeholder="Category" style="flex:1"/>
-          <input type="text" data-rule-tags="${fid}-${ri}" value="${r.tags || ""}" placeholder="Tags (逗号分隔)" style="flex:1"/>
+          <input type="text" data-rule-category="${fid}-${ri}" value="${sCategory}" placeholder="Category" style="flex:1"/>
+          <input type="text" data-rule-tags="${fid}-${ri}" value="${sTags}" placeholder="Tags (逗号分隔)" style="flex:1"/>
         </div>
       </div>
       <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-rule-upload="${fid}-${ri}" value="${r.uploadLimit || 0}" min="0" placeholder="0 = 不限" style="width:150px"/></div>
@@ -295,6 +588,8 @@ async function saveRSS(rss) {
   collectRSS(rss);
   const cfg = (await api("GET", "/config")).data;
   cfg.rss = rss;
+  const vmsg = validateConfigJS(cfg);
+  if (vmsg) { toast("❌ " + vmsg, "err"); return; }
   const res = await api("POST", "/config", cfg);
   toast(res.success ? "RSS 配置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
 }
@@ -345,10 +640,10 @@ function renderLimiterRules() {
       <div class="rule-block">
         <div class="rule-header">
           <input type="checkbox" data-lm-enabled="${i}" ${r.enabled !== false ? "checked" : ""}>
-          <input type="text" data-lm-name="${i}" value="${r.name}" style="flex:1;margin:0 12px" />
+          <input type="text" data-lm-name="${i}" value="${escapeHTML(r.name || "")}" style="flex:1;margin:0 12px" />
           <button class="btn danger small" data-lm-del="${i}">删除</button>
         </div>
-        <div class="form-row"><label>匹配正则</label><input type="text" data-lm-match="${i}" value="${r.match}" placeholder="如 \\.mkv$ 或 4k" /></div>
+        <div class="form-row"><label>匹配正则</label><input type="text" data-lm-match="${i}" value="${escapeHTML(r.match || "")}" placeholder="如 \\.mkv$ 或 4k" /></div>
         <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-lm-limit="${i}" value="${r.uploadLimit}" min="0" style="width:150px"/> <div class="hint">0 = 无限制</div></div>
       </div>`).join("");
   // 重新绑定删除按钮（checkbox/input 的 change 不丢值，不需要重绑）
@@ -359,16 +654,23 @@ async function renderSettings(root) {
   const cfg = (await api("GET", "/config")).data;
   _settingsCfg = cfg;
 
+  const sQbUrl    = escapeHTML(cfg.qbittorrent.url || "");
+  const sQbUser   = escapeHTML(cfg.qbittorrent.username || "");
+  const sQbPass   = escapeHTML(cfg.qbittorrent.password || "");
+  const sQbKey    = escapeHTML(cfg.qbittorrent.apiKey || "");
+  const sListen   = escapeHTML(cfg.server.listen || "");
+  const sNotifyUrl = escapeHTML((cfg.notifier.appriseUrls || []).join("\n"));
+
   root.innerHTML = `
     <!-- qBittorrent -->
     <div class="card">
       <h2>qBittorrent 连接</h2>
-      <div class="form-row"><label>WebUI 地址</label><input type="url" id="qb-url" value="${cfg.qbittorrent.url}" placeholder="http://192.168.1.10:8080" /></div>
-      <div class="form-row"><label>用户名</label><input type="text" id="qb-user" value="${cfg.qbittorrent.username}" /></div>
-      <div class="form-row"><label>密码</label><input type="password" id="qb-pass" value="${cfg.qbittorrent.password}" placeholder="已隐藏（留空则不修改）" /></div>
+      <div class="form-row"><label>WebUI 地址</label><input type="url" id="qb-url" value="${sQbUrl}" placeholder="http://192.168.1.10:8080" /></div>
+      <div class="form-row"><label>用户名</label><input type="text" id="qb-user" value="${sQbUser}" /></div>
+      <div class="form-row"><label>密码</label><input type="password" id="qb-pass" value="${sQbPass}" placeholder="已隐藏（留空则不修改）" /></div>
       <div class="form-row"><label>API key</label>
         <div style="flex:1">
-          <input type="password" id="qb-apikey" value="${cfg.qbittorrent.apiKey || ''}" placeholder="qBittorrent v5.2.0+ 可用；填写则优先使用，跳过用户名密码" />
+          <input type="password" id="qb-apikey" value="${sQbKey}" placeholder="qBittorrent v5.2.0+ 可用；填写则优先使用，跳过用户名密码" />
           <div class="hint">在 qBittorrent WebUI → 设置 → WebUI 里生成，形如 <code>qbt_xxxxxxxxxxxxxxxx</code>。填写后直接走 <code>Authorization: Bearer</code>，无额外 round-trip。</div>
         </div>
       </div>
@@ -380,7 +682,7 @@ async function renderSettings(root) {
     <!-- 服务器 -->
     <div class="card">
       <h2>服务监听</h2>
-      <div class="form-row"><label>监听地址</label><input type="text" id="srv-listen" value="${cfg.server.listen}" placeholder=":8088" /></div>
+      <div class="form-row"><label>监听地址</label><input type="text" id="srv-listen" value="${sListen}" placeholder=":8088" /></div>
     </div>
 
     <!-- 限速全局 -->
@@ -404,7 +706,7 @@ async function renderSettings(root) {
       </div>
       <div class="form-row"><label>通知 URL</label>
         <div style="flex:1">
-          <textarea id="nt-urls" placeholder="每行一个 Apprise URL，例如：\ntelegram://BOT_TOKEN/CHAT_ID\ndiscord://WEBHOOK_ID/WEBHOOK_TOKEN\ngotify://TOKEN@HOST:PORT\nhttps://hooks.slack.com/services/...">${(cfg.notifier.appriseUrls || []).join("\n")}</textarea>
+          <textarea id="nt-urls" placeholder="每行一个 Apprise URL，例如：\ntelegram://BOT_TOKEN/CHAT_ID\ndiscord://WEBHOOK_ID/WEBHOOK_TOKEN\ngotify://TOKEN@HOST:PORT\nhttps://hooks.slack.com/services/...">${sNotifyUrl}</textarea>
           <div class="hint">使用 <a href="https://github.com/unraid/apprise-go" target="_blank">Apprise-Go</a>，原生支持上百种渠道（Telegram / Discord / Slack / 企业微信 / 邮件 / Gotify / Bark ...）。每行填一个 URL，格式参见 <a href="https://github.com/caronc/apprise/wiki" target="_blank">Apprise Wiki</a>。</div>
         </div>
       </div>
@@ -460,6 +762,8 @@ async function renderSettings(root) {
   $("#save-all").onclick = async () => {
     syncFormToCfg();
     const out = _settingsCfg; // 掩码值已在 syncFormToCfg 里被忽略，后端会保留原密码/apiKey
+    const vmsg = validateConfigJS(out);
+    if (vmsg) { toast("❌ " + vmsg, "err"); return; }
     const res = await api("POST", "/config", out);
     toast(res.success ? "设置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
     // 保存成功后重新 GET 一次，让密码/API key 回到掩码状态
@@ -479,21 +783,31 @@ function onLimDel() {
 // ---------- 状态 ----------
 async function updateStatus() {
   try {
-    const r = await api("GET", "/torrents");
+    const r = await api("GET", "/torrents/stats");
     const el = $("#qb-status");
-    if (r.success) { el.textContent = "qb 已连接 · " + (r.data?.length || 0) + " 任务"; el.className = "status ok"; }
-    else { el.textContent = "qb 未连接"; el.className = "status bad"; }
+    if (r.success) {
+      const s = r.data || {};
+      el.textContent = "qb 已连接 · 活跃 " + (s.activeCount || 0) + " · 历史 " + (s.pausedUp || 0);
+      el.className = "status ok";
+    } else {
+      el.textContent = "qb 未连接"; el.className = "status bad";
+    }
   } catch {
     const el = $("#qb-status");
     el.textContent = "服务异常"; el.className = "status bad";
   }
 }
 
+
 // ---------- 启动 ----------
 switchView("dashboard");
 updateStatus();
 setInterval(updateStatus, 30000);
-// 概览/任务页自动刷新
-setInterval(() => {
-  if (currentView === "dashboard" || currentView === "torrents") switchView(currentView);
-}, 15000);
+// 概览/任务页自动刷新（防抖：上次请求没回来就跳过；间隔 8s，active 下足够快）
+setInterval(async () => {
+  if (_refreshRunning) return;
+  if (currentView === "dashboard" || currentView === "torrents") {
+    _refreshRunning = true;
+    try { await switchView(currentView); } finally { _refreshRunning = false; }
+  }
+}, 8000);

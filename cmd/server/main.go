@@ -42,7 +42,7 @@ func main() {
 	sch := scheduler.New(cfgMgr, qbCli, notif, lim, fm, rssE)
 	sch.Start()
 
-	srv := web.New(cfgMgr, qbCli, lim, rssE, notif)
+	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch)
 
 	go func() {
 		logger.Info.Printf("QBHive listening on %s", cfg.Server.Listen)
