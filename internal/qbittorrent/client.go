@@ -17,51 +17,83 @@ import (
 )
 
 type Client struct {
-	baseURL  string
-	user     string
-	pass     string
-	httpCli  *http.Client
-	cookie   string
+	baseURL string
+	user    string
+	pass    string
+	apiKey  string
+	httpCli *http.Client
+	cookie  string
 }
 
-func New(baseURL, user, pass string) *Client {
+// New 创建客户端。apiKey 非空时优先走 Bearer 认证（qBittorrent v5.2.0+），
+// 否则走 cookie 会话方式，user/pass 必填。
+func New(baseURL, user, pass, apiKey string) *Client {
 	jar, _ := cookiejar.New(nil)
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		user:    user,
 		pass:    pass,
+		apiKey:  strings.TrimSpace(apiKey),
 		httpCli: &http.Client{Timeout: 15 * time.Second, Jar: jar},
 	}
 }
 
+// usesAPIKey 判断是否走 Bearer 模式
+func (c *Client) usesAPIKey() bool {
+	return c.apiKey != ""
+}
+
 func (c *Client) do(method, path string, body io.Reader, contentType string) (*http.Response, error) {
-	if c.cookie == "" {
-		if err := c.login(); err != nil {
+	var req *http.Request
+	var err error
+
+	if c.usesAPIKey() {
+		// Bearer 模式：无状态，直接带 Authorization 头，跳过 login/cookie
+		req, err = http.NewRequest(method, c.baseURL+path, body)
+		if err != nil {
 			return nil, err
 		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	} else {
+		if c.cookie == "" {
+			if err := c.login(); err != nil {
+				return nil, err
+			}
+		}
+		req, err = http.NewRequest(method, c.baseURL+path, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Cookie", c.cookie)
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Cookie", c.cookie)
+
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.httpCli.Do(req)
 	if err != nil {
-		c.cookie = ""
+		if !c.usesAPIKey() {
+			c.cookie = ""
+		}
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
+
+	// cookie 模式下遇到 401/403，重新 login 重试一次
+	if !c.usesAPIKey() && (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized) {
 		c.cookie = ""
-		// 重试一次
 		_ = resp.Body.Close()
 		if err := c.login(); err != nil {
 			return nil, err
 		}
-		req.Header.Set("Cookie", c.cookie)
-		resp, err = c.httpCli.Do(req)
+		req2, err := http.NewRequest(method, c.baseURL+path, body)
+		if err != nil {
+			return nil, err
+		}
+		req2.Header.Set("Cookie", c.cookie)
+		if contentType != "" {
+			req2.Header.Set("Content-Type", contentType)
+		}
+		resp, err = c.httpCli.Do(req2)
 		if err != nil {
 			return nil, err
 		}
@@ -84,14 +116,12 @@ func (c *Client) login() error {
 	if string(data) != "Ok." {
 		return fmt.Errorf("login failed: %s", string(data))
 	}
-	// 从 Set-Cookie 解析 SID
 	for _, cc := range resp.Cookies() {
 		if cc.Name == "SID" {
 			c.cookie = "SID=" + cc.Value
 			return nil
 		}
 	}
-	// 有些版本 cookie jar 会自动保存
 	if cookies := c.httpCli.Jar.Cookies(mustParse(c.baseURL)); len(cookies) > 0 {
 		var parts []string
 		for _, cc := range cookies {
@@ -177,39 +207,36 @@ func (c *Client) SetUploadLimit(hash string, limitBytesPerSec int64) error {
 // AddTorrent 上传 torrent 文件
 func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int) error {
 	var buf bytes.Buffer
-	buf.WriteString("--bthive\r\n")
-	buf.WriteString(`Content-Disposition: form-data; name="torrents"; filename="bthive.torrent"` + "\r\n")
-	buf.WriteString("Content-Type: application/x-bittorrent\r\n\r\n")
-	buf.Write(torrentData)
-	buf.WriteString("\r\n")
+	boundary := "qbhive"
+	writeFormField := func(name, value string, isFile bool, filename string, fileData []byte) {
+		buf.WriteString("--" + boundary + "\r\n")
+		if isFile {
+			buf.WriteString(`Content-Disposition: form-data; name="` + name + `"; filename="` + filename + `"` + "\r\n")
+			buf.WriteString("Content-Type: application/x-bittorrent\r\n\r\n")
+			buf.Write(fileData)
+		} else {
+			buf.WriteString(`Content-Disposition: form-data; name="` + name + `"` + "\r\n\r\n")
+			buf.WriteString(value)
+		}
+		buf.WriteString("\r\n")
+	}
 
+	writeFormField("torrents", "", true, "qbhive.torrent", torrentData)
 	if savePath != "" {
-		buf.WriteString(`--bthive` + "\r\n")
-		buf.WriteString(`Content-Disposition: form-data; name="savepath"` + "\r\n\r\n")
-		buf.WriteString(savePath + "\r\n")
+		writeFormField("savepath", savePath, false, "", nil)
 	}
 	if category != "" {
-		buf.WriteString(`--bthive` + "\r\n")
-		buf.WriteString(`Content-Disposition: form-data; name="category"` + "\r\n\r\n")
-		buf.WriteString(category + "\r\n")
+		writeFormField("category", category, false, "", nil)
 	}
 	if tags != "" {
-		buf.WriteString(`--bthive` + "\r\n")
-		buf.WriteString(`Content-Disposition: form-data; name="tags"` + "\r\n\r\n")
-		buf.WriteString(tags + "\r\n")
+		writeFormField("tags", tags, false, "", nil)
 	}
-	// skip_checking = true, paused = false
-	buf.WriteString(`--bthive` + "\r\n")
-	buf.WriteString(`Content-Disposition: form-data; name="skip_checking"` + "\r\n\r\n")
-	buf.WriteString("true\r\n")
+	writeFormField("skip_checking", "true", false, "", nil)
+	writeFormField("paused", "false", false, "", nil)
+	buf.WriteString("--" + boundary + "--\r\n")
 
-	buf.WriteString(`--bthive` + "\r\n")
-	buf.WriteString(`Content-Disposition: form-data; name="paused"` + "\r\n\r\n")
-	buf.WriteString("false\r\n")
-
-	buf.WriteString("--bthive--\r\n")
-
-	resp, err := c.do("POST", "/api/v2/torrents/add", &buf, "multipart/form-data; boundary=bthive")
+	resp, err := c.do("POST", "/api/v2/torrents/add", &buf,
+		"multipart/form-data; boundary="+boundary)
 	if err != nil {
 		return err
 	}
@@ -219,9 +246,7 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 		logger.Warn.Printf("AddTorrent status=%d body=%s", resp.StatusCode, string(b))
 	}
 
-	// 如果设置了上传限速，延迟应用（等 torrent 被加入后才能通过 hash 设置）
 	if uploadLimitKB > 0 {
-		// 延迟几秒后尝试根据最近添加的 torrent 查找并应用
 		go func() {
 			time.Sleep(3 * time.Second)
 			c.applyLatestUploadLimit(uploadLimitKB)
@@ -235,8 +260,6 @@ func (c *Client) applyLatestUploadLimit(uploadLimitKB int) {
 	if err != nil || len(list) == 0 {
 		return
 	}
-	// 简单做法：对最近几个正在下载的 torrent 应用限速
-	// 实际可通过 tags 或 category 识别，这里取前一个 DOWNLOADING
 	for _, t := range list {
 		if t.State == "downloading" || t.State == "stalledDL" {
 			_ = c.SetUploadLimit(t.Hash, int64(uploadLimitKB)*1024)

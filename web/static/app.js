@@ -310,6 +310,12 @@ async function renderSettings(root) {
       <div class="form-row"><label>WebUI 地址</label><input type="url" id="qb-url" value="${cfg.qbittorrent.url}" placeholder="http://192.168.1.10:8080" /></div>
       <div class="form-row"><label>用户名</label><input type="text" id="qb-user" value="${cfg.qbittorrent.username}" /></div>
       <div class="form-row"><label>密码</label><input type="password" id="qb-pass" value="${cfg.qbittorrent.password}" placeholder="已隐藏（留空则不修改）" /></div>
+      <div class="form-row"><label>API key</label>
+        <div style="flex:1">
+          <input type="password" id="qb-apikey" value="${cfg.qbittorrent.apiKey || ''}" placeholder="qBittorrent v5.2.0+ 可用；填写则优先使用，跳过用户名密码" />
+          <div class="hint">在 qBittorrent WebUI → 设置 → WebUI 里生成，形如 <code>qbt_xxxxxxxxxxxxxxxx</code>。填写后直接走 <code>Authorization: Bearer</code>，无额外 round-trip。</div>
+        </div>
+      </div>
       <div class="actions-bar" style="margin-left:160px">
         <button class="btn" id="qb-test">测试连接</button>
       </div>
@@ -378,7 +384,7 @@ async function renderSettings(root) {
   // 事件
   $("#qb-test").onclick = async () => {
     const r = await api("POST", "/test-qb", {
-      url: $("#qb-url").value, username: $("#qb-user").value, password: $("#qb-pass").value
+      url: $("#qb-url").value, username: $("#qb-user").value, password: $("#qb-pass").value, apiKey: $("#qb-apikey").value
     });
     toast(r.success ? "连接成功 ✓" : (r.message || "连接失败"), r.success ? "ok" : "err");
     if (r.success) updateStatus("ok", "qb 已连接");
@@ -405,6 +411,7 @@ async function renderSettings(root) {
       qbittorrent: {
         url: $("#qb-url").value, username: $("#qb-user").value,
         password: $("#qb-pass").value,
+        apiKey: $("#qb-apikey").value,
       },
       server: { listen: $("#srv-listen").value },
       limiter: {

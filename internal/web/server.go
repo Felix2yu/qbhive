@@ -34,7 +34,6 @@ func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngi
 func (s *Server) Start(webRoot string) error {
 	r := gin.Default()
 
-	// API 路由
 	api := r.Group("/api")
 	{
 		api.GET("/ping", func(c *gin.Context) {
@@ -76,6 +75,9 @@ func (s *Server) getConfig(c *gin.Context) {
 	if cfg.Qbittorrent.Password != "" {
 		cfg.Qbittorrent.Password = "********"
 	}
+	if cfg.Qbittorrent.APIKey != "" {
+		cfg.Qbittorrent.APIKey = "********"
+	}
 	c.JSON(200, models.APIResponse{Success: true, Data: cfg})
 }
 
@@ -89,13 +91,15 @@ func (s *Server) saveConfig(c *gin.Context) {
 	if strings.TrimSpace(in.Qbittorrent.Password) == "" || in.Qbittorrent.Password == "********" {
 		in.Qbittorrent.Password = cur.Qbittorrent.Password
 	}
+	if strings.TrimSpace(in.Qbittorrent.APIKey) == "" || in.Qbittorrent.APIKey == "********" {
+		in.Qbittorrent.APIKey = cur.Qbittorrent.APIKey
+	}
 	s.cfg.Set(in)
 	if err := s.cfg.Save(); err != nil {
 		c.JSON(500, models.APIResponse{Success: false, Message: err.Error()})
 		return
 	}
-	// 重建 QB 客户端 & 重载通知器
-	s.qbClient = qb.New(in.Qbittorrent.URL, in.Qbittorrent.Username, in.Qbittorrent.Password)
+	s.qbClient = qb.New(in.Qbittorrent.URL, in.Qbittorrent.Username, in.Qbittorrent.Password, in.Qbittorrent.APIKey)
 	s.notifier.Reload(in.Notifier)
 	c.JSON(200, models.APIResponse{Success: true})
 }
@@ -106,7 +110,7 @@ func (s *Server) testQB(c *gin.Context) {
 		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
 		return
 	}
-	cli := qb.New(in.URL, in.Username, in.Password)
+	cli := qb.New(in.URL, in.Username, in.Password, in.APIKey)
 	if err := cli.TestConnection(); err != nil {
 		c.JSON(200, models.APIResponse{Success: false, Message: err.Error()})
 		return
@@ -124,7 +128,7 @@ func (s *Server) listTorrents(c *gin.Context) {
 }
 
 type limitPayload struct {
-	UploadLimit int `json:"uploadLimit"` // KB/s, 0 表示无限制
+	UploadLimit int `json:"uploadLimit"`
 }
 
 func (s *Server) setTorrentLimit(c *gin.Context) {
@@ -162,7 +166,6 @@ func (s *Server) testNotify(c *gin.Context) {
 		c.JSON(400, models.APIResponse{Success: false, Message: "通知渠道未配置"})
 		return
 	}
-	// 用临时客户端测试，避免影响已运行的通知器
 	tmp := notifier.New(cfg)
 	if err := tmp.Notify("QBHive 通知测试", "这是一条来自 QBHive 的测试通知 🎉\n如果你看到了，说明通知已配置成功。"); err != nil {
 		c.JSON(200, models.APIResponse{Success: false, Message: err.Error()})

@@ -27,7 +27,7 @@ func main() {
 	cfgMgr := config.New(*cfgFile)
 	cfg := cfgMgr.Get()
 
-	qbCli := qb.New(cfg.Qbittorrent.URL, cfg.Qbittorrent.Username, cfg.Qbittorrent.Password)
+	qbCli := qb.New(cfg.Qbittorrent.URL, cfg.Qbittorrent.Username, cfg.Qbittorrent.Password, cfg.Qbittorrent.APIKey)
 	if err := qbCli.TestConnection(); err != nil {
 		logger.Warn.Printf("qbittorrent connection test failed: %v (continuing anyway)", err)
 	} else {
