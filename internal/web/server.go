@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Felix2yu/qbhive/internal/config"
@@ -118,11 +120,24 @@ func (s *Server) testQB(c *gin.Context) {
 	c.JSON(200, models.APIResponse{Success: true})
 }
 
+// listTorrents 支持 ?filter= 和 ?limit= 两个查询参数。
+// filter 透传给 qBittorrent 的 /api/v2/torrents/info；默认 "active" 只拉活跃任务，
+// 避免历史数千条在前端渲成 DOM 沼泽。limit 是可选的 top N 截断。
 func (s *Server) listTorrents(c *gin.Context) {
-	list, err := s.qbClient.GetTorrents()
+	filter := c.Query("filter")
+	if filter == "" {
+		filter = "active"
+	}
+	list, err := s.qbClient.GetTorrents(filter)
 	if err != nil {
 		c.JSON(502, models.APIResponse{Success: false, Message: err.Error()})
 		return
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Progress > list[j].Progress })
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if n, e := strconv.Atoi(limitStr); e == nil && n > 0 && n < len(list) {
+			list = list[:n]
+		}
 	}
 	c.JSON(200, models.APIResponse{Success: true, Data: list})
 }
