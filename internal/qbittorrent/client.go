@@ -412,7 +412,7 @@ func (c *Client) RenameFile(hash, oldPath, newPath string) error {
 	}
 	return nil
 }
-func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int) error {
+func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int, paused bool) error {
 	var buf bytes.Buffer
 	boundary := "qbhive"
 	writeFormField := func(name, value string, isFile bool, filename string, fileData []byte) {
@@ -441,7 +441,11 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 	// 如果磁盘已有同名但大小不匹配的残留文件（常见于重复添加或中途放弃的下载），
 	// skip_checking=true 会导致 qB 跳过 hash check 后陷入 fast resume rejected → 报"丢失文件"。
 	// 让 qB 正常做 hash check，它会自动识别不匹配文件并重新下载。
-	writeFormField("paused", "false", false, "", nil)
+	pausedStr := "false"
+	if paused {
+		pausedStr = "true"
+	}
+	writeFormField("paused", pausedStr, false, "", nil)
 	buf.WriteString("--" + boundary + "--\r\n")
 
 	resp, err := c.do("POST", "/api/v2/torrents/add", &buf,

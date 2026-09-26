@@ -334,58 +334,50 @@ func (s *Server) saveConfig(c *gin.Context) {
 	if strings.TrimSpace(in.Qbittorrent.APIKey) == "" || in.Qbittorrent.APIKey == "********" {
 		in.Qbittorrent.APIKey = cur.Qbittorrent.APIKey
 	}
-	// AppriseURLs：前端拿到的是掩码值，保存时跳过掩码项、跳过空字符串，其他按 index 替换
-	// 关键：如果前端过滤后整个数组变空（用户什么都没改就保存），要保留原值
+	// AppriseURLs：前端现在会按行保持 cur 的数组长度传回来，三项规则：
+	//   - 非掩码非空 → 用户新输入，替换对应 index
+	//   - 含 "...********" → 原掩码值，保持 cur 对应位置不变
+	//   - 空字符串 → 用户删除该行
 	curURLs := cur.Notifier.AppriseURLs
 	inURLs := in.Notifier.AppriseURLs
 
+	// 如果前端传了空数组（理论上不会，前端 split("\n") 至少会给 [""]，
+	// 但做个防御）→ 保留原值
 	if len(inURLs) == 0 {
-		// 空数组 → 保留原值（前端可能把所有掩码项都过滤掉了）
 		in.Notifier.AppriseURLs = curURLs
 	} else {
-		cleaned := make([]string, 0, len(inURLs))
-		// 先收集所有非掩码、非空的"用户新输入"项及其原始 index
-		type pair struct {
-			idx int
-			val string
+		// 先以 cur 为底拷贝一份，再按 index 应用前端的改动
+		base := make([]string, len(curURLs))
+		copy(base, curURLs)
+
+		// 如果前端传了更多行（新增了 URL），扩展 base
+		if len(inURLs) > len(base) {
+			extended := make([]string, len(inURLs))
+			copy(extended, base)
+			base = extended
 		}
-		var newInputs []pair
-		for i, u := range inURLs {
-			trimmed := strings.TrimSpace(u)
-			if trimmed == "" {
-				continue // 空字符串表示用户删了这一行
+
+		for i := 0; i < len(inURLs); i++ {
+			u := strings.TrimSpace(inURLs[i])
+			switch {
+			case u == "":
+				// 用户删了这行 → 置空占位，后面统一清理
+				base[i] = ""
+			case isMaskedAppriseURL(u):
+				// 掩码值 → 保持 cur 原值（base 已拷贝 cur，不用改）
+			default:
+				// 用户新输入 → 替换
+				base[i] = u
 			}
-			if isMaskedAppriseURL(trimmed) {
-				continue // 掩码值跳过，不要放进去
-			}
-			newInputs = append(newInputs, pair{i, trimmed})
 		}
-		if len(newInputs) == 0 {
-			// 用户没改任何 URL → 保留原值
-			in.Notifier.AppriseURLs = curURLs
-		} else {
-			// 用 cur 做基础，按 index 替换用户新输入的项
-			base := make([]string, len(curURLs))
-			copy(base, curURLs)
-			// 如果前端传了更多项（新增 URL），扩展 base
-			maxIdx := 0
-			for _, p := range newInputs {
-				if p.idx > maxIdx {
-					maxIdx = p.idx
-				}
+		// 清理所有空字符串（用户删除 + 可能遗留的空占位）
+		cleaned := make([]string, 0, len(base))
+		for _, u := range base {
+			if strings.TrimSpace(u) != "" {
+				cleaned = append(cleaned, u)
 			}
-			if maxIdx >= len(base) {
-				extended := make([]string, maxIdx+1)
-				copy(extended, base)
-				base = extended
-			}
-			for _, p := range newInputs {
-				base[p.idx] = p.val
-			}
-			// 去掉尾部空字符串（用户删了末尾条目）
-			cleaned = base
-			in.Notifier.AppriseURLs = cleaned
 		}
+		in.Notifier.AppriseURLs = cleaned
 	}
 	s.cfg.Set(in)
 	if err := s.cfg.Save(); err != nil {

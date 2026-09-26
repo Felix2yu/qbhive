@@ -588,7 +588,7 @@ func (e *Engine) processItem(feed models.RSSFeed, item rssItem) (string, error) 
 			logger.Warn.Printf("RSS 下载种子失败：%v url=%s（下一周期重试）", err, torrentURL)
 			return rule.Name, fmt.Errorf("下载 torrent 失败: %w", err)
 		}
-		if err := e.client.AddTorrent(data, rule.SavePath, rule.Category, rule.Tags, rule.UploadLimit); err != nil {
+		if err := e.client.AddTorrent(data, rule.SavePath, rule.Category, rule.Tags, rule.UploadLimit, rule.Paused); err != nil {
 			logger.Warn.Printf("RSS 添加种子失败：%v（下一周期重试）", err)
 			return rule.Name, fmt.Errorf("添加到 qBittorrent 失败: %w", err)
 		}

@@ -693,6 +693,7 @@ function renderRuleBlock(fid, r, ri) {
         </div>
       </div>
       <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-rule-upload="${fid}-${ri}" value="${r.uploadLimit || 0}" min="0" placeholder="0 = 不限" style="width:150px"/></div>
+      <div class="form-row"><label class="inline-check"><input type="checkbox" data-rule-paused="${fid}-${ri}" ${r.paused ? "checked" : ""}> 添加后暂停（不自动开始下载）</label></div>
     </div>`;
 }
 
@@ -709,7 +710,7 @@ function bindFeedEvents(rss) {
     const fid = b.dataset.addRule;
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules = feed.rules || [];
-    feed.rules.push({ id: genID(), name: "规则 " + (feed.rules.length + 1), enabled: true, mode: "keyword", include: "", exclude: "", savePath: "", category: "", tags: "", uploadLimit: 0 });
+    feed.rules.push({ id: genID(), name: "规则 " + (feed.rules.length + 1), enabled: true, mode: "keyword", include: "", exclude: "", savePath: "", category: "", tags: "", uploadLimit: 0, paused: false });
     renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-del-rule]").forEach(b => b.addEventListener("click", () => {
@@ -835,6 +836,7 @@ function collectRSS(rss) {
       r.category = document.querySelector(`[data-rule-category="${key}"]`).value;
       r.tags = document.querySelector(`[data-rule-tags="${key}"]`).value;
       r.uploadLimit = parseInt(document.querySelector(`[data-rule-upload="${key}"]`).value || "0", 10);
+      r.paused = document.querySelector(`[data-rule-paused="${key}"]`).checked;
     });
   });
   return rss;
@@ -879,9 +881,10 @@ function syncFormToCfg() {
     };
   });
   c.notifier.enabled = $("#nt-enabled").checked;
-  // AppriseURLs：过滤掉后端掩码显示值（含 "...********"），避免保存时覆盖真实 URL
-  // 后端保存时会兜底处理掩码项，这里前端同步过滤更稳妥
-  c.notifier.appriseUrls = $("#nt-urls").value.split("\n").map(s => s.trim()).filter(s => s && !s.includes("...********"));
+  // AppriseURLs：前端保持与后端返回的条目数一致（包含掩码值占位），
+  // 掩码项原样传回去让后端按 index 保留真实值，非掩码值作为新值替换对应位置，
+  // 空字符串表示用户删除该行。后端 saveConfig 会统一处理这三种情况。
+  c.notifier.appriseUrls = $("#nt-urls").value.split("\n").map(s => s.trim());
   c.fileManager.enabled = $("#fm-enabled").checked;
   c.fileManager.scanInterval = parseInt($("#fm-interval").value || "15", 10);
 }

@@ -253,7 +253,7 @@ func TestClient_AddTorrent_Success(t *testing.T) {
 	})
 	defer srv.Close()
 	// uploadLimitKB=0 阻止后台 goroutine 里的 applyLatestUploadLimit
-	if err := cli.AddTorrent([]byte("fake-torrent-bytes"), "/save", "", "", 0); err != nil {
+	if err := cli.AddTorrent([]byte("fake-torrent-bytes"), "/save", "", "", 0, false); err != nil {
 		t.Fatalf("AddTorrent failed: %v", err)
 	}
 }
