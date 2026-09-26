@@ -210,19 +210,19 @@ func (s *Scheduler) scanCompleted() {
 		nearDone  int
 		newlyDone []models.QBTorrent
 		// 诊断：nearDone 但没触发通知的原因统计
-		stateMismatch int // progress>=0.98 但 state 不是 done 状态
+		stateMismatch   int // progress>=0.98 但 state 不是 done 状态
 		alreadyNotified int // 已经在 finished 里
-		noCompletedOn int // completed_on=0
+		noCompletedOn   int // completed_on=0（老任务或 qB 迁移后丢了时间戳）
 	)
 	for _, t := range list {
 		if t.Progress >= 0.98 {
 			nearDone++
-			// 诊断：记录 nearDone 但没被选中的原因
-			if !isDoneState(t.State) {
+			switch {
+			case !isDoneState(t.State):
 				stateMismatch++
-			} else if s.finished[t.Hash] {
+			case s.finished[t.Hash]:
 				alreadyNotified++
-			} else if t.CompletedOn == 0 {
+			case t.CompletedOn == 0:
 				noCompletedOn++
 			}
 		}
@@ -230,24 +230,29 @@ func (s *Scheduler) scanCompleted() {
 			if t.CompletedOn > 0 {
 				s.finished[t.Hash] = true
 				newlyDone = append(newlyDone, t)
-			} else {
-				logger.Info.Printf("scheduler: skip %s (progress=%.4f state=%s completed_on=0)", t.Name, t.Progress, t.State)
 			}
+			// completed_on==0 的 nearDone 老任务不打印逐条日志，
+			// 汇总统计里已有 noCompletedOn 字段，需要排查时看那个数字就够了
 		}
 	}
 
-	// 每次扫描都输出诊断日志，方便排查
-	logger.Info.Printf("scheduler: scan done — total=%d nearDone(>=0.98)=%d newlyDone=%d | skipped reasons: stateMismatch=%d alreadyNotified=%d noCompletedOn=%d",
+	// 每次扫描输出汇总日志（一行搞定，6000 条任务也只打一行）
+	logger.Info.Printf("scheduler: scan done — total=%d nearDone(>=0.98)=%d newlyDone=%d | skipped: stateMismatch=%d alreadyNotified=%d noCompletedOn=%d",
 		total, nearDone, len(newlyDone), stateMismatch, alreadyNotified, noCompletedOn)
 
-	// 如果 nearDone > 0 但 newlyDone == 0 且 stateMismatch > 0，打印 nearDone torrent 的 state
-	// 这是最常见的"静默失败"场景
+	// 诊断 dump（默认不输出，只有 DEBUG 级别或状态异常时才输出，且有数量上限）
 	if nearDone > 0 && len(newlyDone) == 0 && stateMismatch > 0 {
-		logger.Info.Printf("scheduler: found %d torrents with progress>=0.98 but non-done state — dumping details:", stateMismatch)
+		const dumpLimit = 20
+		logger.Debug.Printf("scheduler: stateMismatch detail (showing up to %d of %d):", dumpLimit, stateMismatch)
+		dumped := 0
 		for _, t := range list {
 			if t.Progress >= 0.98 && !isDoneState(t.State) {
-				logger.Info.Printf("  → %s | progress=%.4f | state=%s | completed_on=%d | hash=%s",
+				dumped++
+				logger.Debug.Printf("  → %s | progress=%.4f | state=%s | completed_on=%d | hash=%s",
 					t.Name, t.Progress, t.State, t.CompletedOn, t.Hash[:10])
+				if dumped >= dumpLimit {
+					break
+				}
 			}
 		}
 	}
