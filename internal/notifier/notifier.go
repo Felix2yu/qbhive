@@ -23,7 +23,7 @@ func (n *Notifier) Reload(cfg models.NotifierConfig) {
 	n.client = apprise.New()
 	if cfg.Enabled && len(cfg.AppriseURLs) > 0 {
 		if err := n.client.AddAll(cfg.AppriseURLs...); err != nil {
-			logger.Warn.Printf("notifier reload: add urls failed: %v", err)
+			logger.Warn.Printf("通知器重载：添加 URL 失败：%v", err)
 		}
 	}
 }

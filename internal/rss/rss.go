@@ -158,13 +158,13 @@ func (e *Engine) loadSeen() {
 	data, err := os.ReadFile(e.stateFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			logger.Warn.Printf("rss: read seen state: %v", err)
+			logger.Warn.Printf("RSS 读取已见状态失败：%v", err)
 		}
 		return
 	}
 	var p seenPersist
 	if err := json.Unmarshal(data, &p); err != nil {
-		logger.Warn.Printf("rss: parse seen state: %v", err)
+		logger.Warn.Printf("RSS 解析已见状态失败：%v", err)
 		return
 	}
 	total := 0
@@ -176,7 +176,7 @@ func (e *Engine) loadSeen() {
 		e.seen[feedID] = m
 		total += len(keys)
 	}
-	logger.Info.Printf("rss: loaded %d previously-seen entries across %d feeds", total, len(p))
+	logger.Info.Printf("RSS 已加载 %d 条历史已见条目，覆盖 %d 个订阅源", total, len(p))
 }
 
 func (e *Engine) saveSeen() {
@@ -195,7 +195,7 @@ func (e *Engine) saveSeen() {
 	_ = os.MkdirAll(dir, 0o755)
 	tmp := e.stateFile + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		logger.Warn.Printf("rss: write seen state: %v", err)
+		logger.Warn.Printf("RSS 写入已见状态失败：%v", err)
 		return
 	}
 	_ = os.Rename(tmp, e.stateFile)
@@ -287,7 +287,7 @@ func (e *Engine) ResetFeed(feedID string) {
 	}
 	e.mu.Unlock()
 	e.saveSeen()
-	logger.Info.Printf("rss: reset seen state for feed=%s (next fetch will rescan all items)", feedID)
+	logger.Info.Printf("RSS 已重置订阅源 %s 的已见状态（下次拉取将重新扫描所有条目）", feedID)
 }
 
 // ResetAll 清空所有 feed 的 seen。
@@ -312,7 +312,7 @@ func (e *Engine) ResetAll() {
 	}
 	e.mu.Unlock()
 	e.saveSeen()
-	logger.Info.Println("rss: reset all seen states (next fetch will rescan all items)")
+	logger.Info.Println("RSS 已重置全部已见状态（下次拉取将重新扫描所有条目）")
 }
 
 // SetClient 热替换 qb 客户端
@@ -337,7 +337,7 @@ func (e *Engine) Reload(c *qb.Client) {
 	}
 	cfg := e.cfg.Get().RSS
 	if !cfg.Enabled {
-		logger.Info.Println("RSS disabled (via reload)")
+		logger.Info.Println("RSS 已停用（重载）")
 		return
 	}
 	e.runPoller()
@@ -350,14 +350,14 @@ func (e *Engine) Start() {
 func (e *Engine) runPoller() {
 	c := e.cfg.Get().RSS
 	if !c.Enabled {
-		logger.Info.Println("RSS disabled")
+		logger.Info.Println("RSS 已停用")
 		return
 	}
 	interval := time.Duration(c.Interval) * time.Minute
 	if interval <= 0 {
 		interval = 15 * time.Minute
 	}
-	logger.Info.Printf("RSS started, interval=%s", interval)
+	logger.Info.Printf("RSS 启动，间隔=%s", interval)
 
 	// 启动时立即跑一次
 	go e.fetchAll()
@@ -440,11 +440,11 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 	st.lastError = ""
 	st.mu.Unlock()
 
-	logger.Debug.Printf("RSS fetching %s (%s)", feed.Name, feed.URL)
+	logger.Debug.Printf("RSS 正在拉取 %s（%s）", feed.Name, feed.URL)
 
 	body, err := httpGet(feed.URL)
 	if err != nil {
-		logger.Warn.Printf("RSS feed %s fetch failed: %v", feed.Name, err)
+		logger.Warn.Printf("RSS 订阅源 %s 拉取失败：%v", feed.Name, err)
 		errStr := err.Error()
 		ok := false
 		st.mu.Lock()
@@ -456,7 +456,7 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 	}
 	var parsed rssFeed
 	if err := xml.Unmarshal(body, &parsed); err != nil {
-		logger.Warn.Printf("RSS feed %s parse failed: %v", feed.Name, err)
+		logger.Warn.Printf("RSS 订阅源 %s 解析失败：%v", feed.Name, err)
 		errStr := err.Error()
 		ok := false
 		st.mu.Lock()
@@ -475,7 +475,7 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 		st.forceRescan = false
 		st.mu.Unlock()
 		isFresh = false
-		logger.Info.Printf("RSS feed=%s force-rescan: skipping snapshot mode", feed.Name)
+		logger.Info.Printf("RSS 订阅源 %s 强制重扫：跳过快照模式", feed.Name)
 	}
 
 	e.mu.Lock()
@@ -508,7 +508,7 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 
 		if isFresh {
 			// 快照：第一次接入，只记下来不下载
-			logger.Info.Printf("RSS [snapshot] feed=%s item=%s (first seen, skipped)", feed.Name, item.Title)
+			logger.Info.Printf("RSS [快照] 订阅源 %s 条目 %s（首次见到，跳过）", feed.Name, item.Title)
 			st.mu.Lock()
 			st.pushRecent(RecentItem{Title: item.Title, Action: "skipped_snapshot", ProcessedAt: time.Now()})
 			st.mu.Unlock()
@@ -543,7 +543,7 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 	}
 
 	if isFresh {
-		logger.Info.Printf("RSS feed=%s first snapshot: %d items marked, none downloaded (save seen once per feed)",
+		logger.Info.Printf("RSS 订阅源 %s 首次快照：%d 条目标记，未下载（每个订阅源保存一次已见状态）",
 			feed.Name, len(newlySeen))
 		e.mu.Lock()
 		for _, k := range newlySeen {
@@ -574,7 +574,7 @@ func (e *Engine) processItem(feed models.RSSFeed, item rssItem) (string, error) 
 		if !matchRule(rule, item.Title) {
 			continue
 		}
-		logger.Info.Printf("RSS matched: feed=%s item=%s rule=%s", feed.Name, item.Title, rule.Name)
+		logger.Info.Printf("RSS 规则命中：订阅源 %s 条目 %s 规则 %s", feed.Name, item.Title, rule.Name)
 
 		torrentURL := item.Enclosure.URL
 		if torrentURL == "" {
@@ -585,11 +585,11 @@ func (e *Engine) processItem(feed models.RSSFeed, item rssItem) (string, error) 
 		}
 		data, err := httpGet(torrentURL)
 		if err != nil {
-			logger.Warn.Printf("RSS download torrent failed: %v url=%s (will retry next cycle)", err, torrentURL)
+			logger.Warn.Printf("RSS 下载种子失败：%v url=%s（下一周期重试）", err, torrentURL)
 			return rule.Name, fmt.Errorf("下载 torrent 失败: %w", err)
 		}
 		if err := e.client.AddTorrent(data, rule.SavePath, rule.Category, rule.Tags, rule.UploadLimit); err != nil {
-			logger.Warn.Printf("RSS add torrent failed: %v (will retry next cycle)", err)
+			logger.Warn.Printf("RSS 添加种子失败：%v（下一周期重试）", err)
 			return rule.Name, fmt.Errorf("添加到 qBittorrent 失败: %w", err)
 		}
 		return rule.Name, nil

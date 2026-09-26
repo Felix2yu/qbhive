@@ -44,28 +44,28 @@ func (m *Manager) Reload(c *qb.Client) {
 	}
 	cfg := m.cfg.Get().FileManager
 	if !cfg.Enabled {
-		logger.Info.Println("FileManager disabled (via reload)")
+		logger.Info.Println("文件管理已停用（重载）")
 		return
 	}
 	interval := time.Duration(cfg.ScanInterval) * time.Second
 	if interval <= 0 {
 		interval = 15 * time.Second
 	}
-	logger.Info.Printf("FileManager reloaded, interval=%s", interval)
+	logger.Info.Printf("文件管理重载，间隔=%s", interval)
 	m.runTicker(interval)
 }
 
 func (m *Manager) Start() {
 	c := m.cfg.Get().FileManager
 	if !c.Enabled {
-		logger.Info.Println("FileManager disabled")
+		logger.Info.Println("文件管理已停用")
 		return
 	}
 	interval := time.Duration(c.ScanInterval) * time.Second
 	if interval <= 0 {
 		interval = 15 * time.Second
 	}
-	logger.Info.Printf("FileManager started, interval=%s", interval)
+	logger.Info.Printf("文件管理启动，间隔=%s", interval)
 	m.runTicker(interval)
 }
 
@@ -95,7 +95,7 @@ func (m *Manager) Stop() {
 func (m *Manager) scan() {
 	list, err := m.client.GetTorrents()
 	if err != nil {
-		logger.Warn.Printf("FileManager get torrents failed: %v", err)
+		logger.Warn.Printf("文件管理获取任务列表失败：%v", err)
 		return
 	}
 	for _, t := range list {
@@ -121,7 +121,7 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 	torrentDir := filepath.Join(t.SavePath, t.Name)
 	info, err := os.Stat(torrentDir)
 	if err != nil {
-		logger.Debug.Printf("FileManager: dir %s not exist, maybe already flat: %v", torrentDir, err)
+		logger.Debug.Printf("文件管理：目录 %s 不存在，可能已扁平化：%v", torrentDir, err)
 		return
 	}
 	if !info.IsDir() {
@@ -129,7 +129,7 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 	}
 	entries, err := os.ReadDir(torrentDir)
 	if err != nil {
-		logger.Warn.Printf("FileManager read dir %s failed: %v", torrentDir, err)
+		logger.Warn.Printf("文件管理读取目录 %s 失败：%v", torrentDir, err)
 		return
 	}
 	// 过滤掉隐藏文件
@@ -151,14 +151,14 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 
 	// 1) 先通过 qB API 暂停 torrent（已经是 pausedUP，这里只是防御）
 	if err := m.client.PauseTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("FileManager pause torrent %s failed: %v", t.Name, err)
+		logger.Warn.Printf("文件管理暂停任务 %s 失败：%v", t.Name, err)
 		// 继续尝试，失败再回退
 	}
 
 	// 2) 走 qB renameFile API，让 qB 感知文件移动，保护做种一致性
 	done := false
 	if err := m.client.RenameFile(t.Hash, torrentRelativeOld, torrentRelativeNew); err != nil {
-		logger.Warn.Printf("FileManager qB renameFile failed (%s -> %s): %v, falling back to local os.Rename",
+		logger.Warn.Printf("文件管理 qB renameFile 失败（%s → %s）：%v，回退到本地 os.Rename",
 			torrentRelativeOld, torrentRelativeNew, err)
 		// 回退：本地 os.Rename（仅在 qB renameFile 不可用时，且任务已暂停）
 		src := filepath.Join(torrentDir, fileName)
@@ -169,7 +169,7 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 			dst = filepath.Join(t.SavePath, base+"_"+t.Hash[:8]+ext)
 		}
 		if err := os.Rename(src, dst); err != nil {
-			logger.Warn.Printf("FileManager local rename %s -> %s failed: %v", src, dst, err)
+			logger.Warn.Printf("文件管理本地重命名 %s → %s 失败：%v", src, dst, err)
 			// 失败尝试恢复 torrent，避免用户以为还在暂停
 			_ = m.client.ResumeTorrents(t.Hash)
 			return
@@ -180,14 +180,14 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 
 	// 3) 恢复 torrent（仅针对 qB renameFile 成功 / 本地回退成功）
 	if err := m.client.ResumeTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("FileManager resume torrent %s failed: %v", t.Name, err)
+		logger.Warn.Printf("文件管理恢复任务 %s 失败：%v", t.Name, err)
 	}
 
 	// 4) 尝试移除空目录（qB renameFile 不会自动清理空目录）
 	if err := os.Remove(torrentDir); err != nil {
-		logger.Debug.Printf("FileManager remove dir %s failed: %v", torrentDir, err)
+		logger.Debug.Printf("文件管理删除目录 %s 失败：%v", torrentDir, err)
 	} else {
-		logger.Info.Printf("FileManager moved %s -> %s (%s)", torrentRelativeOld, torrentRelativeNew,
+		logger.Info.Printf("文件管理移动 %s → %s（%s）", torrentRelativeOld, torrentRelativeNew,
 			map[bool]string{true: "via qB API", false: "fallback local"}[done])
 	}
 }

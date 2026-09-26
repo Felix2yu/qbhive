@@ -48,28 +48,28 @@ func (l *Limiter) Reload(c *qb.Client) {
 	l.lastLimits = make(map[string]int64)
 	cfg := l.cfg.Get().Limiter
 	if !cfg.Enabled {
-		logger.Info.Println("Limiter disabled (via reload)")
+		logger.Info.Println("限速器已停用（重载）")
 		return
 	}
 	interval := time.Duration(cfg.Interval) * time.Second
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	logger.Info.Printf("Limiter reloaded, interval=%s", interval)
+	logger.Info.Printf("限速器重载，间隔=%s", interval)
 	l.runTicker(interval)
 }
 
 func (l *Limiter) Start() {
 	c := l.cfg.Get().Limiter
 	if !c.Enabled {
-		logger.Info.Println("Limiter disabled")
+		logger.Info.Println("限速器已停用")
 		return
 	}
 	interval := time.Duration(c.Interval) * time.Second
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	logger.Info.Printf("Limiter started, interval=%s", interval)
+	logger.Info.Printf("限速器启动，间隔=%s", interval)
 	l.runTicker(interval)
 }
 
@@ -101,7 +101,7 @@ func (l *Limiter) apply() {
 	rules := l.cfg.Get().Limiter.Rules
 	torrents, err := l.client.GetTorrents("all")
 	if err != nil {
-		logger.Warn.Printf("Limiter get torrents failed: %v", err)
+		logger.Warn.Printf("限速器获取任务列表失败：%v", err)
 		return
 	}
 	// 本轮命中的 hash 集合：结束后把没命中过的 hash 从 lastLimits 里剔掉（对应 torrent 删了/规则改了）
@@ -138,12 +138,12 @@ func (l *Limiter) apply() {
 			continue // 值没变，跳过 API 调用
 		}
 		if err := l.client.SetUploadLimit(t.Hash, limit); err != nil {
-			logger.Warn.Printf("limiter set limit hash=%s err=%v", t.Hash, err)
+			logger.Warn.Printf("限速器设置限速 hash=%s 失败：%v", t.Hash, err)
 			continue
 		}
 		l.lastLimits[t.Hash] = limit
 		changes++
-		logger.Debug.Printf("limiter: torrent=%s limit=%d (matched)", t.Name, limit)
+		logger.Debug.Printf("限速器：任务 %s 限速 %d（规则命中）", t.Name, limit)
 	}
 	// 清理已消失 torrent 的 lastLimits
 	for h := range l.lastLimits {
@@ -152,7 +152,7 @@ func (l *Limiter) apply() {
 		}
 	}
 	if changes > 0 {
-		logger.Info.Printf("Limiter apply: %d torrents changed", changes)
+		logger.Info.Printf("限速器应用完成：%d 个任务被修改", changes)
 	}
 }
 
@@ -174,7 +174,7 @@ func (l *Limiter) ApplyToTorrent(hash, name string) {
 			limit = -1
 		}
 		_ = l.client.SetUploadLimit(hash, limit)
-		logger.Info.Printf("apply rule=%s to %s uploadLimit=%d", r.Name, name, r.UploadLimit)
+		logger.Info.Printf("应用规则 %s → %s 上传限速 %d", r.Name, name, r.UploadLimit)
 		return
 	}
 }

@@ -57,7 +57,7 @@ func (c *Client) do(method, path string, body io.Reader, contentType string) (*h
 	// 这里统一嗅探 body：如果看起来是认证失败，自动重登 + 重试一次
 	if path != "/api/v2/auth/login" && c._looksAuthFailure(resp) {
 		_ = resp.Body.Close()
-		logger.Warn.Printf("qb: auth failure detected (status=%d body-sniffed), re-login and retry %s %s", resp.StatusCode, method, path)
+		logger.Warn.Printf("qB 鉴权失败（状态=%d，响应片段），重新登录后重试 %s %s", resp.StatusCode, method, path)
 		c.cookie = ""
 		if c.login() != nil {
 			return nil, fmt.Errorf("auto re-login failed")
@@ -275,7 +275,7 @@ func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 	if err != nil {
 		// 非 JSON 错误：判断是不是 qBittorrent 返回了错误字符串
 		if data != nil && isQBErrorString(data) {
-			logger.Warn.Printf("GetTorrents: qB returned error string %q (filter=%q sort=%q reverse=%q), forcing re-login + retry",
+			logger.Warn.Printf("GetTorrents: qB 返回错误字符串 %q（filter=%q sort=%q reverse=%q），强制重新登录并重试",
 				strings.TrimSpace(string(data)), filter, sort, reverse)
 			c.cookie = ""
 			if err2 := c.login(); err2 != nil {
@@ -284,13 +284,13 @@ func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 			// 重试一次
 			list2, _, err2 := runOnce()
 			if err2 != nil {
-				logger.Warn.Printf("GetTorrents retry still failed: %v", err2)
+				logger.Warn.Printf("GetTorrents 重试仍失败：%v", err2)
 				return nil, fmt.Errorf("parse error (filter=%q sort=%q reverse=%q): %v (qB raw body: %s)", filter, sort, reverse, err2, string(data[:min(len(data), 200)]))
 			}
 			return list2, nil
 		}
 		// 其他 parse error（不是 qB 认证/参数错误）
-		logger.Warn.Printf("GetTorrents JSON parse failed filter=%q sort=%q reverse=%q body-first-200=%q err=%v",
+		logger.Warn.Printf("GetTorrents JSON 解析失败 filter=%q sort=%q reverse=%q 响应前 200 字节=%q err=%v",
 			filter, sort, reverse, string(data[:min(len(data), 200)]), err)
 		return nil, err
 	}
@@ -449,7 +449,7 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		logger.Warn.Printf("AddTorrent status=%d body=%s", resp.StatusCode, string(b))
+		logger.Warn.Printf("添加种子失败 status=%d body=%s", resp.StatusCode, string(b))
 	}
 	if uploadLimitKB > 0 {
 		go func() {

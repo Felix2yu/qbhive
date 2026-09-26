@@ -29,9 +29,9 @@ func main() {
 
 	qbCli := qb.New(cfg.Qbittorrent.URL, cfg.Qbittorrent.Username, cfg.Qbittorrent.Password, cfg.Qbittorrent.APIKey)
 	if err := qbCli.TestConnection(); err != nil {
-		logger.Warn.Printf("qbittorrent connection test failed: %v (continuing anyway)", err)
+		logger.Warn.Printf("qBittorrent 连接测试失败：%v（继续启动）", err)
 	} else {
-		logger.Info.Println("qbittorrent connected OK")
+		logger.Info.Println("qBittorrent 连接正常")
 	}
 
 	notif := notifier.New(cfg.Notifier)
@@ -45,19 +45,19 @@ func main() {
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch)
 
 	go func() {
-		logger.Info.Printf("QBHive listening on %s", cfg.Server.Listen)
+		logger.Info.Printf("QBHive 监听地址 %s", cfg.Server.Listen)
 		if err := srv.Start(*webDir); err != nil {
-			logger.Error.Fatalf("server error: %v", err)
+			logger.Error.Fatalf("服务启动失败：%v", err)
 		}
 	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
-	logger.Info.Println("shutting down...")
+	logger.Info.Println("正在关闭...")
 	sch.Stop()
 	_ = srv.Shutdown()
-	logger.Info.Println("bye")
+	logger.Info.Println("已退出")
 }
 
 func defaultPath() string {

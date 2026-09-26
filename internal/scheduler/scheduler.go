@@ -71,7 +71,7 @@ func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	s.rssEngine.Reload(nil)
 
 	// 3) notifier 内部已经 Reload，在 web.server.saveConfig 里单独调
-	logger.Info.Println("Scheduler: ReloadAll done (qb credentials + all subsystems)")
+	logger.Info.Println("调度器：ReloadAll 完成（qB 凭据 + 所有子系统）")
 }
 
 // defaultStatePath 返回 finished.json 的默认路径。
@@ -88,19 +88,19 @@ func (s *Scheduler) loadFinished() {
 	data, err := os.ReadFile(s.stateFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			logger.Warn.Printf("scheduler: read finished state: %v", err)
+			logger.Warn.Printf("调度器读取已完成状态失败：%v", err)
 		}
 		return
 	}
 	var list []string
 	if err := json.Unmarshal(data, &list); err != nil {
-		logger.Warn.Printf("scheduler: parse finished state: %v", err)
+		logger.Warn.Printf("调度器解析已完成状态失败：%v", err)
 		return
 	}
 	for _, h := range list {
 		s.finished[h] = true
 	}
-	logger.Info.Printf("scheduler: loaded %d previously-notified hashes", len(list))
+	logger.Info.Printf("调度器已加载 %d 条历史已通知哈希", len(list))
 }
 
 func (s *Scheduler) saveFinished() {
@@ -115,7 +115,7 @@ func (s *Scheduler) saveFinished() {
 	_ = os.MkdirAll(dir, 0o755)
 	tmp := s.stateFile + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		logger.Warn.Printf("scheduler: write finished state: %v", err)
+		logger.Warn.Printf("调度器写入已完成状态失败：%v", err)
 		return
 	}
 	_ = os.Rename(tmp, s.stateFile)
@@ -130,7 +130,7 @@ func (s *Scheduler) Start() {
 	go s.prefillFinished()
 
 	// 完成通知：每 10 秒扫一次
-	logger.Info.Println("Scheduler: notification scanner started")
+	logger.Info.Println("调度器：完成通知扫描器已启动")
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -165,7 +165,7 @@ func (s *Scheduler) Start() {
 func (s *Scheduler) prefillFinished() {
 	list, err := s.client.GetTorrents("completed", "", "")
 	if err != nil {
-		logger.Warn.Printf("scheduler: prefill get completed: %v", err)
+		logger.Warn.Printf("调度器预填充获取已完成任务失败：%v", err)
 		return
 	}
 	s.mu.Lock()
@@ -182,7 +182,7 @@ func (s *Scheduler) prefillFinished() {
 	}
 	s.mu.Unlock()
 	if n > 0 {
-		logger.Info.Printf("scheduler: prefilled %d historical completed torrents into finished set", n)
+		logger.Info.Printf("调度器已预填充 %d 条历史已完成任务到已完成集合", n)
 		s.saveFinished()
 	}
 }
@@ -199,7 +199,7 @@ func (s *Scheduler) scanCompleted() {
 	cfg := s.cfg.Get()
 	list, err := s.client.GetTorrents("all", "", "")
 	if err != nil {
-		logger.Warn.Printf("scheduler: scan all torrents failed: %v", err)
+		logger.Warn.Printf("调度器扫描全部任务失败：%v", err)
 		return
 	}
 	s.mu.Lock()
@@ -237,18 +237,18 @@ func (s *Scheduler) scanCompleted() {
 	}
 
 	// 每次扫描输出汇总日志（一行搞定，6000 条任务也只打一行）
-	logger.Info.Printf("scheduler: scan done — total=%d nearDone(>=0.98)=%d newlyDone=%d | skipped: stateMismatch=%d alreadyNotified=%d noCompletedOn=%d",
+	logger.Info.Printf("调度器：扫描完成 — 总数=%d 接近完成(>=0.98)=%d 新完成=%d | 跳过原因：状态不匹配=%d 已通知=%d completed_on=0=%d",
 		total, nearDone, len(newlyDone), stateMismatch, alreadyNotified, noCompletedOn)
 
 	// 诊断 dump（默认不输出，只有 DEBUG 级别或状态异常时才输出，且有数量上限）
 	if nearDone > 0 && len(newlyDone) == 0 && stateMismatch > 0 {
 		const dumpLimit = 20
-		logger.Debug.Printf("scheduler: stateMismatch detail (showing up to %d of %d):", dumpLimit, stateMismatch)
+		logger.Debug.Printf("调度器：状态不匹配详情（最多显示 %d / %d）：", dumpLimit, stateMismatch)
 		dumped := 0
 		for _, t := range list {
 			if t.Progress >= 0.98 && !isDoneState(t.State) {
 				dumped++
-				logger.Debug.Printf("  → %s | progress=%.4f | state=%s | completed_on=%d | hash=%s",
+				logger.Debug.Printf("  → 名称=%s 进度=%.4f 状态=%s 完成时间戳=%d 哈希=%s",
 					t.Name, t.Progress, t.State, t.CompletedOn, t.Hash[:10])
 				if dumped >= dumpLimit {
 					break
@@ -259,19 +259,19 @@ func (s *Scheduler) scanCompleted() {
 
 	if len(newlyDone) > 0 {
 		for _, t := range newlyDone {
-			logger.Info.Printf("completed: %s | size=%s | state=%s | category=%s",
+			logger.Info.Printf("下载完成：名称=%s 大小=%s 状态=%s 分类=%s",
 				t.Name, humanSize(t.Size), t.State, t.Category)
 
 			if cfg.Notifier.Enabled && len(cfg.Notifier.AppriseURLs) > 0 {
 				title := fmt.Sprintf("✅ 下载完成 · %s", t.Name)
 				body := buildCompletedBody(t)
 				if err := s.notifier.Notify(title, body); err != nil {
-					logger.Warn.Printf("scheduler: notify failed for %s: %v", t.Name, err)
+					logger.Warn.Printf("调度器：通知发送失败 %s：%v", t.Name, err)
 				} else {
-					logger.Info.Printf("scheduler: notification sent for %s", t.Name)
+					logger.Info.Printf("调度器：通知已发送 %s", t.Name)
 				}
 			} else {
-				logger.Warn.Printf("scheduler: notifier disabled or no URLs — skipping notification for %s", t.Name)
+				logger.Warn.Printf("调度器：通知器未启用或未配置 URL — 跳过通知 %s", t.Name)
 			}
 		}
 		s.saveFinished()
