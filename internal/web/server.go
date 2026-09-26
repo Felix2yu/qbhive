@@ -1,11 +1,13 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"context"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
+	"github.com/Felix2yu/qbhive/internal/logger"
 	"github.com/Felix2yu/qbhive/internal/limiter"
 	"github.com/Felix2yu/qbhive/internal/models"
 	"github.com/Felix2yu/qbhive/internal/notifier"
@@ -146,6 +149,7 @@ func (s *Server) Start(webRoot string) error {
 		api.POST("/test-qb", s.testQB)
 
 		api.GET("/torrents", s.listTorrents)
+		api.GET("/debug/qb-raw", s.debugQBRaw)
 		api.GET("/torrents/stats", s.torrentsStats)
 		api.POST("/torrents/:hash/limit", s.setTorrentLimit)
 
@@ -334,6 +338,47 @@ func (s *Server) testQB(c *gin.Context) {
 		return
 	}
 	c.JSON(200, models.APIResponse{Success: true})
+}
+
+// debugQBRaw 直接透传 qBittorrent /api/v2/torrents/info 原始响应（不做 JSON 解析）
+// 用来排查 qBittorrent 对特定参数组合返回了什么
+func (s *Server) debugQBRaw(c *gin.Context) {
+	filter := c.Query("filter")
+	sort := c.Query("sort")
+	reverse := c.Query("reverse")
+
+	// 自己拼 URL 绕过 client.do 的自动重登，看最原始的 qB 响应
+	qbURL := s.cfg.Get().Qbittorrent.URL
+	if qbURL == "" {
+		c.String(500, "no qbittorrent url configured")
+		return
+	}
+	v := url.Values{}
+	if filter != "" { v.Set("filter", filter) }
+	if sort != "" { v.Set("sort", sort) }
+	if reverse != "" { v.Set("reverse", reverse) }
+	path := "/api/v2/torrents/info"
+	if len(v) > 0 { path += "?" + v.Encode() }
+
+	reqURL := qbURL + path
+	logger.Info.Printf("debugQBRaw GET %s (apiKey=%v cookie=%q)", reqURL, s.cfg.Get().Qbittorrent.APIKey != "", s.qbClient.GetCookie())
+
+	req, _ := http.NewRequest("GET", reqURL, nil)
+	if key := s.cfg.Get().Qbittorrent.APIKey; key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	} else if ck := s.qbClient.GetCookie(); ck != "" {
+		req.Header.Set("Cookie", ck)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.String(502, "ERR: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.String(200, "=== qBittorrent raw response ===\nURL: %s\nStatus: %d\nContent-Length: %d\n\nBODY:\n%s",
+		reqURL, resp.StatusCode, len(body), string(body[:min(len(body), 2000)]))
 }
 
 func (s *Server) listTorrents(c *gin.Context) {

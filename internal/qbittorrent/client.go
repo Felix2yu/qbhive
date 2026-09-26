@@ -193,6 +193,8 @@ func (c *Client) login() error {
 	return nil
 }
 
+func (c *Client) GetCookie() string { return c.cookie }
+
 func mustParse(s string) *url.URL { u, _ := url.Parse(s); return u }
 
 func (c *Client) TestConnection() error {
