@@ -284,7 +284,11 @@ async function refreshDashboard(root) {
   const sb = root.querySelector(".status-bar");
   if (sb) sb.classList.add("refreshing");
 
-  const t = await api("GET", "/torrents/stats");
+  // stats 与最近活跃列表并发拉取，首屏等待从「二者之和」降到「取最大」
+  const [t, top10] = await Promise.all([
+    api("GET", "/torrents/stats"),
+    api("GET", "/torrents?filter=active&limit=10&sort=added_on&reverse=true"),
+  ]);
   const s = t.data || {};
   const dlSpeed = s.dlSpeed || 0, upSpeed = s.upSpeed || 0;
   const dlLimit = s.dlSpeedLimit || 0, upLimit = s.upSpeedLimit || 0;
@@ -319,8 +323,7 @@ async function refreshDashboard(root) {
   const sg = root.querySelector("#dash-speed-group");
   if (sg) sg.innerHTML = speedBar(dlSpeed, dlLimit, "dl") + speedBar(upSpeed, upLimit, "up");
 
-  // 任务列表：后台获取，到了再替换
-  const top10 = await api("GET", "/torrents?filter=active&limit=10&sort=added_on&reverse=true");
+  // 任务列表：已与 stats 并发获取，到了再替换
   const list = top10.data || [];
   const slot = root.querySelector("#dash-latest");
   if (slot) {

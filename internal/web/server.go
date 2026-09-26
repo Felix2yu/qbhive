@@ -570,7 +570,8 @@ func (s *Server) listTorrents(c *gin.Context) {
 }
 
 // torrentsStats 是概览页用的轻量统计，不走 info 大接口。
-// 拉一次 transfer info（全局速度） + active/stoppedUP/stoppedDL 的数量，3 秒缓存。
+// 并发拉 transfer info（全局速度）+ active 列表 + stopped 列表，3 秒缓存。
+// 原先是串行 3 次 qB 请求，每次网络往返延迟叠加；改为并发后墙钟时间降到「取单次最大延迟」。
 
 func (s *Server) torrentsStats(c *gin.Context) {
 	// 查缓存
@@ -583,16 +584,35 @@ func (s *Server) torrentsStats(c *gin.Context) {
 	}
 	s.scacheMu.Unlock()
 
-	// 拉速度（轻量，单次）
-	ti, err := s.qbClient.GetTransferInfo()
-	if err != nil {
-		c.JSON(502, models.APIResponse{Success: false, Message: err.Error()})
+	var (
+		ti          *qb.TransferInfo
+		tiErr       error
+		activeList  []models.QBTorrent
+		stoppedList []models.QBTorrent
+	)
+	// 三次 qB 请求并发：transferInfo + active + stopped（保持原计数语义，仅消除串行延迟）
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		ti, tiErr = s.qbClient.GetTransferInfo()
+	}()
+	go func() {
+		defer wg.Done()
+		activeList, _ = s.qbClient.GetTorrents("active", "", "")
+	}()
+	go func() {
+		defer wg.Done()
+		// qBittorrent v5.0+ stopped filter 包含 stoppedUP + stoppedDL
+		stoppedList, _ = s.qbClient.GetTorrents("stopped", "", "")
+	}()
+	wg.Wait()
+
+	// 速度（transfer info）失败是致命的；列表失败则计数归零（与原行为一致）
+	if tiErr != nil {
+		c.JSON(502, models.APIResponse{Success: false, Message: tiErr.Error()})
 		return
 	}
-
-	activeList, _ := s.qbClient.GetTorrents("active", "", "")
-	// qBittorrent v5.0+ stopped filter 包含 stoppedUP + stoppedDL
-	stoppedList, _ := s.qbClient.GetTorrents("stopped", "", "")
 
 	var (
 		stoppedUpCount int
@@ -624,17 +644,17 @@ func (s *Server) torrentsStats(c *gin.Context) {
 	}
 
 	out := map[string]interface{}{
-		"dlSpeed":         ti.DlSpeed,
-		"upSpeed":         ti.UpSpeed,
-		"dlSpeedLimit":    ti.DlSpeedLimit,
-		"upSpeedLimit":    ti.UpSpeedLimit,
-		"activeCount":     len(activeList),
-		"stoppedUP":       stoppedUpCount,
-		"stoppedDL":       stoppedDlCount,
+		"dlSpeed":          ti.DlSpeed,
+		"upSpeed":          ti.UpSpeed,
+		"dlSpeedLimit":     ti.DlSpeedLimit,
+		"upSpeedLimit":     ti.UpSpeedLimit,
+		"activeCount":      len(activeList),
+		"stoppedUP":        stoppedUpCount,
+		"stoppedDL":        stoppedDlCount,
 		"downloadingCount": downloadingCount,
-		"seedingCount":    seedingCount,
-		"stalledCount":    stalledCount,
-		"erroredCount":    erroredCount,
+		"seedingCount":     seedingCount,
+		"stalledCount":     stalledCount,
+		"erroredCount":     erroredCount,
 	}
 
 	// 写缓存
