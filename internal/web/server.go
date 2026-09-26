@@ -155,6 +155,8 @@ func (s *Server) Start(webRoot string) error {
 		api.GET("/torrents/stats", s.torrentsStats)
 		api.POST("/torrents/:hash/limit", s.setTorrentLimit)
 
+		api.GET("/rss/status", s.rssStatus)
+		api.POST("/rss/reset", s.rssReset)
 		api.POST("/rss/force", s.forceRSS)
 
 		api.POST("/notify/test", s.testNotify)
@@ -556,6 +558,29 @@ func (s *Server) setTorrentLimit(c *gin.Context) {
 func (s *Server) forceRSS(c *gin.Context) {
 	s.rssEngine.ForceFetch()
 	c.JSON(200, models.APIResponse{Success: true, Message: "RSS fetch triggered"})
+}
+
+// rssReset 清空指定 feed (feedId) 或全部 (feedId=空字符串) 的 seen 状态。
+// 用户修改匹配规则后调这个 + 立即拉取，让新规则对历史条目重新评估。
+func (s *Server) rssReset(c *gin.Context) {
+	var body struct {
+		FeedID string `json:"feedId"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	if body.FeedID == "" {
+		s.rssEngine.ResetAll()
+	} else {
+		s.rssEngine.ResetFeed(body.FeedID)
+	}
+	s.rssEngine.ForceFetch() // 重置后立刻拉一次，新规则立即生效
+	c.JSON(200, models.APIResponse{Success: true, Message: "RSS seen reset, fetch triggered"})
+}
+
+func (s *Server) rssStatus(c *gin.Context) {
+	c.JSON(200, models.APIResponse{Success: true, Data: s.rssEngine.Status()})
 }
 
 func (s *Server) testNotify(c *gin.Context) {

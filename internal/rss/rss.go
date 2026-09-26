@@ -1,6 +1,7 @@
 package rss
 
 import (
+	"container/list"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -18,6 +19,71 @@ import (
 	"github.com/Felix2yu/qbhive/internal/models"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
 )
+
+// FeedStatus 是对外暴露的订阅源运行状态（纯数据，可 JSON 序列化）
+type FeedStatus struct {
+	FeedID      string       `json:"feedId"`
+	FeedName    string       `json:"feedName"`
+	URL         string       `json:"url"`
+	Enabled     bool         `json:"enabled"`
+	LastFetchAt time.Time    `json:"lastFetchAt"` // 最近一次拉取开始时间
+	Fetching    bool         `json:"fetching"`    // 此刻是否正在拉取
+	LastOK      *bool        `json:"lastOk"`      // 最近一次拉取是否成功（nil = 还没拉过）
+	LastError   string       `json:"lastError"`   // 最近一次拉取错误消息（空=无错）
+	ItemCount   int          `json:"itemCount"`   // 最近一次拉取解析到的条目数
+	Matched     int          `json:"matched"`     // 命中规则的条目数
+	Downloaded  int          `json:"downloaded"`  // 成功提交给 qB 的条目数
+	Failed      int          `json:"failed"`      // 提交 qB 失败（会重试）的条目数
+	Snapshot    bool         `json:"snapshot"`    // 最近一次是快照（首次接入，只 mark seen 不下）
+	RecentItems []RecentItem `json:"recentItems"` // 最近处理过的条目（最多 100 条，按时间倒序）
+	SeenCount   int          `json:"seenCount"`   // 该 feed 已见过（去重）的条目总数
+}
+
+// RecentItem 是最近一次 fetch 里处理过的某条记录
+type RecentItem struct {
+	Title       string    `json:"title"`
+	RuleName    string    `json:"ruleName,omitempty"`
+	Action      string    `json:"action"` // downloaded / skipped_no_rule / skipped_snapshot / failed
+	Error       string    `json:"error,omitempty"`
+	ProcessedAt time.Time `json:"processedAt"`
+}
+
+// feedState 是 Engine 内部的运行态（含 list.List，JSON 不友好，所以 Status() 会做转换）
+type feedState struct {
+	mu          sync.Mutex
+	fetching    bool
+	lastFetchAt time.Time
+	lastOK      *bool
+	lastError   string
+	itemCount   int
+	matched     int
+	downloaded  int
+	failed      int
+	snapshot    bool
+	recent      *list.List // 值 = RecentItem（按时间从新到旧；最多 100）
+	seenCount   int
+	forceRescan bool // 由 ResetFeed 置 true：下次 fetch 强制跳过快照，对所有条目重新跑规则
+}
+
+func newFeedState() *feedState {
+	return &feedState{recent: list.New()}
+}
+
+func (s *feedState) pushRecent(r RecentItem) {
+	// 最多保留 100 条，足够看清楚整轮拉取的处理结果，又不会无限膨胀
+	s.recent.PushFront(r)
+	for s.recent.Len() > 100 {
+		s.recent.Remove(s.recent.Back())
+	}
+}
+
+func (s *feedState) collectRecent() []RecentItem {
+	out := make([]RecentItem, 0, s.recent.Len())
+	for e := s.recent.Front(); e != nil; e = e.Next() {
+		out = append(out, e.Value.(RecentItem))
+	}
+	return out
+}
 
 type rssFeed struct {
 	XMLName xml.Name `xml:"rss"`
@@ -61,6 +127,9 @@ type Engine struct {
 	// 已处理的条目，按 feed ID 分组去重
 	seen map[string]map[string]bool
 	mu   sync.Mutex
+
+	// 每个 feed ID 的运行态（状态面板用）
+	states map[string]*feedState
 }
 
 func New(cfg *config.Manager, client *qb.Client) *Engine {
@@ -69,6 +138,7 @@ func New(cfg *config.Manager, client *qb.Client) *Engine {
 		client: client,
 		stop:   make(chan struct{}),
 		seen:   make(map[string]map[string]bool),
+		states: make(map[string]*feedState),
 	}
 	e.stateFile = defaultStatePath()
 	e.loadSeen()
@@ -137,6 +207,112 @@ func (e *Engine) isFreshFeed(feedID string) bool {
 	defer e.mu.Unlock()
 	m, ok := e.seen[feedID]
 	return !ok || len(m) == 0
+}
+
+func (e *Engine) getOrCreateState(feedID string) *feedState {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s, ok := e.states[feedID]
+	if !ok {
+		s = newFeedState()
+		e.states[feedID] = s
+	}
+	return s
+}
+
+// Status 返回当前所有订阅源的运行状态。前端状态面板用。
+// 返回 key 是 feedID；配置里已禁用/删除的 feed 不会出现在 map 里。
+func (e *Engine) Status() []FeedStatus {
+	c := e.cfg.Get().RSS
+	e.mu.Lock()
+	// 拍一份 seen 的计数快照，避免在 state 锁里再去碰 seen
+	seenCounts := make(map[string]int, len(e.seen))
+	for fid, m := range e.seen {
+		seenCounts[fid] = len(m)
+	}
+	statesCopy := make(map[string]*feedState, len(e.states))
+	for fid, s := range e.states {
+		statesCopy[fid] = s
+	}
+	e.mu.Unlock()
+
+	out := make([]FeedStatus, 0, len(c.Feeds))
+	for _, f := range c.Feeds {
+		s := statesCopy[f.ID]
+		fs := FeedStatus{
+			FeedID:   f.ID,
+			FeedName: f.Name,
+			URL:      f.URL,
+			Enabled:  f.Enabled,
+		}
+		if s != nil {
+			s.mu.Lock()
+			fs.LastFetchAt = s.lastFetchAt
+			fs.Fetching = s.fetching
+			fs.LastOK = s.lastOK
+			fs.LastError = s.lastError
+			fs.ItemCount = s.itemCount
+			fs.Matched = s.matched
+			fs.Downloaded = s.downloaded
+			fs.Failed = s.failed
+			fs.Snapshot = s.snapshot
+			fs.RecentItems = s.collectRecent()
+			s.mu.Unlock()
+		}
+		fs.SeenCount = seenCounts[f.ID]
+		out = append(out, fs)
+	}
+	return out
+}
+
+// ResetFeed 清空指定 feed 的已见过条目和运行态。
+// 用户修改了匹配规则后调这个 → 下次拉取会重新对所有条目跑规则，而不是因为 seen 跳过。
+// 同时调 ForceFetch 立即可见效果。
+func (e *Engine) ResetFeed(feedID string) {
+	e.mu.Lock()
+	delete(e.seen, feedID)
+	if s, ok := e.states[feedID]; ok {
+		s.mu.Lock()
+		s.fetching = false
+		s.lastOK = nil
+		s.lastError = ""
+		s.itemCount = 0
+		s.matched = 0
+		s.downloaded = 0
+		s.failed = 0
+		s.snapshot = false
+		s.forceRescan = true
+		s.recent = list.New()
+		s.mu.Unlock()
+	}
+	e.mu.Unlock()
+	e.saveSeen()
+	logger.Info.Printf("rss: reset seen state for feed=%s (next fetch will rescan all items)", feedID)
+}
+
+// ResetAll 清空所有 feed 的 seen。
+func (e *Engine) ResetAll() {
+	e.mu.Lock()
+	for fid := range e.seen {
+		delete(e.seen, fid)
+	}
+	for _, s := range e.states {
+		s.mu.Lock()
+		s.fetching = false
+		s.lastOK = nil
+		s.lastError = ""
+		s.itemCount = 0
+		s.matched = 0
+		s.downloaded = 0
+		s.failed = 0
+		s.snapshot = false
+		s.forceRescan = true
+		s.recent = list.New()
+		s.mu.Unlock()
+	}
+	e.mu.Unlock()
+	e.saveSeen()
+	logger.Info.Println("rss: reset all seen states (next fetch will rescan all items)")
 }
 
 // SetClient 热替换 qb 客户端
@@ -250,20 +426,57 @@ func (e *Engine) fetchAll() {
 }
 
 func (e *Engine) fetchFeed(feed models.RSSFeed) {
+	st := e.getOrCreateState(feed.ID)
+
+	// 运行态：准备开始
+	st.mu.Lock()
+	st.fetching = true
+	st.lastFetchAt = time.Now()
+	st.itemCount = 0
+	st.matched = 0
+	st.downloaded = 0
+	st.failed = 0
+	st.snapshot = false
+	st.lastError = ""
+	st.mu.Unlock()
+
 	logger.Debug.Printf("RSS fetching %s (%s)", feed.Name, feed.URL)
+
 	body, err := httpGet(feed.URL)
 	if err != nil {
 		logger.Warn.Printf("RSS feed %s fetch failed: %v", feed.Name, err)
+		errStr := err.Error()
+		ok := false
+		st.mu.Lock()
+		st.fetching = false
+		st.lastOK = &ok
+		st.lastError = errStr
+		st.mu.Unlock()
 		return
 	}
 	var parsed rssFeed
 	if err := xml.Unmarshal(body, &parsed); err != nil {
 		logger.Warn.Printf("RSS feed %s parse failed: %v", feed.Name, err)
+		errStr := err.Error()
+		ok := false
+		st.mu.Lock()
+		st.fetching = false
+		st.lastOK = &ok
+		st.lastError = errStr
+		st.mu.Unlock()
 		return
 	}
 
 	// 快照模式：该 feed 是第一次见到，只 mark seen 不下载，避免历史条目一次性全部下
 	isFresh := e.isFreshFeed(feed.ID)
+	// 但 forceRescan 是用户手动 reset 的 → 强制进入正常模式，对所有条目重跑规则
+	if st.forceRescan {
+		st.mu.Lock()
+		st.forceRescan = false
+		st.mu.Unlock()
+		isFresh = false
+		logger.Info.Printf("RSS feed=%s force-rescan: skipping snapshot mode", feed.Name)
+	}
 
 	e.mu.Lock()
 	if _, ok := e.seen[feed.ID]; !ok {
@@ -271,6 +484,12 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 	}
 	seen := e.seen[feed.ID]
 	e.mu.Unlock()
+
+	// 本轮 itemCount 记下来
+	st.mu.Lock()
+	st.itemCount = len(parsed.Channel.Items)
+	st.snapshot = isFresh
+	st.mu.Unlock()
 
 	// 本次 fetch 新见过的 key；快照模式下直接 mark 所有，正常模式只对处理过的 mark
 	var newlySeen []string
@@ -290,6 +509,9 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 		if isFresh {
 			// 快照：第一次接入，只记下来不下载
 			logger.Info.Printf("RSS [snapshot] feed=%s item=%s (first seen, skipped)", feed.Name, item.Title)
+			st.mu.Lock()
+			st.pushRecent(RecentItem{Title: item.Title, Action: "skipped_snapshot", ProcessedAt: time.Now()})
+			st.mu.Unlock()
 			continue
 		}
 
@@ -297,7 +519,22 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 		e.mu.Lock()
 		seen[key] = true
 		e.mu.Unlock()
-		if !e.processItem(feed, item) {
+		ruleName, procErr := e.processItem(feed, item)
+		st.mu.Lock()
+		if procErr != nil {
+			st.failed++
+			st.pushRecent(RecentItem{Title: item.Title, RuleName: ruleName, Action: "failed", Error: procErr.Error(), ProcessedAt: time.Now()})
+		} else if ruleName != "" {
+			st.matched++
+			st.downloaded++
+			st.pushRecent(RecentItem{Title: item.Title, RuleName: ruleName, Action: "downloaded", ProcessedAt: time.Now()})
+		} else {
+			// 正常模式下所有规则都没命中 → 也要记下来，让用户知道哪些条目解析到了但没被规则覆盖
+			st.pushRecent(RecentItem{Title: item.Title, Action: "skipped_no_rule", ProcessedAt: time.Now()})
+		}
+		st.mu.Unlock()
+
+		if procErr != nil {
 			// 处理失败（下载 torrent 失败 / AddTorrent 失败）→ 从 seen 撤出来，下次再试
 			e.mu.Lock()
 			delete(seen, key)
@@ -316,10 +553,20 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 		// 快照后立即落盘，避免进程重启又重新快照（会漏新条目但影响不大，落盘更稳）
 		e.saveSeen()
 	}
+
+	ok := true
+	st.mu.Lock()
+	st.fetching = false
+	st.lastOK = &ok
+	st.mu.Unlock()
 }
 
-// processItem 返回 true 表示处理成功（或不需要处理但已被 seen 覆盖），false 表示应重试
-func (e *Engine) processItem(feed models.RSSFeed, item rssItem) bool {
+// processItem 返回匹配到的规则名（空=无规则命中）和处理错误（nil=成功或无需处理）。
+// 有规则命中且提交 qB 成功 → ("规则名", nil)；
+// 有规则命中但下载/AddTorrent 失败 → ("规则名", err)；
+// 无规则命中 → ("", nil)，由调用方决定是否记日志；
+// 有规则命中但没有 torrent URL → ("规则名", nil)，视为已 seen 不再重试。
+func (e *Engine) processItem(feed models.RSSFeed, item rssItem) (string, error) {
 	for _, rule := range feed.Rules {
 		if !rule.Enabled {
 			continue
@@ -334,27 +581,36 @@ func (e *Engine) processItem(feed models.RSSFeed, item rssItem) bool {
 			torrentURL = item.Link
 		}
 		if torrentURL == "" {
-			return true // 没有可用 URL，记为 seen 不再试
+			return rule.Name, nil // 没有可用 URL，记为 seen 不再试
 		}
 		data, err := httpGet(torrentURL)
 		if err != nil {
 			logger.Warn.Printf("RSS download torrent failed: %v url=%s (will retry next cycle)", err, torrentURL)
-			return false
+			return rule.Name, fmt.Errorf("下载 torrent 失败: %w", err)
 		}
 		if err := e.client.AddTorrent(data, rule.SavePath, rule.Category, rule.Tags, rule.UploadLimit); err != nil {
 			logger.Warn.Printf("RSS add torrent failed: %v (will retry next cycle)", err)
-			return false
+			return rule.Name, fmt.Errorf("添加到 qBittorrent 失败: %w", err)
 		}
-		break
+		return rule.Name, nil
 	}
-	return true
+	return "", nil
 }
 
+// matchRule 判断标题是否命中规则。
+//
+// keyword 模式支持多关键词：
+//   - 用 "|" 分隔 = OR（任一子串命中即可）
+//   - 用空格分隔 = AND（同一 OR 组里所有子串必须同时出现）
+//   - 两层组合示例："ManoJob 720p|MrLucky 1080p"
+//     = (ManoJob AND 720p) OR (MrLucky AND 1080p)
+//   - Exclude 同样支持：任一命中则排除
 func matchRule(rule models.RSSRule, title string) bool {
 	if rule.Include == "" && rule.Exclude == "" {
 		return false
 	}
 	title = strings.ToLower(title)
+
 	if rule.Mode == "regex" {
 		if rule.Include != "" {
 			re, err := regexp.Compile(rule.Include)
@@ -368,12 +624,53 @@ func matchRule(rule models.RSSRule, title string) bool {
 				return false
 			}
 		}
-	} else {
-		if rule.Include != "" && !strings.Contains(title, strings.ToLower(rule.Include)) {
+		return true
+	}
+
+	// keyword 模式：include 用 "|" 分 OR 组，每组内空格分 AND 子词
+	if rule.Include != "" {
+		groups := strings.Split(rule.Include, "|")
+		orHit := false
+		for _, g := range groups {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				continue
+			}
+			andWords := strings.Fields(g) // 按任意空白切
+			allHit := true
+			for _, w := range andWords {
+				if !strings.Contains(title, strings.ToLower(w)) {
+					allHit = false
+					break
+				}
+			}
+			if allHit {
+				orHit = true
+				break
+			}
+		}
+		if !orHit {
 			return false
 		}
-		if rule.Exclude != "" && strings.Contains(title, strings.ToLower(rule.Exclude)) {
-			return false
+	}
+	if rule.Exclude != "" {
+		groups := strings.Split(rule.Exclude, "|")
+		for _, g := range groups {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				continue
+			}
+			andWords := strings.Fields(g)
+			allHit := true
+			for _, w := range andWords {
+				if !strings.Contains(title, strings.ToLower(w)) {
+					allHit = false
+					break
+				}
+			}
+			if allHit {
+				return false // 任一 OR 组命中 → 整个排除
+			}
 		}
 	}
 	return true
@@ -401,4 +698,3 @@ func httpGet(target string) ([]byte, error) {
 func (e *Engine) ForceFetch() {
 	go e.fetchAll()
 }
-

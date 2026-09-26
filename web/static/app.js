@@ -459,9 +459,15 @@ function torrentTableHeader(count) {
 
 
 // ---------- RSS ----------
-async function renderRSS(root) {
-  const cfg = (await api("GET", "/config")).data;
-  const rss = cfg.rss;
+// rss 参数可传：首次进入页面或显式传 undefined 时从服务器拉；
+// 新增/删除/改规则后传本地已修改的 rss，避免覆盖内存中的改动。
+let _rssStatusTimer = null;
+
+async function renderRSS(root, rss) {
+  if (rss == null) {
+    const cfg = (await api("GET", "/config")).data;
+    rss = cfg.rss;
+  }
   if (!rss.feeds) rss.feeds = [];
 
   root.innerHTML = `
@@ -472,28 +478,60 @@ async function renderRSS(root) {
         <div class="actions-bar">
           <div class="form-row" style="margin:0"><label>刷新间隔 (分钟)</label><input type="number" id="rss-interval" value="${rss.interval || 15}" min="1" style="width:90px"/></div>
           <div class="spacer"></div>
-          <button class="btn" id="rss-force">立即拉取一次</button>
-          <button class="btn primary" id="rss-save">保存配置</button>
-          <button class="btn" id="rss-add">+ 新增订阅源</button>
+          <button class="btn" id="rss-force">立即拉取</button>
+          <button class="btn" id="rss-reset-all">全部重新匹配</button>
+          <button class="btn primary" id="rss-save">保存</button>
+          <button class="btn" id="rss-add">+ 订阅源</button>
         </div>
       </div>
     </div>
 
     ${rss.feeds.length === 0 ? `<div class="card"><div class="empty">还没有订阅源，点击"+ 新增订阅源"开始</div></div>` :
       rss.feeds.map((f, fi) => renderFeedBlock(f, fi)).join("")}
+
+    <div class="card">
+      <h2>📡 运行状态 <span class="badge auto-refresh" id="rss-status-refresh">自动刷新中</span></h2>
+      <div id="rss-status-panel"><div class="empty">加载中…</div></div>
+    </div>
   `;
 
   $("#rss-force").onclick = async () => {
     await api("POST", "/rss/force");
     toast("已触发 RSS 拉取");
+    refreshRSSStatus(true); // true = 立即拉一次，显示 fetching
   };
   $("#rss-save").onclick = () => saveRSS(rss);
   $("#rss-add").onclick = () => {
     const newFeed = { id: genID(), name: "新订阅源", url: "", enabled: true, rules: [] };
     rss.feeds.push(newFeed);
-    renderRSS(root);
+    renderRSS(root, rss);
   };
+  $("#rss-reset-all").onclick = async () => {
+    if (!confirm("确定让所有订阅源对历史条目重新匹配规则吗？\n已下载过的不会重复下载。")) return;
+    const r = await api("POST", "/rss/reset", { feedId: "" });
+    toast(r.success ? "已重置，正在重新拉取…" : (r.message || "重置失败"), r.success ? "ok" : "err");
+    refreshRSSStatus(true);
+  };
+  // 事件委托：订阅源状态块里的重置按钮
+  $("#rss-status-panel").addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-rss-reset]");
+    if (!btn) return;
+    const fid = btn.dataset.rssReset;
+    const name = btn.dataset.feedName || "该订阅源";
+    if (!confirm(`确定让「${name}」对历史条目重新匹配规则吗？\n已下载过的不会重复下载。`)) return;
+    const r = await api("POST", "/rss/reset", { feedId: fid });
+    toast(r.success ? "已重置，正在重新拉取…" : (r.message || "重置失败"), r.success ? "ok" : "err");
+    refreshRSSStatus(true);
+  });
   bindFeedEvents(rss);
+
+  // 启动状态自动刷新（先停掉旧的，避免多个 RSS 页并发）
+  if (_rssStatusTimer) clearInterval(_rssStatusTimer);
+  await refreshRSSStatus(true);
+  _rssStatusTimer = setInterval(() => {
+    if (currentView !== "rss") { clearInterval(_rssStatusTimer); _rssStatusTimer = null; return; }
+    refreshRSSStatus(false);
+  }, 5000);
 }
 
 function renderFeedBlock(f, fi) {
@@ -540,8 +578,8 @@ function renderRuleBlock(fid, r, ri) {
           <option value="regex" ${r.mode === "regex" ? "selected" : ""}>正则表达式</option>
         </select>
       </div>
-      <div class="form-row"><label>匹配（Include）</label><input type="text" data-rule-include="${fid}-${ri}" value="${sInclude}" placeholder="${r.mode === "regex" ? "正则，需匹配" : "标题必须包含此关键字"}" /></div>
-      <div class="form-row"><label>排除（Exclude）</label><input type="text" data-rule-exclude="${fid}-${ri}" value="${sExclude}" placeholder="命中此条件的跳过" /></div>
+      <div class="form-row"><label>匹配（Include）</label><textarea wrap="soft" class="auto-h" data-rule-include="${fid}-${ri}" placeholder="${r.mode === "regex" ? "正则，需匹配" : "例: ManoJob 720p|MrLucky（|=OR  空格=AND）"}">${sInclude}</textarea></div>
+      <div class="form-row"><label>排除（Exclude）</label><textarea wrap="soft" class="auto-h" data-rule-exclude="${fid}-${ri}" placeholder="例: 1080p|2160p  命中任一跳过">${sExclude}</textarea></div>
       <div class="form-row"><label>保存路径</label><input type="text" data-rule-path="${fid}-${ri}" value="${sPath}" placeholder="qBittorrent 保存路径 (可空)" /></div>
       <div class="form-row"><label>分类 / 标签</label>
         <div style="display:flex;gap:8px;flex:1">
@@ -557,21 +595,116 @@ function bindFeedEvents(rss) {
   $$("[data-del-feed]").forEach(b => b.addEventListener("click", () => {
     const id = b.dataset.delFeed;
     rss.feeds = rss.feeds.filter(f => f.id !== id);
-    renderRSS(document.getElementById("content"));
+    renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-add-rule]").forEach(b => b.addEventListener("click", () => {
     const fid = b.dataset.addRule;
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules = feed.rules || [];
     feed.rules.push({ id: genID(), name: "规则 " + (feed.rules.length + 1), enabled: true, mode: "keyword", include: "", exclude: "", savePath: "", category: "", tags: "", uploadLimit: 0 });
-    renderRSS(document.getElementById("content"));
+    renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-del-rule]").forEach(b => b.addEventListener("click", () => {
     const [fid, ri] = b.dataset.delRule.split("-");
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules.splice(parseInt(ri, 10), 1);
-    renderRSS(document.getElementById("content"));
+    renderRSS(document.getElementById("content"), rss);
   }));
+}
+
+// RSS 运行状态面板辅助
+function fmtTimeAgo(iso) {
+  if (!iso) return "从未";
+  const t = new Date(iso);
+  if (isNaN(t.getTime())) return "未知";
+  const diff = Math.max(0, Math.floor((Date.now() - t.getTime()) / 1000));
+  if (diff < 5) return "刚刚";
+  if (diff < 60) return `${diff} 秒前`;
+  const m = Math.floor(diff / 60);
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  const d = Math.floor(h / 24);
+  return `${d} 天前`;
+}
+
+async function refreshRSSStatus(showLoading) {
+  const panel = document.getElementById("rss-status-panel");
+  if (!panel) return;
+  if (showLoading) panel.innerHTML = '<div style="color:var(--text-dim)">⏳ 拉取中…</div>';
+  const res = await api("GET", "/rss/status");
+  if (!res.success) {
+    panel.innerHTML = `<div style="color:var(--danger)">加载状态失败：${escapeHTML(res.message || "未知错误")}</div>`;
+    return;
+  }
+  panel.innerHTML = renderRSSStatusList(res.data || []);
+}
+
+function renderRSSStatusList(list) {
+  if (list.length === 0) {
+    return '<div class="empty">暂无可监控的订阅源</div>';
+  }
+  return list.map(s => {
+    const statusBadge = renderFeedStatusBadge(s);
+    const urlShort = escapeHTML(s.url || "(未填)");
+    const seenLine = `累计已见条目 <b>${s.seenCount}</b>`;
+    let detailLine = "";
+    if (s.lastOk != null) {
+      if (s.lastOk) {
+        detailLine = `解析 <b>${s.itemCount}</b> 条 · 命中规则 <b>${s.matched}</b> · 下载 <b style="color:var(--success)">${s.downloaded}</b>${s.failed > 0 ? ` · 失败 <b style="color:var(--danger)">${s.failed}</b>` : ""}`;
+        if (s.snapshot) detailLine += ` · <span style="color:var(--warn)">快照模式（首次接入）</span>`;
+      } else {
+        detailLine = `<span style="color:var(--danger)">${escapeHTML(s.lastError || "拉取失败")}</span>`;
+      }
+    } else {
+      detailLine = '<span style="color:var(--text-dim)">尚未拉取过</span>';
+    }
+
+    const recent = (s.recentItems || []).map(r => renderRecentItem(r)).join("");
+    const recentBlock = recent
+      ? `<details open><summary style="cursor:pointer;color:var(--text-dim);font-size:12px;margin-top:6px">最近 ${(s.recentItems || []).length} 条处理记录（点击展开/折叠）</summary>
+         <div class="rss-recent">${recent}</div></details>`
+      : "";
+
+    return `
+    <div class="rss-status-block">
+      <div class="rss-status-head">
+        <span class="rss-status-name">${escapeHTML(s.feedName)}</span>
+        ${statusBadge}
+        <span class="rss-status-time">${fmtTimeAgo(s.lastFetchAt)} 拉取 · ${seenLine}</span>
+        <button class="btn small" data-rss-reset="${s.feedId}" data-feed-name="${escapeHTML(s.feedName)}" ${s.fetching ? "disabled" : ""} title="清空已见过条目，对所有历史条目重新跑匹配规则">🔄 重新匹配</button>
+      </div>
+      <div class="rss-status-detail">${detailLine}</div>
+      <div class="rss-status-url" title="${urlShort}">${urlShort}</div>
+      ${recentBlock}
+    </div>`;
+  }).join("");
+}
+
+function renderFeedStatusBadge(s) {
+  if (!s.enabled) return '<span class="badge" style="background:var(--text-dim);color:#fff">已禁用</span>';
+  if (s.fetching) return '<span class="badge" style="background:var(--accent);color:#fff">拉取中…</span>';
+  if (s.lastOk == null) return '<span class="badge" style="background:var(--text-dim);color:#fff">等待首次</span>';
+  if (s.lastOk) return '<span class="badge" style="background:var(--success);color:#fff">✓ 正常</span>';
+  return '<span class="badge" style="background:var(--danger);color:#fff">✗ 异常</span>';
+}
+
+function renderRecentItem(r) {
+  const actionMap = {
+    downloaded: { icon: "✅", label: "已提交 qB", cls: "ok" },
+    skipped_snapshot: { icon: "⚪", label: "快照跳过", cls: "dim" },
+    skipped_no_rule: { icon: "⚪", label: "无规则命中", cls: "dim" },
+    failed: { icon: "❌", label: r.error || "失败", cls: "err" },
+    seen_duplicate: { icon: "🔁", label: "已见过", cls: "dim" },
+  };
+  const a = actionMap[r.action] || { icon: "•", label: r.action || "", cls: "dim" };
+  return `<div class="rss-recent-item">
+    <span class="rss-recent-icon">${a.icon}</span>
+    <span class="rss-recent-title">${escapeHTML(r.title)}</span>
+    ${r.ruleName ? `<span class="rss-recent-rule">· ${escapeHTML(r.ruleName)}</span>` : ""}
+    <span class="rss-recent-time">· ${fmtTimeAgo(r.processedAt)}</span>
+    <span class="rss-recent-msg ${a.cls}">— ${a.label}</span>
+  </div>`;
 }
 
 function collectRSS(rss) {

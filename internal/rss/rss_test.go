@@ -177,3 +177,71 @@ func TestMatchRule_ExcludeInvalidRegexIsIgnored(t *testing.T) {
 		t.Error("invalid exclude regex should not block, only include matters")
 	}
 }
+
+func TestMatchRule_MultiKeywordOR(t *testing.T) {
+	rule := models.RSSRule{Mode: "keyword", Include: "ManoJob|MrLucky"}
+	if !matchRule(rule, "ManoJob.26.05.20.Ashlyn.Peaks") {
+		t.Error("first OR branch should match")
+	}
+	if !matchRule(rule, "MrLuckyPOV.23.06.30.Aria.Lee") {
+		t.Error("second OR branch should match")
+	}
+	if matchRule(rule, "OtherSite.XXX.720p") {
+		t.Error("neither branch should not match")
+	}
+}
+
+func TestMatchRule_MultiKeywordAND(t *testing.T) {
+	rule := models.RSSRule{Mode: "keyword", Include: "ManoJob 720p"}
+	if !matchRule(rule, "ManoJob.26.05.20.Ashlyn.Peaks.720p.HEVC.x265") {
+		t.Error("AND both present should match")
+	}
+	if matchRule(rule, "ManoJob.26.05.20.1080p") {
+		t.Error("missing 720p should not match")
+	}
+	if matchRule(rule, "SomeSite.XXX.720p") {
+		t.Error("missing ManoJob should not match")
+	}
+}
+
+func TestMatchRule_MultiKeywordORAndCombo(t *testing.T) {
+	rule := models.RSSRule{Mode: "keyword", Include: "ManoJob 720p|MrLucky 1080p"}
+	if !matchRule(rule, "ManoJob.720p.HEVC") {
+		t.Error("(ManoJob AND 720p) should hit")
+	}
+	if !matchRule(rule, "MrLuckyPOV.1080p.WEB-DL") {
+		t.Error("(MrLucky AND 1080p) should hit")
+	}
+	if matchRule(rule, "ManoJob.1080p.HEVC") {
+		t.Error("ManoJob+1080p not in either OR branch")
+	}
+	if matchRule(rule, "MrLucky.720p") {
+		t.Error("MrLucky+720p not in either OR branch")
+	}
+}
+
+func TestMatchRule_MultiKeywordExclude(t *testing.T) {
+	rule := models.RSSRule{Mode: "keyword", Include: "XXX", Exclude: "1080p|2160p"}
+	if !matchRule(rule, "Something.XXX.720p") {
+		t.Error("720p should not be excluded")
+	}
+	if matchRule(rule, "Something.XXX.1080p") {
+		t.Error("1080p should be excluded")
+	}
+	if matchRule(rule, "Something.XXX.2160p.HDR") {
+		t.Error("2160p should be excluded")
+	}
+}
+
+func TestMatchRule_MultiKeywordANDExclude(t *testing.T) {
+	rule := models.RSSRule{Mode: "keyword", Include: "XXX", Exclude: "1080p HDR"}
+	if !matchRule(rule, "Something.XXX.1080p") {
+		t.Error("1080p without HDR should pass")
+	}
+	if matchRule(rule, "Something.XXX.1080p.HDR") {
+		t.Error("1080p+HDR AND should exclude")
+	}
+	if matchRule(rule, "Something.XXX.HDR.1080p") {
+		t.Error("order independent AND should also exclude")
+	}
+}

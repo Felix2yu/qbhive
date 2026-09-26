@@ -69,6 +69,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
   transition: all 0.15s;
+  white-space: nowrap;        /* 按钮文字不换行 */
+  flex-shrink: 0;             /* 窄屏时按钮整体压缩 flex 行，而不是被挤变形 */
 }
 .btn:hover { background: var(--border); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
@@ -112,7 +114,7 @@ textarea { resize: vertical; min-height: 80px; font-family: inherit; }
 .toast.err { border-color: var(--danger); }
 @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
 
-.actions-bar { display: flex; gap: 10px; align-items: center; }
+.actions-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .actions-bar .spacer { flex: 1; }
 
 @media (max-width: 720px) {
@@ -121,3 +123,62 @@ textarea { resize: vertical; min-height: 80px; font-family: inherit; }
   .topbar { flex-wrap: wrap; }
   main { padding: 14px; }
 }
+
+/* RSS 运行状态面板 */
+.rss-status-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--panel-2);
+}
+.rss-status-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.rss-status-name { font-weight: 600; font-size: 14px; }
+.rss-status-time { color: var(--text-dim); font-size: 12px; margin-left: auto; }
+.rss-status-detail { font-size: 13px; margin-top: 6px; }
+.rss-status-url {
+  font-size: 11px; color: var(--text-dim); margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.rss-recent { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.rss-recent-item {
+  font-size: 12px; display: flex; gap: 6px; align-items: baseline;
+  padding: 3px 6px; border-radius: 4px;
+}
+.rss-recent-item:hover { background: rgba(255,255,255,0.03); }
+.rss-recent-icon { flex-shrink: 0; width: 16px; text-align: center; }
+.rss-recent-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rss-recent-rule { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+.rss-recent-time { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+.rss-recent-msg.ok { color: var(--success); }
+.rss-recent-msg.err { color: var(--danger); }
+.rss-recent-msg.dim { color: var(--text-dim); font-size: 11px; }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; background: var(--accent); color: #fff;
+}
+.badge.auto-refresh { background: var(--success); }
+
+/* 自适应高度输入框：按内容自动变高，超过 max 后出现滚动条 */
+textarea.auto-h {
+  /* 基础外观保持和 input 一致 */
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  width: 100%;
+  resize: none;               /* 不让用户手动拖高度，自动就够了 */
+  field-sizing: content;      /* 🎯 核心：按内容自动撑高（Chrome 123+ / Firefox 115+ / Safari 17.4+ 全都支持） */
+  max-height: 120px;          /* 上限 ≈ 6 行，超过后内部滚动 */
+  min-height: 32px;           /* 初始单行高度 */
+  overflow-y: auto;           /* 超高时才出滚动条 */
+}
+/* textarea 默认 wrap=off 不折行 + field-sizing:content 只按换行数行，
+   必须显式启用 soft wrap 让它按宽度折行，field-sizing 才能感知到多行 */
+textarea.auto-h { white-space: pre-wrap; }
