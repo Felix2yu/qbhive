@@ -825,7 +825,9 @@ function syncFormToCfg() {
     };
   });
   c.notifier.enabled = $("#nt-enabled").checked;
-  c.notifier.appriseUrls = $("#nt-urls").value.split("\n").map(s => s.trim()).filter(Boolean);
+  // AppriseURLs：过滤掉后端掩码显示值（含 "...********"），避免保存时覆盖真实 URL
+  // 后端保存时会兜底处理掩码项，这里前端同步过滤更稳妥
+  c.notifier.appriseUrls = $("#nt-urls").value.split("\n").map(s => s.trim()).filter(s => s && !s.includes("...********"));
   c.fileManager.enabled = $("#fm-enabled").checked;
   c.fileManager.scanInterval = parseInt($("#fm-interval").value || "15", 10);
 }

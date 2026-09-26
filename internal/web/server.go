@@ -310,6 +310,12 @@ func maskAppriseURL(u string) string {
 	return "...********"
 }
 
+// isMaskedAppriseURL 判断一个 Apprise URL 是否是掩码后的显示值
+// （所有 maskAppriseURL 的输出都包含 "...********"）
+func isMaskedAppriseURL(u string) bool {
+	return strings.Contains(u, "...********")
+}
+
 func (s *Server) saveConfig(c *gin.Context) {
 	var in models.AppConfig
 	if err := c.ShouldBindJSON(&in); err != nil {
@@ -327,6 +333,59 @@ func (s *Server) saveConfig(c *gin.Context) {
 	}
 	if strings.TrimSpace(in.Qbittorrent.APIKey) == "" || in.Qbittorrent.APIKey == "********" {
 		in.Qbittorrent.APIKey = cur.Qbittorrent.APIKey
+	}
+	// AppriseURLs：前端拿到的是掩码值，保存时跳过掩码项、跳过空字符串，其他按 index 替换
+	// 关键：如果前端过滤后整个数组变空（用户什么都没改就保存），要保留原值
+	curURLs := cur.Notifier.AppriseURLs
+	inURLs := in.Notifier.AppriseURLs
+
+	if len(inURLs) == 0 {
+		// 空数组 → 保留原值（前端可能把所有掩码项都过滤掉了）
+		in.Notifier.AppriseURLs = curURLs
+	} else {
+		cleaned := make([]string, 0, len(inURLs))
+		// 先收集所有非掩码、非空的"用户新输入"项及其原始 index
+		type pair struct {
+			idx int
+			val string
+		}
+		var newInputs []pair
+		for i, u := range inURLs {
+			trimmed := strings.TrimSpace(u)
+			if trimmed == "" {
+				continue // 空字符串表示用户删了这一行
+			}
+			if isMaskedAppriseURL(trimmed) {
+				continue // 掩码值跳过，不要放进去
+			}
+			newInputs = append(newInputs, pair{i, trimmed})
+		}
+		if len(newInputs) == 0 {
+			// 用户没改任何 URL → 保留原值
+			in.Notifier.AppriseURLs = curURLs
+		} else {
+			// 用 cur 做基础，按 index 替换用户新输入的项
+			base := make([]string, len(curURLs))
+			copy(base, curURLs)
+			// 如果前端传了更多项（新增 URL），扩展 base
+			maxIdx := 0
+			for _, p := range newInputs {
+				if p.idx > maxIdx {
+					maxIdx = p.idx
+				}
+			}
+			if maxIdx >= len(base) {
+				extended := make([]string, maxIdx+1)
+				copy(extended, base)
+				base = extended
+			}
+			for _, p := range newInputs {
+				base[p.idx] = p.val
+			}
+			// 去掉尾部空字符串（用户删了末尾条目）
+			cleaned = base
+			in.Notifier.AppriseURLs = cleaned
+		}
 	}
 	s.cfg.Set(in)
 	if err := s.cfg.Save(); err != nil {

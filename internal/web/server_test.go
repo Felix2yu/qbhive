@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -368,6 +369,106 @@ func TestSaveConfig_PreservesMaskedPassword(t *testing.T) {
 	got := s.cfg.Get()
 	if got.Qbittorrent.Password != "original-secret" || got.Qbittorrent.APIKey != "original-key" {
 		t.Errorf("masked password should preserve original, got pwd=%q key=%q", got.Qbittorrent.Password, got.Qbittorrent.APIKey)
+	}
+}
+
+func TestSaveConfig_PreservesMaskedAppriseURLs_EmptyIn(t *testing.T) {
+	// 场景：cur 有 AppriseURLs，前端过滤后传空数组 → 保留原值
+	s := setupTestServer(t, "", "")
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/api/config", s.saveConfig)
+
+	s.cfg.Set(models.AppConfig{
+		Notifier: models.NotifierConfig{
+			Enabled: true,
+			AppriseURLs: []string{"ntfys://mysecretkey123@ntfy.sh/qbhive", "mailto://user:pass@smtp.example.com"},
+		},
+	})
+	_ = s.cfg.Save()
+
+	body := `{"qbittorrent":{"url":"http://x"},"rss":{"enabled":true,"interval":15,"feeds":[]},"limiter":{"enabled":true,"interval":10,"rules":[]},"fileManager":{"enabled":false},"notifier":{"enabled":true,"appriseUrls":[]}}`
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d %s", w.Code, w.Body.String())
+	}
+	got := s.cfg.Get()
+	if len(got.Notifier.AppriseURLs) != 2 {
+		t.Errorf("expected 2 URLs preserved, got %d: %v", len(got.Notifier.AppriseURLs), got.Notifier.AppriseURLs)
+	}
+}
+
+func TestSaveConfig_PreservesMaskedAppriseURLs_AllMasked(t *testing.T) {
+	// 场景：cur 有真实 URL，前端原样传回全掩码 → 保留原值
+	s := setupTestServer(t, "", "")
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/api/config", s.saveConfig)
+
+	s.cfg.Set(models.AppConfig{
+		Notifier: models.NotifierConfig{
+			Enabled: true,
+			AppriseURLs: []string{"ntfys://mysecretkey123@ntfy.sh/qbhive", "slack://TOKEN/CHANNEL"},
+		},
+	})
+	_ = s.cfg.Save()
+
+	// 前端从 getConfig 拿到的掩码值原样传回
+	masked := []string{maskAppriseURL("ntfys://mysecretkey123@ntfy.sh/qbhive"), maskAppriseURL("slack://TOKEN/CHANNEL")}
+	body := fmt.Sprintf(`{"qbittorrent":{"url":"http://x"},"rss":{"enabled":true,"interval":15,"feeds":[]},"limiter":{"enabled":true,"interval":10,"rules":[]},"fileManager":{"enabled":false},"notifier":{"enabled":true,"appriseUrls":["%s","%s"]}}`, masked[0], masked[1])
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	got := s.cfg.Get()
+	if len(got.Notifier.AppriseURLs) != 2 {
+		t.Fatalf("expected 2 URLs, got %d", len(got.Notifier.AppriseURLs))
+	}
+	if got.Notifier.AppriseURLs[0] != "ntfys://mysecretkey123@ntfy.sh/qbhive" {
+		t.Errorf("URL[0] changed! got %q", got.Notifier.AppriseURLs[0])
+	}
+	if got.Notifier.AppriseURLs[1] != "slack://TOKEN/CHANNEL" {
+		t.Errorf("URL[1] changed! got %q", got.Notifier.AppriseURLs[1])
+	}
+}
+
+func TestSaveConfig_MixesMaskedAndNewAppriseURLs(t *testing.T) {
+	// 场景：cur 有 2 个 URL，前端只改了第一个（新值），第二个还是掩码 → 第一个更新，第二个保留
+	s := setupTestServer(t, "", "")
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/api/config", s.saveConfig)
+
+	s.cfg.Set(models.AppConfig{
+		Notifier: models.NotifierConfig{
+			Enabled: true,
+			AppriseURLs: []string{"ntfys://oldkey@ntfy.sh/qbhive", "mailto://keepme:secret@smtp.example.com"},
+		},
+	})
+	_ = s.cfg.Save()
+
+	newURL := "ntfys://newkey999@ntfy.sh/qbhive-new"
+	maskedIdx1 := maskAppriseURL("mailto://keepme:secret@smtp.example.com")
+	body := fmt.Sprintf(`{"qbittorrent":{"url":"http://x"},"rss":{"enabled":true,"interval":15,"feeds":[]},"limiter":{"enabled":true,"interval":10,"rules":[]},"fileManager":{"enabled":false},"notifier":{"enabled":true,"appriseUrls":["%s","%s"]}}`, newURL, maskedIdx1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	got := s.cfg.Get()
+	if len(got.Notifier.AppriseURLs) != 2 {
+		t.Fatalf("expected 2 URLs, got %d: %v", len(got.Notifier.AppriseURLs), got.Notifier.AppriseURLs)
+	}
+	if got.Notifier.AppriseURLs[0] != newURL {
+		t.Errorf("URL[0] should be new value, got %q", got.Notifier.AppriseURLs[0])
+	}
+	if got.Notifier.AppriseURLs[1] != "mailto://keepme:secret@smtp.example.com" {
+		t.Errorf("URL[1] should be preserved, got %q", got.Notifier.AppriseURLs[1])
 	}
 }
 
