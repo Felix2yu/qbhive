@@ -682,7 +682,12 @@ func httpGet(target string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "QBHive/1.0")
+	req.Header.Set("User-Agent",
+		"qBittorrent/4.6.0 (https://www.qbittorrent.org)")
+	req.Header.Set("Accept",
+		"application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
