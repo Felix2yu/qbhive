@@ -350,7 +350,7 @@ function stateTag(s) {
 function torrentTable(list, withActions) {
   if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
   const rows = list.map(t => torrentRow(t, withActions)).join("");
-  return `<table class="torrent-table">
+  return `<div class="table-wrap"><table class="torrent-table">
 <colgroup>
   <col class="col-name">
   <col class="col-state">
@@ -363,7 +363,7 @@ function torrentTable(list, withActions) {
 <thead><tr>
     <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
     <th>下速</th><th>上速</th>${withActions ? "<th>限速</th>" : ""}
-</tr></thead><tbody>${rows}</tbody></table>`;
+</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function torrentRow(t, withActions) {
@@ -525,21 +525,10 @@ async function renderTorrents(root) {
       return;
     }
 
-    // 分块渲染表格，每帧 30 行（表格 DOM 重，不能一次渲完）
-    const container = document.createElement("div");
-    chunkRender(pageSlice, 30, (tor, idx) => {
-      const tr = document.createElement("div");
-      tr.innerHTML = torrentTable([tor], true); // 传单个，torrentTable 会包 <table>
-      // 抽出里面的 <tbody> 内容（去掉外层 table 包装）
-      const tbody = tr.querySelector("tbody");
-      return tbody.children[0]; // 直接返回 <tr>
-    }, container, () => {
-      // 包裹成完整 table
-      $("#tf-body").innerHTML = torrentTableHeader(pageSlice.length) + container.innerHTML + pageNav(list.length, page, _torrentsState.pageSize, p => {
-        _torrentsState.page = p; renderPage();
-      });
-      bindLimitButtons();
+    $("#tf-body").innerHTML = torrentTable(pageSlice, true) + pageNav(list.length, page, _torrentsState.pageSize, p => {
+      _torrentsState.page = p; renderPage();
     });
+    bindLimitButtons();
   }
 
   fetchTorrents();

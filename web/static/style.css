@@ -133,17 +133,24 @@ th { color: var(--text-dim); font-weight: 500; background: var(--panel-2); }
 tr:hover td { background: var(--row-hover); }
 
 /* —— torrent 表格列控制 —— */
-/* table-layout:auto：浏览器按内容自然分配；名称列没设 max-width → 吃掉所有剩余 */
-.torrent-table { width: 100%; border-collapse: collapse; }
-/* 其他列只给 max-width（够显示即可），绝不硬撑 */
-.col-state   { width: 52px; }        /* 状态 chip 居中 */
-.col-progress{ width: 100px; }       /* progress-bar + 百分比 */
-.col-size    { width: 92px; }        /* 999.9 GB/999.9 GB 右对齐 */
-.col-speed   { width: 68px; }        /* 99.9 MB/s 右对齐 */
-.col-limit   { width: 58px; }        /* 限速按钮居中 */
-
-.torrent-table td, .torrent-table th { padding: 8px 10px; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
-/* 名称列：不设任何宽度 → 自动吃剩余空间 */
+/* 外层横滚：窄屏时允许横向滚动，绝不让内容溢出 */
+.table-wrap { overflow-x: auto; }
+/* table-layout: fixed：严格按 colgroup 宽度分配，不看内容 */
+.torrent-table { table-layout: fixed; width: 100%; border-collapse: collapse; min-width: 640px; }
+/* 关键：td/th 用 border-box，padding 算进 width 里，不再额外撑宽 */
+.torrent-table td, .torrent-table th {
+  box-sizing: border-box;
+  overflow: hidden; text-overflow: ellipsis;
+  padding: 8px 10px; vertical-align: middle;
+}
+/* 其他列固定窄宽；名称列不写 width → 自动吃剩余 */
+.col-state   { width: 60px; text-align: center; white-space: nowrap; }
+.col-progress{ width: 110px; }
+.col-size    { width: 108px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.col-speed   { width: 82px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.col-limit   { width: 68px; text-align: center; white-space: nowrap; }
+.col-limit .btn { padding: 3px 8px; font-size: 12px; line-height: 1.2; }
+/* 名称列：ellipsis */
 .col-name .torr-name {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-weight: 500;
@@ -152,8 +159,7 @@ tr:hover td { background: var(--row-hover); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--text-dim); font-size: 11px; margin-top: 2px;
 }
-/* 状态列 */
-.col-state { text-align: center; white-space: nowrap; }
+/* 状态 chip */
 .state-tag {
   display: inline-block; white-space: nowrap;
   padding: 2px 8px; border-radius: 10px;
@@ -163,16 +169,13 @@ tr:hover td { background: var(--row-hover); }
   border-opacity: 0.35;
 }
 /* 进度列：flex 布局 */
-.col-progress { display: flex; align-items: center; gap: 6px; }
+.col-progress { display: flex; align-items: center; gap: 6px; overflow: hidden; }
 .col-progress .progress-bar { flex: 1; min-width: 40px; }
 .col-progress .progress-text { font-size: 12px; color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }
-/* 速度/大小列：不换行 + 右对齐 */
-.col-speed, .col-size { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+/* 速度/大小列颜色 */
 .col-speed.dl { color: var(--accent); }
 .col-speed.up { color: var(--success); }
 .col-size .text-dim { color: var(--text-dim); font-size: 12px; }
-/* 限速按钮列 */
-.col-limit { text-align: center; white-space: nowrap; }
 
 .progress-bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 100px; }
 .progress-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s; }
