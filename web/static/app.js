@@ -77,8 +77,16 @@ async function api(method, path, body) {
     // 登录成功后重试
     resp = await fetch(API + path, opts);
   }
-  const data = await resp.json();
-  return data;
+  // 响应可能不是 JSON（如后端 panic 时 gin 返回 500 空 body、反代返回 HTML 错误页），
+  // 解析失败必须返回可展示的错误，不能抛异常让页面永远停在"加载中…"
+  try {
+    return await resp.json();
+  } catch {
+    return {
+      success: false,
+      message: resp.ok ? "服务端返回了非 JSON 响应" : `服务端错误 (HTTP ${resp.status})`,
+    };
+  }
 }
 
 // 登录覆盖层：输入 token，成功后 set cookie
@@ -391,16 +399,22 @@ async function renderTorrents(root) {
 
   async function fetchTorrents() {
     $("#tf-progress").textContent = "拉取中…";
-    const t = await api("GET",
-      `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
-    if (!t.success) {
-      $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${t.message || "未知错误"}</div>`;
+    try {
+      const t = await api("GET",
+        `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
+      if (!t.success) {
+        $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(t.message || "未知错误")}</div>`;
+        $("#tf-progress").textContent = "";
+        return;
+      }
+      _torrentsState.rawList = t.data || [];
+      $("#tf-progress").textContent = `已加载 ${_torrentsState.rawList.length} 条`;
+      renderPage();
+    } catch (e) {
+      // 网络中断 / 超时等：给出明确错误，别停留在"拉取中…"
+      $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(e.message || String(e))}</div>`;
       $("#tf-progress").textContent = "";
-      return;
     }
-    _torrentsState.rawList = t.data || [];
-    $("#tf-progress").textContent = `已加载 ${_torrentsState.rawList.length} 条`;
-    renderPage();
   }
 
   function renderPage() {

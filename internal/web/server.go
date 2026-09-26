@@ -85,6 +85,9 @@ func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngi
 		notifier:  not,
 		scheduler: sch,
 		authToken: token,
+		// tcache 必须显式初始化：Go 的 nil map 读安全但写会 panic，
+		// listTorrents 每次缓存 miss 后写缓存，未初始化会导致 500 空响应
+		tcache: make(map[string]*cacheEntry),
 	}
 }
 
