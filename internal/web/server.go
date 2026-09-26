@@ -399,6 +399,10 @@ func (s *Server) listTorrents(c *gin.Context) {
 	if sortField == "" {
 		sortField = "added_on" // 默认按添加时间倒序，新任务排前
 	}
+	// 客户端（浏览器缓存旧 JS）可能还传 added_time；qB 5.3 只认 added_on
+	if sortField == "added_time" {
+		sortField = "added_on"
+	}
 	reverse := c.Query("reverse")
 	if reverse == "" {
 		reverse = "true"

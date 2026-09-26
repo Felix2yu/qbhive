@@ -244,7 +244,7 @@ async function renderDashboard(root) {
   `;
 
   // 概览只拉 top 10 active，分块渲避免卡
-  const top10 = await api("GET", "/torrents?filter=active&limit=10&sort=added_time&reverse=true");
+  const top10 = await api("GET", "/torrents?filter=active&limit=10&sort=added_on&reverse=true");
   const list = top10.data || [];
   if (list.length === 0) {
     $("#dash-latest").innerHTML = '<div class="empty">当前没有活跃任务</div>';
