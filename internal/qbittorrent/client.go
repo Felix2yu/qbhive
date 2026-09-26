@@ -437,7 +437,10 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 	if tags != "" {
 		writeFormField("tags", tags, false, "", nil)
 	}
-	writeFormField("skip_checking", "true", false, "", nil)
+	// 不设置 skip_checking：让 qBittorrent 自己决定是否需要 hash check。
+	// 如果磁盘已有同名但大小不匹配的残留文件（常见于重复添加或中途放弃的下载），
+	// skip_checking=true 会导致 qB 跳过 hash check 后陷入 fast resume rejected → 报"丢失文件"。
+	// 让 qB 正常做 hash check，它会自动识别不匹配文件并重新下载。
 	writeFormField("paused", "false", false, "", nil)
 	buf.WriteString("--" + boundary + "--\r\n")
 
