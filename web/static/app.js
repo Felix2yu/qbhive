@@ -363,7 +363,7 @@ function torrentTable(list, withActions) {
   if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
   const rows = list.map(t => torrentRow(t, withActions)).join("");
   const head = `
-    <div class="torrent-row head">
+    <div class="torrent-row head${withActions ? "" : " no-actions"}">
       <div class="cell name">名称</div>
       <div class="cell state">状态</div>
       <div class="cell progress">进度</div>
@@ -381,17 +381,16 @@ function torrentRow(t, withActions) {
   const safeName = escapeHTML(t.name);
   const safeCat = escapeHTML(t.category || "-");
   const safeHash = escapeHTML(t.hash);
-  return `<div class="torrent-row">
+  return `<div class="torrent-row${withActions ? "" : " no-actions"}">
     <div class="cell name">
       <div class="torr-name" title="${safeName}">${safeName}</div>
-      <div class="torr-sub">${humanSize(t.size)}</div>
     </div>
     <div class="cell state">${stateTag(t.state)}</div>
     <div class="cell progress">
       <div class="progress-bar"><div style="width:${pct}%"></div></div>
       <span class="progress-text">${pct}%</span>
     </div>
-    <div class="cell size">${humanSize(t.downloaded)}<span class="text-dim">/${humanSize(t.size)}</span></div>
+    <div class="cell size">${humanSize(t.downloaded)} <span class="text-dim">/ ${humanSize(t.size)}</span></div>
     <div class="cell speed dl">${humanSpeed(t.dlspeed)}</div>
     <div class="cell speed up">${humanSpeed(t.upspeed)}</div>
     <div class="cell cat" title="${safeCat}">${safeCat}</div>

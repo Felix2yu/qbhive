@@ -132,15 +132,26 @@ th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--bo
 th { color: var(--text-dim); font-weight: 500; background: var(--panel-2); }
 tr:hover td { background: var(--row-hover); }
 
-/* —— torrent 列表（flex 行布局，完全可控）—— */
+/* —— torrent 列表（CSS Grid 行布局，表头与数据列严格对齐）——
+   列宽按最宽内容预留：
+   - 速度列 88px：容纳 "1000.0 KB/s"（tabular-nums）
+   - 大小列 140px：容纳 "653.9 MB / 11.7 GB"
+   超宽内容一律 ellipsis，绝不溢出粘连到相邻列 */
 .torrent-list { display: flex; flex-direction: column; }
 
-/* 每行：flex 横向排列 */
+/* 每行：grid 横向排列 */
 .torrent-row {
-  display: flex; align-items: center; gap: 0;
-  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: minmax(0,1fr) 60px 132px 140px 88px 88px 72px 60px;
+  column-gap: 14px;
+  align-items: center;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   font-size: 13px;
+}
+/* 概览页无「限速」操作列 */
+.torrent-row.no-actions {
+  grid-template-columns: minmax(0,1fr) 60px 132px 140px 88px 88px 72px;
 }
 .torrent-row.head {
   color: var(--text-dim); font-weight: 500; font-size: 12px;
@@ -148,24 +159,19 @@ tr:hover td { background: var(--row-hover); }
 }
 .torrent-row:not(.head):hover { background: var(--row-hover); }
 
-/* 单元格：默认不收缩，只有 name 列 flex:1 */
-.torrent-row .cell { flex-shrink: 0; overflow: hidden; white-space: nowrap; }
-.torrent-row .cell.name { flex: 1; min-width: 0; }       /* 吃掉所有剩余空间 */
-.torrent-row .cell.state   { width: 56px; text-align: center; }
-.torrent-row .cell.progress{ width: 110px; display: flex; align-items: center; gap: 6px; }
-.torrent-row .cell.size    { width: 100px; text-align: right; font-variant-numeric: tabular-nums; }
-.torrent-row .cell.speed   { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
-.torrent-row .cell.cat     { width: 80px; overflow: hidden; text-overflow: ellipsis; }
-.torrent-row .cell.actions { width: 64px; text-align: center; }
+/* 单元格：禁止溢出，超宽一律省略号 */
+.torrent-row .cell { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.torrent-row .cell.state    { text-align: center; }
+.torrent-row .cell.progress { display: flex; align-items: center; gap: 6px; }
+.torrent-row .cell.size     { text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.speed    { text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.cat      { text-align: center; }
+.torrent-row .cell.actions  { text-align: center; }
 
-/* 名称列：两行，名称 + 副标题都 ellipsis */
+/* 名称列：单行 ellipsis */
 .torrent-row .cell.name .torr-name {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-weight: 500;
-}
-.torrent-row .cell.name .torr-sub {
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  color: var(--text-dim); font-size: 11px; margin-top: 2px;
 }
 /* 状态 chip */
 .state-tag {
@@ -188,7 +194,7 @@ tr:hover td { background: var(--row-hover); }
 .cell.actions .btn { padding: 3px 8px; font-size: 12px; line-height: 1.2; }
 
 /* 窄屏兜底：允许横向滚动，绝不溢出 main */
-.torrent-list { min-width: 520px; }
+.torrent-list { min-width: 720px; }
 .card > .torrent-list { overflow-x: auto; }
 
 .progress-bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 100px; }
