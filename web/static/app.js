@@ -558,9 +558,15 @@ function renderPage() {
 let _rssStatusTimer = null;
 
 async function renderRSS(root, rss) {
-  if (rss == null) {
-    const cfg = (await api("GET", "/config")).data;
-    rss = cfg.rss;
+  // 第二个参数可能是 switchView 传入的 background 布尔，也可能是内部重渲传入的 rss 配置对象；
+  // 只有真正的对象才复用，其余一律从 /config 重新拉取（并兜底请求失败）
+  if (!rss || typeof rss !== "object") {
+    const cr = await api("GET", "/config");
+    if (!cr.success || !cr.data) {
+      root.innerHTML = `<div class="empty">载入配置失败：${escapeHTML(cr.message || "未知错误")}</div>`;
+      return;
+    }
+    rss = cr.data.rss || {};
   }
   if (!rss.feeds) rss.feeds = [];
 
