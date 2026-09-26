@@ -358,24 +358,22 @@ function torrentTable(list, withActions) {
   <col class="col-size">
   <col class="col-speed">
   <col class="col-speed">
-  <col class="col-cat">
   ${withActions ? '<col class="col-limit">' : ''}
 </colgroup>
 <thead><tr>
     <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
-    <th>下速</th><th>上速</th><th>分类</th>${withActions ? "<th>限速</th>" : ""}
+    <th>下速</th><th>上速</th>${withActions ? "<th>限速</th>" : ""}
 </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function torrentRow(t, withActions) {
   const pct = (t.progress * 100).toFixed(1);
   const safeName = escapeHTML(t.name);
-  const shortName = t.name.length > 40 ? escapeHTML(t.name.slice(0, 40)) + "…" : safeName;
   const safeCat = escapeHTML(t.category || "-");
   const safeHash = escapeHTML(t.hash);
   return `<tr>
     <td class="col-name">
-      <div class="torr-name" title="${safeName}">${shortName}</div>
+      <div class="torr-name" title="${safeName}">${safeName}</div>
       <div class="torr-sub">${humanSize(t.size)} · ${safeCat}</div>
     </td>
     <td class="col-state">${stateTag(t.state)}</td>
@@ -386,7 +384,6 @@ function torrentRow(t, withActions) {
     <td class="col-size">${humanSize(t.downloaded)}<span class="text-dim">/${humanSize(t.size)}</span></td>
     <td class="col-speed dl">${humanSpeed(t.dlspeed)}</td>
     <td class="col-speed up">${humanSpeed(t.upspeed)}</td>
-    <td class="col-cat">${safeCat}</td>
     ${withActions ? `<td class="col-limit">
         <button class="btn small" data-limit-btn="${safeHash}">限速</button></td>` : ""}
   </tr>`;

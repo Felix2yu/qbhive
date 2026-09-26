@@ -133,18 +133,17 @@ th { color: var(--text-dim); font-weight: 500; background: var(--panel-2); }
 tr:hover td { background: var(--row-hover); }
 
 /* —— torrent 表格列控制 —— */
-.torrent-table { table-layout: fixed; width: 100%; }
-/* 用 colgroup class 定宽：其他列固定窄宽，名称列吃剩余空间 */
-.col-name    { width: auto; }
-.col-state   { width: 58px; }
-.col-progress{ width: 120px; }
-.col-size    { width: 104px; }
-.col-speed   { width: 88px; }
-.col-cat     { width: 90px; }
-.col-limit   { width: 70px; }
+/* table-layout:auto：浏览器按内容自然分配；名称列没设 max-width → 吃掉所有剩余 */
+.torrent-table { width: 100%; border-collapse: collapse; }
+/* 其他列只给 max-width（够显示即可），绝不硬撑 */
+.col-state   { width: 52px; }        /* 状态 chip 居中 */
+.col-progress{ width: 100px; }       /* progress-bar + 百分比 */
+.col-size    { width: 92px; }        /* 999.9 GB/999.9 GB 右对齐 */
+.col-speed   { width: 68px; }        /* 99.9 MB/s 右对齐 */
+.col-limit   { width: 58px; }        /* 限速按钮居中 */
 
 .torrent-table td, .torrent-table th { padding: 8px 10px; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
-/* 名称列：多行子元素都禁止折行，名称 ellipsis */
+/* 名称列：不设任何宽度 → 自动吃剩余空间 */
 .col-name .torr-name {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-weight: 500;
@@ -168,10 +167,9 @@ tr:hover td { background: var(--row-hover); }
 .col-progress .progress-bar { flex: 1; min-width: 40px; }
 .col-progress .progress-text { font-size: 12px; color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }
 /* 速度/大小列：不换行 + 右对齐 */
-.col-speed, .col-size { white-space: nowrap; text-align: right; }
+.col-speed, .col-size { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .col-speed.dl { color: var(--accent); }
 .col-speed.up { color: var(--success); }
-.col-cat { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .col-size .text-dim { color: var(--text-dim); font-size: 12px; }
 /* 限速按钮列 */
 .col-limit { text-align: center; white-space: nowrap; }
