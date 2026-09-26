@@ -232,14 +232,10 @@ func (s *Server) getConfig(c *gin.Context) {
 	if cfg.Qbittorrent.APIKey != "" {
 		cfg.Qbittorrent.APIKey = "********"
 	}
-	// Apprise URLs 通常含 Bot Token / Webhook Secret，同样掩码
-	if len(cfg.Notifier.AppriseURLs) > 0 {
-		masked := make([]string, len(cfg.Notifier.AppriseURLs))
-		for i, u := range cfg.Notifier.AppriseURLs {
-			masked[i] = maskAppriseURL(u)
-		}
-		cfg.Notifier.AppriseURLs = masked
-	}
+	// AppriseURLs 不做掩码：掩码容易导致"用户改了又丢 / 没改又被固化"的各种状态不一致问题。
+	// 密码/APIKey 掩码是因为输入敏感、输错了要改回来；Apprise URL 是复制粘贴用的，
+	// 用户需要看到完整值来维护（换 Token、改路径等），掩码反而有害无益。
+	// 后端 saveConfig 里对 AppriseURLs 也不再需要特殊处理，和其他字段一样走普通覆盖。
 	c.JSON(200, models.APIResponse{Success: true, Data: cfg})
 }
 
@@ -298,24 +294,6 @@ func validateConfig(in *models.AppConfig) string {
 	return ""
 }
 
-func maskAppriseURL(u string) string {
-	if u == "" { return u }
-	if idx := strings.Index(u, "://"); idx > 0 {
-		prefix := u[:idx+3]
-		rest := u[idx+3:]
-		if len(rest) > 6 { return prefix + rest[:3] + "...********" }
-		return prefix + "...********"
-	}
-	if len(u) > 6 { return u[:3] + "...********" }
-	return "...********"
-}
-
-// isMaskedAppriseURL 判断一个 Apprise URL 是否是掩码后的显示值
-// （所有 maskAppriseURL 的输出都包含 "...********"）
-func isMaskedAppriseURL(u string) bool {
-	return strings.Contains(u, "...********")
-}
-
 func (s *Server) saveConfig(c *gin.Context) {
 	var in models.AppConfig
 	if err := c.ShouldBindJSON(&in); err != nil {
@@ -334,47 +312,16 @@ func (s *Server) saveConfig(c *gin.Context) {
 	if strings.TrimSpace(in.Qbittorrent.APIKey) == "" || in.Qbittorrent.APIKey == "********" {
 		in.Qbittorrent.APIKey = cur.Qbittorrent.APIKey
 	}
-	// AppriseURLs：前端现在会按行保持 cur 的数组长度传回来，三项规则：
-	//   - 非掩码非空 → 用户新输入，替换对应 index
-	//   - 含 "...********" → 原掩码值，保持 cur 对应位置不变
-	//   - 空字符串 → 用户删除该行
-	curURLs := cur.Notifier.AppriseURLs
-	inURLs := in.Notifier.AppriseURLs
-
-	// 如果前端传了空数组（理论上不会，前端 split("\n") 至少会给 [""]，
-	// 但做个防御）→ 保留原值
-	if len(inURLs) == 0 {
-		in.Notifier.AppriseURLs = curURLs
-	} else {
-		// 先以 cur 为底拷贝一份，再按 index 应用前端的改动
-		base := make([]string, len(curURLs))
-		copy(base, curURLs)
-
-		// 如果前端传了更多行（新增了 URL），扩展 base
-		if len(inURLs) > len(base) {
-			extended := make([]string, len(inURLs))
-			copy(extended, base)
-			base = extended
-		}
-
-		for i := 0; i < len(inURLs); i++ {
-			u := strings.TrimSpace(inURLs[i])
-			switch {
-			case u == "":
-				// 用户删了这行 → 置空占位，后面统一清理
-				base[i] = ""
-			case isMaskedAppriseURL(u):
-				// 掩码值 → 保持 cur 原值（base 已拷贝 cur，不用改）
-			default:
-				// 用户新输入 → 替换
-				base[i] = u
-			}
-		}
-		// 清理所有空字符串（用户删除 + 可能遗留的空占位）
-		cleaned := make([]string, 0, len(base))
-		for _, u := range base {
-			if strings.TrimSpace(u) != "" {
-				cleaned = append(cleaned, u)
+	// AppriseURLs 不再掩码 → 前端传回什么就是什么（trim 后按行过滤空项即可）。
+	// 不再需要 isMaskedAppriseURL / maskAppriseURL，也不需要 cur 的 merge 逻辑。
+	// 注：之前的 bug 已经可能把掩码值固化到磁盘；这次用户在前端看到完整值后
+	// 随便编辑一次再保存，就能把污染的掩码值替换成真实值。
+	if in.Notifier.AppriseURLs != nil {
+		cleaned := make([]string, 0, len(in.Notifier.AppriseURLs))
+		for _, u := range in.Notifier.AppriseURLs {
+			trimmed := strings.TrimSpace(u)
+			if trimmed != "" {
+				cleaned = append(cleaned, trimmed)
 			}
 		}
 		in.Notifier.AppriseURLs = cleaned
