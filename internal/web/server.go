@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
-	"github.com/Felix2yu/qbhive/internal/logger"
 	"github.com/Felix2yu/qbhive/internal/limiter"
 	"github.com/Felix2yu/qbhive/internal/models"
 	"github.com/Felix2yu/qbhive/internal/notifier"
@@ -340,14 +339,13 @@ func (s *Server) testQB(c *gin.Context) {
 	c.JSON(200, models.APIResponse{Success: true})
 }
 
-// debugQBRaw 直接透传 qBittorrent /api/v2/torrents/info 原始响应（不做 JSON 解析）
-// 用来排查 qBittorrent 对特定参数组合返回了什么
+// debugQBRaw 对比两种路径：原始 HTTP vs client.GetTorrents()
 func (s *Server) debugQBRaw(c *gin.Context) {
 	filter := c.Query("filter")
 	sort := c.Query("sort")
 	reverse := c.Query("reverse")
 
-	// 自己拼 URL 绕过 client.do 的自动重登，看最原始的 qB 响应
+	// === 路径 A: 直接 HTTP（绕过 client 层） ===
 	qbURL := s.cfg.Get().Qbittorrent.URL
 	if qbURL == "" {
 		c.String(500, "no qbittorrent url configured")
@@ -359,26 +357,32 @@ func (s *Server) debugQBRaw(c *gin.Context) {
 	if reverse != "" { v.Set("reverse", reverse) }
 	path := "/api/v2/torrents/info"
 	if len(v) > 0 { path += "?" + v.Encode() }
-
 	reqURL := qbURL + path
-	logger.Info.Printf("debugQBRaw GET %s (apiKey=%v cookie=%q)", reqURL, s.cfg.Get().Qbittorrent.APIKey != "", s.qbClient.GetCookie())
-
 	req, _ := http.NewRequest("GET", reqURL, nil)
 	if key := s.cfg.Get().Qbittorrent.APIKey; key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	} else if ck := s.qbClient.GetCookie(); ck != "" {
 		req.Header.Set("Cookie", ck)
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		c.String(502, "ERR: %v", err)
-		return
+	respA, errA := http.DefaultClient.Do(req)
+	var bodyA []byte
+	var statusA int
+	if errA == nil {
+		statusA = respA.StatusCode
+		bodyA, _ = io.ReadAll(respA.Body)
+		respA.Body.Close()
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+
+	// === 路径 B: 走 client.GetTorrents() ===
+	listB, errB := s.qbClient.GetTorrents(filter, sort, reverse)
+
 	c.Header("Content-Type", "text/plain; charset=utf-8")
-	c.String(200, "=== qBittorrent raw response ===\nURL: %s\nStatus: %d\nContent-Length: %d\n\nBODY:\n%s",
-		reqURL, resp.StatusCode, len(body), string(body[:min(len(body), 2000)]))
+	c.String(200,
+		"=== 路径 A: 直接 HTTP ===\nURL: %s\nStatus: %d\nLen: %d\nBody[:300]: %q\n\n"+
+		"=== 路径 B: client.GetTorrents(%q, %q, %q) ===\nlistLen=%d err=%v\n",
+		reqURL, statusA, len(bodyA), string(bodyA[:min(len(bodyA), 300)]),
+		filter, sort, reverse, len(listB), errB,
+	)
 }
 
 func (s *Server) listTorrents(c *gin.Context) {
