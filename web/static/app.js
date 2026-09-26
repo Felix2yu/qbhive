@@ -370,6 +370,7 @@ function torrentTable(list, withActions) {
       <div class="cell size">大小</div>
       <div class="cell speed">下速</div>
       <div class="cell speed">上速</div>
+      <div class="cell cat">分类</div>
       ${withActions ? '<div class="cell actions">限速</div>' : ''}
     </div>`;
   return `<div class="torrent-list">${head}${rows}</div>`;
@@ -383,7 +384,7 @@ function torrentRow(t, withActions) {
   return `<div class="torrent-row">
     <div class="cell name">
       <div class="torr-name" title="${safeName}">${safeName}</div>
-      <div class="torr-sub">${humanSize(t.size)} · ${safeCat}</div>
+      <div class="torr-sub">${humanSize(t.size)}</div>
     </div>
     <div class="cell state">${stateTag(t.state)}</div>
     <div class="cell progress">
@@ -393,6 +394,7 @@ function torrentRow(t, withActions) {
     <div class="cell size">${humanSize(t.downloaded)}<span class="text-dim">/${humanSize(t.size)}</span></div>
     <div class="cell speed dl">${humanSpeed(t.dlspeed)}</div>
     <div class="cell speed up">${humanSpeed(t.upspeed)}</div>
+    <div class="cell cat" title="${safeCat}">${safeCat}</div>
     ${withActions ? `<div class="cell actions"><button class="btn small" data-limit-btn="${safeHash}">限速</button></div>` : ""}
   </div>`;
 }

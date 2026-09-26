@@ -152,9 +152,10 @@ tr:hover td { background: var(--row-hover); }
 .torrent-row .cell { flex-shrink: 0; overflow: hidden; white-space: nowrap; }
 .torrent-row .cell.name { flex: 1; min-width: 0; }       /* 吃掉所有剩余空间 */
 .torrent-row .cell.state   { width: 56px; text-align: center; }
-.torrent-row .cell.progress{ width: 120px; display: flex; align-items: center; gap: 6px; }
-.torrent-row .cell.size    { width: 110px; text-align: right; font-variant-numeric: tabular-nums; }
-.torrent-row .cell.speed   { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.progress{ width: 110px; display: flex; align-items: center; gap: 6px; }
+.torrent-row .cell.size    { width: 100px; text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.speed   { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.cat     { width: 80px; overflow: hidden; text-overflow: ellipsis; }
 .torrent-row .cell.actions { width: 64px; text-align: center; }
 
 /* 名称列：两行，名称 + 副标题都 ellipsis */
