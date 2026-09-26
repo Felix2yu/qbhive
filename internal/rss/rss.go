@@ -502,6 +502,11 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 			continue
 		}
 		if seen[key] {
+			// 已见过的也记录进 recent：让 UI 上 itemCount（=XML 总条数）和 recent 数量对齐，
+			// 用户点开能看到每一条的状态。用 seen_duplicate 标记方便前端做不同展示。
+			st.mu.Lock()
+			st.pushRecent(RecentItem{Title: item.Title, Action: "seen_duplicate", ProcessedAt: time.Now()})
+			st.mu.Unlock()
 			continue
 		}
 		newlySeen = append(newlySeen, key)
