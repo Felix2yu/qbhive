@@ -229,41 +229,29 @@ $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.v
 
 // ---------- 主题 ----------
 // 三种模式：auto（跟随系统）、dark、light；持久化到 localStorage
-(function initTheme() {
-  const STORAGE_KEY = "qbhive-theme";
-  const root = document.documentElement;
+const THEME_KEY = "qbhive-theme";
 
-  function applyTheme(mode) {
-    root.setAttribute("data-theme", mode);
-    // 高亮当前选中按钮
-    document.querySelectorAll(".theme-switch button").forEach(b => {
-      b.classList.toggle("active", b.dataset.themeOpt === mode);
-    });
-  }
-
-  // 初始化：localStorage 有就用存的；没有默认 auto
-  let saved = localStorage.getItem(STORAGE_KEY);
-  if (!saved || !["auto", "dark", "light"].includes(saved)) saved = "auto";
-  applyTheme(saved);
-
-  // 按钮点击切换
+function applyTheme(mode) {
+  document.documentElement.setAttribute("data-theme", mode);
+  // 页面上任何 .theme-switch 里的按钮都同步高亮
   document.querySelectorAll(".theme-switch button").forEach(b => {
-    b.addEventListener("click", () => {
-      const mode = b.dataset.themeOpt;
-      applyTheme(mode);
-      localStorage.setItem(STORAGE_KEY, mode);
-    });
+    b.classList.toggle("active", b.dataset.themeOpt === mode);
   });
+}
 
-  // 系统主题变化时自动响应（仅 auto 模式需要）
-  if (window.matchMedia) {
-    window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", e => {
-      if (root.getAttribute("data-theme") === "auto") {
-        // CSS @media 已自动切变量，但加个 class 刷新一下也无妨（CSS 纯变量切换不需要额外动作）
-      }
-    });
-  }
-})();
+function getTheme() {
+  let saved = localStorage.getItem(THEME_KEY);
+  if (!saved || !["auto", "dark", "light"].includes(saved)) saved = "auto";
+  return saved;
+}
+
+function setTheme(mode) {
+  localStorage.setItem(THEME_KEY, mode);
+  applyTheme(mode);
+}
+
+// 初始化：页面加载完立即应用一次，避免 FOUC
+applyTheme(getTheme());
 
 // ---------- 概览 ----------
 // 防抖：同一时刻只跑一次自动刷新
@@ -364,14 +352,14 @@ function torrentTable(list, withActions) {
   const rows = list.map(t => torrentRow(t, withActions)).join("");
   return `<table class="torrent-table">
 <colgroup>
-  <col style="width:auto;min-width:200px">
-  <col style="width:72px">
-  <col style="width:140px">
-  <col style="width:96px">
-  <col style="width:88px">
-  <col style="width:88px">
-  <col style="width:auto">
-  ${withActions ? '<col style="width:90px">' : ''}
+  <col class="col-name">
+  <col class="col-state">
+  <col class="col-progress">
+  <col class="col-size">
+  <col class="col-speed">
+  <col class="col-speed">
+  <col class="col-cat">
+  ${withActions ? '<col class="col-limit">' : ''}
 </colgroup>
 <thead><tr>
     <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
@@ -927,6 +915,25 @@ async function renderSettings(root) {
   const sNotifyUrl = escapeHTML((cfg.notifier.appriseUrls || []).join("\n"));
 
   root.innerHTML = `
+    <!-- 主题 -->
+    <div class="card">
+      <h2>外观主题</h2>
+      <div class="theme-switch">
+        <button data-theme-opt="auto" title="跟随系统">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+          <span>跟随系统</span>
+        </button>
+        <button data-theme-opt="dark" title="深色">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          <span>深色</span>
+        </button>
+        <button data-theme-opt="light" title="浅色">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          <span>浅色</span>
+        </button>
+      </div>
+    </div>
+
     <!-- qBittorrent -->
     <div class="card">
       <h2>qBittorrent 连接</h2>
@@ -996,6 +1003,12 @@ async function renderSettings(root) {
 
   // 首次渲染 limiter 规则
   renderLimiterRules();
+
+  // --- 主题按钮高亮 + 事件 ---
+  applyTheme(getTheme());
+  $$(".theme-switch button", root).forEach(b => {
+    b.addEventListener("click", () => setTheme(b.dataset.themeOpt));
+  });
 
   // --- 事件 ---
   $("#qb-test").onclick = async () => {
