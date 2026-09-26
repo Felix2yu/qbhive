@@ -212,14 +212,17 @@ const views = {
 };
 
 let currentView = "dashboard";
-async function switchView(name) {
+async function switchView(name, background = false) {
   currentView = name;
   $$(".tab").forEach(b => b.classList.toggle("active", b.dataset.view === name));
   const root = $("#content");
   root.dataset.view = name;
-  root.innerHTML = '<div class="empty">加载中…</div>';
+  // 后台刷新：不清空页面，保留旧数据，只在渲染函数内部更新
+  if (!background) {
+    root.innerHTML = '<div class="empty">加载中…</div>';
+  }
   try {
-    await views[name](root);
+    await views[name](root, background);
   } catch (e) {
     root.innerHTML = `<div class="empty">出错了：${e.message}</div>`;
   }
@@ -254,30 +257,46 @@ function setTheme(mode) {
 applyTheme(getTheme());
 
 // ---------- 概览 ----------
-// 防抖：同一时刻只跑一次自动刷新
 let _refreshRunning = false;
 
-async function renderDashboard(root) {
+async function renderDashboard(root, background = false) {
+  // 后台刷新：保留已有的 DOM 结构，只更新数字和列表
+  if (background) {
+    await refreshDashboard(root);
+    return;
+  }
+  // 首次加载：搭结构
+  root.innerHTML = `
+    <div class="status-bar">
+      <div class="status-group" id="dash-status-group"></div>
+      <div class="speed-group" id="dash-speed-group"></div>
+    </div>
+    <div class="card">
+      <h2>最近活跃任务</h2>
+      <div id="dash-latest"><div style="color:var(--text-dim)">加载中…</div></div>
+    </div>
+  `;
+  await refreshDashboard(root);
+}
+
+async function refreshDashboard(root) {
+  // 标记刷新中（状态带右上角小 spinner）
+  const sb = root.querySelector(".status-bar");
+  if (sb) sb.classList.add("refreshing");
+
   const t = await api("GET", "/torrents/stats");
   const s = t.data || {};
-
-  // —— 紧凑状态带（一行搞定）——
-  const dlSpeed    = s.dlSpeed    || 0;
-  const upSpeed    = s.upSpeed    || 0;
-  const dlLimit    = s.dlSpeedLimit || 0;
-  const upLimit    = s.upSpeedLimit || 0;
-  const downloading = s.downloadingCount || 0;
-  const seeding     = s.seedingCount     || 0;
-  const stalled     = s.stalledCount     || 0;
-  const errored     = s.erroredCount     || 0;
-  const stoppedDl   = s.stoppedDL        || 0;
-  const stoppedUp   = s.stoppedUP        || 0;
+  const dlSpeed = s.dlSpeed || 0, upSpeed = s.upSpeed || 0;
+  const dlLimit = s.dlSpeedLimit || 0, upLimit = s.upSpeedLimit || 0;
+  const downloading = s.downloadingCount || 0, seeding = s.seedingCount || 0;
+  const stalled = s.stalledCount || 0, errored = s.erroredCount || 0;
+  const stoppedDl = s.stoppedDL || 0, stoppedUp = s.stoppedUP || 0;
 
   const speedBar = (cur, limit, kind) => {
     if (cur === 0 && limit === 0) return "";
     const pct = limit > 0 ? Math.min(100, Math.round(cur / limit * 100)) : 0;
     const speedCls = kind === "dl" ? "var(--accent)" : "var(--success)";
-    const dirIcon  = kind === "dl" ? "▼" : "▲";
+    const dirIcon = kind === "dl" ? "▼" : "▲";
     const limitStr = limit > 0 ? humanSpeed(limit) : "∞";
     return `<div class="speed">
       <div class="speed-label"><span style="color:${speedCls}">${dirIcon}</span>
@@ -288,36 +307,29 @@ async function renderDashboard(root) {
     </div>`;
   };
 
-  root.innerHTML = `
-    <div class="status-bar">
-      <div class="status-group">
-        <span class="status-chip dl">下载中 ${downloading}</span>
-        <span class="status-chip up">做种中 ${seeding}</span>
-        ${stalled > 0 ? `<span class="status-chip warn">停滞 ${stalled}</span>` : ""}
-        ${stoppedDl > 0 ? `<span class="status-chip dim">暂停未完成 ${stoppedDl}</span>` : ""}
-        ${stoppedUp > 0 ? `<span class="status-chip ok">已完成 ${stoppedUp}</span>` : ""}
-        ${errored > 0 ? `<span class="status-chip danger">⚠ 异常 ${errored}</span>` : ""}
-      </div>
-      <div class="speed-group">
-        ${speedBar(dlSpeed, dlLimit, "dl")}
-        ${speedBar(upSpeed, upLimit, "up")}
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>最近活跃任务</h2>
-      <div id="dash-latest"><div style="color:var(--text-dim)">加载中…</div></div>
-    </div>
+  const group = root.querySelector("#dash-status-group");
+  if (group) group.innerHTML = `
+    <span class="status-chip dl">下载中 ${downloading}</span>
+    <span class="status-chip up">做种中 ${seeding}</span>
+    ${stalled > 0 ? `<span class="status-chip warn">停滞 ${stalled}</span>` : ""}
+    ${stoppedDl > 0 ? `<span class="status-chip dim">暂停未完成 ${stoppedDl}</span>` : ""}
+    ${stoppedUp > 0 ? `<span class="status-chip ok">已完成 ${stoppedUp}</span>` : ""}
+    ${errored > 0 ? `<span class="status-chip danger">⚠ 异常 ${errored}</span>` : ""}
   `;
+  const sg = root.querySelector("#dash-speed-group");
+  if (sg) sg.innerHTML = speedBar(dlSpeed, dlLimit, "dl") + speedBar(upSpeed, upLimit, "up");
 
-  // 概览只拉 top 10 active，分块渲避免卡
+  // 任务列表：后台获取，到了再替换
   const top10 = await api("GET", "/torrents?filter=active&limit=10&sort=added_on&reverse=true");
   const list = top10.data || [];
-  if (list.length === 0) {
-    $("#dash-latest").innerHTML = '<div class="empty">当前没有活跃任务</div>';
-  } else {
-    $("#dash-latest").innerHTML = torrentTable(list, false);
+  const slot = root.querySelector("#dash-latest");
+  if (slot) {
+    slot.innerHTML = list.length === 0
+      ? '<div class="empty">当前没有活跃任务</div>'
+      : torrentTable(list, false);
   }
+
+  if (sb) sb.classList.remove("refreshing");
 }
 
 
@@ -350,20 +362,17 @@ function stateTag(s) {
 function torrentTable(list, withActions) {
   if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
   const rows = list.map(t => torrentRow(t, withActions)).join("");
-  return `<div class="table-wrap"><table class="torrent-table">
-<colgroup>
-  <col class="col-name">
-  <col class="col-state">
-  <col class="col-progress">
-  <col class="col-size">
-  <col class="col-speed">
-  <col class="col-speed">
-  ${withActions ? '<col class="col-limit">' : ''}
-</colgroup>
-<thead><tr>
-    <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
-    <th>下速</th><th>上速</th>${withActions ? "<th>限速</th>" : ""}
-</tr></thead><tbody>${rows}</tbody></table></div>`;
+  const head = `
+    <div class="torrent-row head">
+      <div class="cell name">名称</div>
+      <div class="cell state">状态</div>
+      <div class="cell progress">进度</div>
+      <div class="cell size">大小</div>
+      <div class="cell speed">下速</div>
+      <div class="cell speed">上速</div>
+      ${withActions ? '<div class="cell actions">限速</div>' : ''}
+    </div>`;
+  return `<div class="torrent-list">${head}${rows}</div>`;
 }
 
 function torrentRow(t, withActions) {
@@ -371,22 +380,21 @@ function torrentRow(t, withActions) {
   const safeName = escapeHTML(t.name);
   const safeCat = escapeHTML(t.category || "-");
   const safeHash = escapeHTML(t.hash);
-  return `<tr>
-    <td class="col-name">
+  return `<div class="torrent-row">
+    <div class="cell name">
       <div class="torr-name" title="${safeName}">${safeName}</div>
       <div class="torr-sub">${humanSize(t.size)} · ${safeCat}</div>
-    </td>
-    <td class="col-state">${stateTag(t.state)}</td>
-    <td class="col-progress">
+    </div>
+    <div class="cell state">${stateTag(t.state)}</div>
+    <div class="cell progress">
       <div class="progress-bar"><div style="width:${pct}%"></div></div>
       <span class="progress-text">${pct}%</span>
-    </td>
-    <td class="col-size">${humanSize(t.downloaded)}<span class="text-dim">/${humanSize(t.size)}</span></td>
-    <td class="col-speed dl">${humanSpeed(t.dlspeed)}</td>
-    <td class="col-speed up">${humanSpeed(t.upspeed)}</td>
-    ${withActions ? `<td class="col-limit">
-        <button class="btn small" data-limit-btn="${safeHash}">限速</button></td>` : ""}
-  </tr>`;
+    </div>
+    <div class="cell size">${humanSize(t.downloaded)}<span class="text-dim">/${humanSize(t.size)}</span></div>
+    <div class="cell speed dl">${humanSpeed(t.dlspeed)}</div>
+    <div class="cell speed up">${humanSpeed(t.upspeed)}</div>
+    ${withActions ? `<div class="cell actions"><button class="btn small" data-limit-btn="${safeHash}">限速</button></div>` : ""}
+  </div>`;
 }
 
 // 限速按钮弹框绑定
@@ -446,7 +454,10 @@ const torrentFilterOptions = [
   { value: "all",          label: "全部（⚠️ 可能很慢）" },
 ];
 
-async function renderTorrents(root) {
+async function renderTorrents(root, background = false) {
+  // 后台刷新：保留工具栏和旧列表，只重新拉取
+  if (background) { await fetchTorrents(); return; }
+
   root.innerHTML = `
     <div class="card">
       <h2>下载任务 <span class="badge">可配置单任务上传限速</span></h2>
@@ -492,55 +503,53 @@ async function renderTorrents(root) {
     renderPage();
   }, 300);
 
-  async function fetchTorrents() {
-    $("#tf-progress").textContent = "拉取中…";
-    try {
-      const t = await api("GET",
-        `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
-      if (!t.success) {
-        $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(t.message || "未知错误")}</div>`;
-        $("#tf-progress").textContent = "";
-        return;
-      }
-      _torrentsState.rawList = t.data || [];
-      $("#tf-progress").textContent = `已加载 ${_torrentsState.rawList.length} 条`;
-      renderPage();
-    } catch (e) {
-      // 网络中断 / 超时等：给出明确错误，别停留在"拉取中…"
-      $("#tf-body").innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(e.message || String(e))}</div>`;
-      $("#tf-progress").textContent = "";
-    }
-  }
-
-  function renderPage() {
-    const list = filterList(_torrentsState.rawList, _torrentsState.search);
-    const { pages, page, start, end } = paginate(list.length, _torrentsState.page, _torrentsState.pageSize);
-    const pageSlice = list.slice(start, end);
-
-    $("#tf-progress").textContent =
-      `已加载 ${_torrentsState.rawList.length} 条${_torrentsState.search ? `，搜索命中 ${list.length} 条` : ""} · 显示 ${start + 1}-${Math.min(end, list.length)} / ${list.length}`;
-
-    if (pageSlice.length === 0) {
-      $("#tf-body").innerHTML = `<div class="empty">${_torrentsState.search ? "搜索无匹配" : "当前没有任务"}</div>`;
-      return;
-    }
-
-    $("#tf-body").innerHTML = torrentTable(pageSlice, true) + pageNav(list.length, page, _torrentsState.pageSize, p => {
-      _torrentsState.page = p; renderPage();
-    });
-    bindLimitButtons();
-  }
-
   fetchTorrents();
 }
 
-function torrentTableHeader(count) {
-  return `<table class="torrent-table"><thead><tr>
-    <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
-    <th>下速</th><th>上速</th><th>分类</th>${count > 0 ? "<th>限速</th>" : ""}
-  </tr></thead><tbody>`;
+// 拉取任务 + 渲染列表（模块级，后台刷新可直接调用）
+async function fetchTorrents() {
+  const progress = $("#tf-progress");
+  if (progress) progress.textContent = "拉取中…";
+  try {
+    const t = await api("GET",
+      `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
+    if (!t.success) {
+      const body = $("#tf-body");
+      if (body) body.innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(t.message || "未知错误")}</div>`;
+      if (progress) progress.textContent = "";
+      return;
+    }
+    _torrentsState.rawList = t.data || [];
+    if (progress) progress.textContent = `已加载 ${_torrentsState.rawList.length} 条`;
+    renderPage();
+  } catch (e) {
+    const body = $("#tf-body");
+    if (body) body.innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(e.message || String(e))}</div>`;
+    if (progress) progress.textContent = "";
+  }
 }
 
+function renderPage() {
+  const list = filterList(_torrentsState.rawList, _torrentsState.search);
+  const { pages, page, start, end } = paginate(list.length, _torrentsState.page, _torrentsState.pageSize);
+  const pageSlice = list.slice(start, end);
+
+  const progress = $("#tf-progress");
+  if (progress) progress.textContent =
+    `已加载 ${_torrentsState.rawList.length} 条${_torrentsState.search ? `，搜索命中 ${list.length} 条` : ""} · 显示 ${start + 1}-${Math.min(end, list.length)} / ${list.length}`;
+
+  const body = $("#tf-body");
+  if (!body) return;
+  if (pageSlice.length === 0) {
+    body.innerHTML = `<div class="empty">${_torrentsState.search ? "搜索无匹配" : "当前没有任务"}</div>`;
+    return;
+  }
+
+  body.innerHTML = torrentTable(pageSlice, true) + pageNav(list.length, page, _torrentsState.pageSize, p => {
+    _torrentsState.page = p; renderPage();
+  });
+  bindLimitButtons();
+}
 
 // ---------- RSS ----------
 // rss 参数可传：首次进入页面或显式传 undefined 时从服务器拉；
@@ -1067,11 +1076,11 @@ async function updateStatus() {
 switchView("dashboard");
 updateStatus();
 setInterval(updateStatus, 30000);
-// 概览/任务页自动刷新（防抖：上次请求没回来就跳过；间隔 8s，active 下足够快）
+// 概览/任务页自动刷新（防抖；间隔 8s；后台刷新不清空页面）
 setInterval(async () => {
   if (_refreshRunning) return;
   if (currentView === "dashboard" || currentView === "torrents") {
     _refreshRunning = true;
-    try { await switchView(currentView); } finally { _refreshRunning = false; }
+    try { await switchView(currentView, true); } finally { _refreshRunning = false; }
   }
 }, 8000);

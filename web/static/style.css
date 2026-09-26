@@ -132,30 +132,37 @@ th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--bo
 th { color: var(--text-dim); font-weight: 500; background: var(--panel-2); }
 tr:hover td { background: var(--row-hover); }
 
-/* —— torrent 表格列控制 —— */
-/* 外层横滚：窄屏时允许横向滚动，绝不让内容溢出 */
-.table-wrap { overflow-x: auto; }
-/* table-layout: fixed：严格按 colgroup 宽度分配，不看内容 */
-.torrent-table { table-layout: fixed; width: 100%; border-collapse: collapse; min-width: 640px; }
-/* 关键：td/th 用 border-box，padding 算进 width 里，不再额外撑宽 */
-.torrent-table td, .torrent-table th {
-  box-sizing: border-box;
-  overflow: hidden; text-overflow: ellipsis;
-  padding: 8px 10px; vertical-align: middle;
+/* —— torrent 列表（flex 行布局，完全可控）—— */
+.torrent-list { display: flex; flex-direction: column; }
+
+/* 每行：flex 横向排列 */
+.torrent-row {
+  display: flex; align-items: center; gap: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
 }
-/* 其他列固定窄宽；名称列不写 width → 自动吃剩余 */
-.col-state   { width: 60px; text-align: center; white-space: nowrap; }
-.col-progress{ width: 110px; }
-.col-size    { width: 108px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.col-speed   { width: 82px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.col-limit   { width: 68px; text-align: center; white-space: nowrap; }
-.col-limit .btn { padding: 3px 8px; font-size: 12px; line-height: 1.2; }
-/* 名称列：ellipsis */
-.col-name .torr-name {
+.torrent-row.head {
+  color: var(--text-dim); font-weight: 500; font-size: 12px;
+  background: var(--panel-2);
+}
+.torrent-row:not(.head):hover { background: var(--row-hover); }
+
+/* 单元格：默认不收缩，只有 name 列 flex:1 */
+.torrent-row .cell { flex-shrink: 0; overflow: hidden; white-space: nowrap; }
+.torrent-row .cell.name { flex: 1; min-width: 0; }       /* 吃掉所有剩余空间 */
+.torrent-row .cell.state   { width: 56px; text-align: center; }
+.torrent-row .cell.progress{ width: 120px; display: flex; align-items: center; gap: 6px; }
+.torrent-row .cell.size    { width: 110px; text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.speed   { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
+.torrent-row .cell.actions { width: 64px; text-align: center; }
+
+/* 名称列：两行，名称 + 副标题都 ellipsis */
+.torrent-row .cell.name .torr-name {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-weight: 500;
 }
-.col-name .torr-sub {
+.torrent-row .cell.name .torr-sub {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--text-dim); font-size: 11px; margin-top: 2px;
 }
@@ -166,16 +173,22 @@ tr:hover td { background: var(--row-hover); }
   font-size: 12px; font-weight: 500;
   background: var(--panel-2);
   border: 1px solid currentColor;
-  border-opacity: 0.35;
 }
-/* 进度列：flex 布局 */
-.col-progress { display: flex; align-items: center; gap: 6px; overflow: hidden; }
-.col-progress .progress-bar { flex: 1; min-width: 40px; }
-.col-progress .progress-text { font-size: 12px; color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }
-/* 速度/大小列颜色 */
-.col-speed.dl { color: var(--accent); }
-.col-speed.up { color: var(--success); }
-.col-size .text-dim { color: var(--text-dim); font-size: 12px; }
+/* 进度列 */
+.torrent-row .cell.progress .progress-bar { flex: 1; min-width: 40px; }
+.torrent-row .cell.progress .progress-text {
+  font-size: 12px; color: var(--text-dim); white-space: nowrap; flex-shrink: 0;
+}
+/* 速度/大小颜色 */
+.cell.speed.dl { color: var(--accent); }
+.cell.speed.up { color: var(--success); }
+.cell.size .text-dim { color: var(--text-dim); font-size: 12px; }
+/* 限速按钮 */
+.cell.actions .btn { padding: 3px 8px; font-size: 12px; line-height: 1.2; }
+
+/* 窄屏兜底：允许横向滚动，绝不溢出 main */
+.torrent-list { min-width: 520px; }
+.card > .torrent-list { overflow-x: auto; }
 
 .progress-bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 100px; }
 .progress-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s; }
@@ -221,6 +234,21 @@ textarea { resize: vertical; min-height: 80px; font-family: inherit; }
   padding: 14px 18px;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--radius);
+  position: relative;
+  transition: opacity 0.2s;
+}
+/* 后台刷新时：轻微透明 + 顶部一条细线 spinner，不清空内容 */
+.status-bar.refreshing { opacity: 0.7; }
+.status-bar.refreshing::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  animation: status-refresh 1.2s linear infinite;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+@keyframes status-refresh {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 .status-group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .status-chip {
