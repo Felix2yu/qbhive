@@ -1,4 +1,13 @@
-:root {
+/* ===== 主题变量 =====
+   三种模式：
+   - data-theme="dark"  → 强制暗色（默认）
+   - data-theme="light" → 强制亮色
+   - data-theme="auto"  → 跟随系统（JS 会根据 prefers-color-scheme 切换）
+*/
+
+/* —— 暗色主题（默认） —— */
+:root,
+:root[data-theme="dark"] {
   --bg: #0f1115;
   --panel: #171a21;
   --panel-2: #1e222b;
@@ -11,6 +20,47 @@
   --warn: #fbbf24;
   --danger: #f87171;
   --radius: 10px;
+  --row-hover: rgba(255,255,255,0.02);
+  --row-hover-strong: rgba(255,255,255,0.04);
+  --primary-text: #0b1220;
+}
+
+/* —— 亮色主题 —— */
+:root[data-theme="light"] {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #f0f2f5;
+  --border: #e1e4ea;
+  --text: #1a1d24;
+  --text-dim: #6b7280;
+  --accent: #2563eb;
+  --accent-2: #7c3aed;
+  --success: #059669;
+  --warn: #d97706;
+  --danger: #dc2626;
+  --row-hover: rgba(0,0,0,0.025);
+  --row-hover-strong: rgba(0,0,0,0.04);
+  --primary-text: #ffffff;
+}
+
+/* —— 跟随系统自动切换 —— */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="auto"] {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --panel-2: #f0f2f5;
+    --border: #e1e4ea;
+    --text: #1a1d24;
+    --text-dim: #6b7280;
+    --accent: #2563eb;
+    --accent-2: #7c3aed;
+    --success: #059669;
+    --warn: #d97706;
+    --danger: #dc2626;
+    --row-hover: rgba(0,0,0,0.025);
+    --row-hover-strong: rgba(0,0,0,0.04);
+    --primary-text: #ffffff;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -38,6 +88,17 @@ body { display: flex; flex-direction: column; }
 .status { font-size: 12px; padding: 5px 10px; border-radius: 20px; background: var(--panel-2); color: var(--text-dim); }
 .status.ok { color: var(--success); }
 .status.bad { color: var(--danger); }
+
+/* 主题切换按钮组 */
+.theme-switch { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel-2); }
+.theme-switch button {
+  background: transparent; border: none; color: var(--text-dim);
+  padding: 5px 9px; cursor: pointer; font-size: 13px;
+  transition: all 0.15s;
+  line-height: 1;
+}
+.theme-switch button:hover { color: var(--text); }
+.theme-switch button.active { color: var(--accent); background: var(--panel); }
 
 main {
   flex: 1; padding: 24px; overflow: auto;
@@ -67,7 +128,7 @@ main > .card { margin-bottom: 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
 th { color: var(--text-dim); font-weight: 500; background: var(--panel-2); }
-tr:hover td { background: rgba(255,255,255,0.02); }
+tr:hover td { background: var(--row-hover); }
 
 .progress-bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 100px; }
 .progress-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s; }
@@ -81,8 +142,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   flex-shrink: 0;             /* 窄屏时按钮整体压缩 flex 行，而不是被挤变形 */
 }
 .btn:hover { background: var(--border); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
-.btn.primary:hover { background: #7eb4ff; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--primary-text); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.1); }
 .btn.small { padding: 4px 10px; font-size: 12px; }
 .btn.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .btn.link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; }
@@ -155,7 +216,7 @@ textarea { resize: vertical; min-height: 80px; font-family: inherit; }
   font-size: 12px; display: flex; gap: 6px; align-items: baseline;
   padding: 3px 6px; border-radius: 4px;
 }
-.rss-recent-item:hover { background: rgba(255,255,255,0.03); }
+.rss-recent-item:hover { background: var(--row-hover-strong); }
 .rss-recent-icon { flex-shrink: 0; width: 16px; text-align: center; }
 .rss-recent-title {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;

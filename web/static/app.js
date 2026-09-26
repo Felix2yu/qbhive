@@ -227,6 +227,44 @@ async function switchView(name) {
 
 $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.view)));
 
+// ---------- 主题 ----------
+// 三种模式：auto（跟随系统）、dark、light；持久化到 localStorage
+(function initTheme() {
+  const STORAGE_KEY = "qbhive-theme";
+  const root = document.documentElement;
+
+  function applyTheme(mode) {
+    root.setAttribute("data-theme", mode);
+    // 高亮当前选中按钮
+    document.querySelectorAll(".theme-switch button").forEach(b => {
+      b.classList.toggle("active", b.dataset.themeOpt === mode);
+    });
+  }
+
+  // 初始化：localStorage 有就用存的；没有默认 auto
+  let saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved || !["auto", "dark", "light"].includes(saved)) saved = "auto";
+  applyTheme(saved);
+
+  // 按钮点击切换
+  document.querySelectorAll(".theme-switch button").forEach(b => {
+    b.addEventListener("click", () => {
+      const mode = b.dataset.themeOpt;
+      applyTheme(mode);
+      localStorage.setItem(STORAGE_KEY, mode);
+    });
+  });
+
+  // 系统主题变化时自动响应（仅 auto 模式需要）
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", e => {
+      if (root.getAttribute("data-theme") === "auto") {
+        // CSS @media 已自动切变量，但加个 class 刷新一下也无妨（CSS 纯变量切换不需要额外动作）
+      }
+    });
+  }
+})();
+
 // ---------- 概览 ----------
 // 防抖：同一时刻只跑一次自动刷新
 let _refreshRunning = false;
@@ -513,6 +551,8 @@ async function renderRSS(root, rss) {
   };
   $("#rss-save").onclick = () => saveRSS(rss);
   $("#rss-add").onclick = () => {
+    // 先把用户在 DOM 里已填的内容同步回 rss 对象，避免重渲染丢失
+    collectRSS(rss);
     const newFeed = { id: genID(), name: "新订阅源", url: "", enabled: true, rules: [] };
     rss.feeds.push(newFeed);
     renderRSS(root, rss);
@@ -604,11 +644,14 @@ function renderRuleBlock(fid, r, ri) {
 
 function bindFeedEvents(rss) {
   $$("[data-del-feed]").forEach(b => b.addEventListener("click", () => {
+    // 先同步 DOM 输入 → rss 对象，避免其他正在编辑的 feed 丢值
+    collectRSS(rss);
     const id = b.dataset.delFeed;
     rss.feeds = rss.feeds.filter(f => f.id !== id);
     renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-add-rule]").forEach(b => b.addEventListener("click", () => {
+    collectRSS(rss);
     const fid = b.dataset.addRule;
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules = feed.rules || [];
@@ -616,6 +659,7 @@ function bindFeedEvents(rss) {
     renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-del-rule]").forEach(b => b.addEventListener("click", () => {
+    collectRSS(rss);
     const [fid, ri] = b.dataset.delRule.split("-");
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules.splice(parseInt(ri, 10), 1);
