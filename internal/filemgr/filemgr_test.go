@@ -55,18 +55,18 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 func TestManager_scan_OnlyProcessesPausedUP(t *testing.T) {
 	torrents := `[
 		{"hash":"h1","name":"in-progress","state":"downloading","progress":1.0,"save_path":"{SAVE}"},
-		{"hash":"h2","name":"already-processed","state":"pausedUP","progress":1.0,"save_path":"{SAVE}"},
-		{"hash":"h3","name":"not-done","state":"pausedUP","progress":0.5,"save_path":"{SAVE}"}
+		{"hash":"h2","name":"already-processed","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"},
+		{"hash":"h3","name":"not-done","state":"stoppedUP","progress":0.5,"save_path":"{SAVE}"}
 	]`
 	m, calls, srv, _ := setupFilemgr(t, torrents)
 	defer srv.Close()
 
 	// scan 里对 h2 的 handleCompleted 会检查文件系统——h2 目录不存在则直接 return（debug log）
-	// 所以我们只验证 pausedUP + progress==1 且 not-in-done 会被处理（哪怕目录不存在也是正常 return）
+	// 所以我们只验证 stoppedUP + progress==1 且 not-in-done 会被处理（哪怕目录不存在也是正常 return）
 	m.scan()
 
-	// h1 下载中 → 跳过（state != pausedUP）
-	// h2 pausedUP + 100% → 进 handleCompleted（目录不存在 → return）
+	// h1 下载中 → 跳过（state != stoppedUP）
+	// h2 stoppedUP + 100% → 进 handleCompleted（目录不存在 → return）
 	// h3 50% → 跳过
 	if !m.done["h2"] {
 		t.Error("h2 should be marked as done")
@@ -78,7 +78,7 @@ func TestManager_scan_OnlyProcessesPausedUP(t *testing.T) {
 }
 
 func TestManager_scan_SkipsAlreadyDone(t *testing.T) {
-	torrents := `[{"hash":"h1","name":"t1","state":"pausedUP","progress":1.0,"save_path":"{SAVE}"}]`
+	torrents := `[{"hash":"h1","name":"t1","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"}]`
 	m, _, srv, _ := setupFilemgr(t, torrents)
 	defer srv.Close()
 
@@ -95,7 +95,7 @@ func TestManager_scan_SkipsAlreadyDone(t *testing.T) {
 }
 
 func TestManager_Scan_ErrorIsNoOp(t *testing.T) {
-	torrents := `[{"hash":"h1","state":"pausedUP","progress":1.0}]`
+	torrents := `[{"hash":"h1","state":"stoppedUP","progress":1.0}]`
 	m, calls, srv, _ := setupFilemgr(t, torrents)
 	srv.Close()
 	// scan 不应 panic
@@ -104,14 +104,14 @@ func TestManager_Scan_ErrorIsNoOp(t *testing.T) {
 }
 
 func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
-	m, calls, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie.mkv","state":"pausedUP","progress":1.0,"save_path":"{SAVE}"}]`)
+	m, calls, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie.mkv","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"}]`)
 	defer srv.Close()
 
 	torrentDir := filepath.Join(saveDir, "Movie.mkv")
 	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
 
-	// 调 scan → 只 pausedUP + 100% 会进 handleCompleted
+	// 调 scan → 只 stoppedUP + 100% 会进 handleCompleted
 	m.scan()
 
 	// handleCompleted 应：pause → renameFile（video.mkv 扁平到 saveDir/video.mkv）→ resume

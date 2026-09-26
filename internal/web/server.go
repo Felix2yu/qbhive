@@ -60,16 +60,35 @@ const (
 	maxLimit        = 2000
 )
 
-// 预定义的窄 filter：把前端友好名转成 qBittorrent 原生 filter
-var narrowFilters = map[string]string{
+// qBittorrent v5.0+ 的 filter 参数值：
+// all, downloading, seeding, completed, stopped, active, inactive, running,
+// stalled, stalled_uploading, stalled_downloading, errored
+//
+// 前端用 torrent 的 state 值（如 stoppedUP、stoppedDL、stalledUP）作为 filter，
+// 这里把 state 值映射到 qB 的 filter 参数；拉回后再按 state 二次过滤，
+// 因为 stoppedUP / stoppedDL 共用 "stopped" filter，stalled 类同理。
+var stateToFilter = map[string]string{
 	"active":      "active",
 	"downloading": "downloading",
 	"seeding":     "seeding",
-	"pausedDL":    "pausedDL",
-	"pausedUP":    "pausedUP",
-	"stalledUP":   "stalledUP",
+	"stoppedUP":   "stopped",
+	"stoppedDL":   "stopped",
+	"stalledUP":   "stalled_uploading",
+	"stalledDL":   "stalled_downloading",
 	"completed":   "completed",
 	"all":         "all",
+}
+
+// 需要按 state 二次过滤的前端 filter（因为一个 filter 参数可能返回多个 state 值）
+var needsStateFilter = map[string]bool{
+	"stoppedUP": true,
+	"stoppedDL": true,
+}
+
+// stateFilterSets 定义每个前端 filter 对应的 state 集合
+var stateFilterSets = map[string]map[string]bool{
+	"stoppedUP": {"stoppedUP": true},
+	"stoppedDL": {"stoppedDL": true},
 }
 
 func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngine *rss.Engine, not *notifier.Notifier, sch *scheduler.Scheduler) *Server {
@@ -395,18 +414,15 @@ func (s *Server) listTorrents(c *gin.Context) {
 	if filter == "" {
 		filter = "active"
 	}
-	// 把前端友好的别名转成 qBittorrent 原生 filter
-	if raw, ok := narrowFilters[filter]; ok {
-		filter = raw
+	// 前端 filter 值（qBittorrent 5.0+ 的 torrent state 值）→ qB API filter 参数
+	qbFilter, _ := stateToFilter[filter]
+	if qbFilter == "" {
+		qbFilter = filter // 未知值原样透传，让 qB 自己决定
 	}
 
 	sortField := c.Query("sort")
 	if sortField == "" {
 		sortField = "added_on" // 默认按添加时间倒序，新任务排前
-	}
-	// 客户端（浏览器缓存旧 JS）可能还传 added_time；qB 5.3 只认 added_on
-	if sortField == "added_time" {
-		sortField = "added_on"
 	}
 	reverse := c.Query("reverse")
 	if reverse == "" {
@@ -431,7 +447,6 @@ func (s *Server) listTorrents(c *gin.Context) {
 	} else if n, e := strconv.Atoi(limitStr); e == nil {
 		switch {
 		case n == 0:
-			// 显式要全量
 			c.Header("X-Warning", "full list requested, may be slow with thousands of torrents")
 		case n > 0 && n <= maxLimit:
 			limit = n
@@ -445,7 +460,6 @@ func (s *Server) listTorrents(c *gin.Context) {
 		limit = defaultLimit
 	}
 
-	// 缓存 key（不含 limit：limit 只做上层截断，缓存存完整 filter 结果）
 	cacheKey := filter + "|" + sortField + "|" + reverse
 
 	// 查缓存
@@ -461,21 +475,32 @@ func (s *Server) listTorrents(c *gin.Context) {
 	}
 	s.tcacheMu.Unlock()
 
-	// 缓存 miss → 拉 qBittorrent
-	list, err := s.qbClient.GetTorrents(filter, sortField, reverse)
+	// 拉 qBittorrent（用映射后的 filter 参数）
+	list, err := s.qbClient.GetTorrents(qbFilter, sortField, reverse)
 	if err != nil {
 		c.JSON(502, models.APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 
-	// 写缓存（完整 filter 结果，不带 limit）
+	// stoppedUP / stoppedDL 共用 qB filter="stopped"，拉回后按 state 二次过滤
+	if needsStateFilter[filter] {
+		allowed := stateFilterSets[filter]
+		filtered := make([]models.QBTorrent, 0, len(list))
+		for _, t := range list {
+			if allowed[t.State] {
+				filtered = append(filtered, t)
+			}
+		}
+		list = filtered
+	}
+
+	// 写缓存
 	s.tcacheMu.Lock()
 	s.tcache[cacheKey] = &cacheEntry{
 		data:      list,
 		expiresAt: time.Now().Add(torrentCacheTTL),
 	}
 	s.tcacheMu.Unlock()
-
 
 	// limit 截断
 	if limit > 0 && limit < len(list) {
@@ -486,7 +511,7 @@ func (s *Server) listTorrents(c *gin.Context) {
 }
 
 // torrentsStats 是概览页用的轻量统计，不走 info 大接口。
-// 拉一次 transfer info（全局速度） + active/pausedUP 的数量，3 秒缓存。
+// 拉一次 transfer info（全局速度） + active/stoppedUP/stoppedDL 的数量，3 秒缓存。
 
 func (s *Server) torrentsStats(c *gin.Context) {
 	// 查缓存
@@ -506,17 +531,26 @@ func (s *Server) torrentsStats(c *gin.Context) {
 		return
 	}
 
-	// 拉三个窄 filter 的数量（用 listTorrents 内部的缓存逻辑，这里直接调 qb client）
 	activeList, _ := s.qbClient.GetTorrents("active", "", "")
-	pausedUpList, _ := s.qbClient.GetTorrents("pausedUP", "", "") // 最常看的历史
-	pausedDlList, _ := s.qbClient.GetTorrents("pausedDL", "", "")  // 暂停下载的未完成任务
+	// qBittorrent v5.0+ stopped filter 包含 stoppedUP + stoppedDL
+	stoppedList, _ := s.qbClient.GetTorrents("stopped", "", "")
+
+	stoppedUpCount, stoppedDlCount := 0, 0
+	for _, t := range stoppedList {
+		switch t.State {
+		case "stoppedUP":
+			stoppedUpCount++
+		case "stoppedDL":
+			stoppedDlCount++
+		}
+	}
 
 	out := map[string]interface{}{
 		"dlSpeed":     ti.DlSpeed,
 		"upSpeed":     ti.UpSpeed,
 		"activeCount": len(activeList),
-		"pausedUp":    len(pausedUpList),
-		"pausedDL":    len(pausedDlList),
+		"stoppedUP":   stoppedUpCount,
+		"stoppedDL":   stoppedDlCount,
 	}
 
 	// 写缓存

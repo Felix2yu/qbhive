@@ -197,7 +197,6 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) scanCompleted() {
 	cfg := s.cfg.Get()
-	// 扫 all（包括 pausedUP 历史 + uploading 刚完成 + stalledUP）
 	list, err := s.client.GetTorrents("all", "", "")
 	if err != nil {
 		logger.Warn.Printf("scheduler: scan all torrents failed: %v", err)
@@ -206,18 +205,28 @@ func (s *Scheduler) scanCompleted() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 诊断日志：这次扫到多少条、多少条进度>=0.98
 	var (
-		total       = len(list)
-		nearDone    int
-		newlyDone   []models.QBTorrent
+		total     = len(list)
+		nearDone  int
+		newlyDone []models.QBTorrent
+		// 诊断：nearDone 但没触发通知的原因统计
+		stateMismatch int // progress>=0.98 但 state 不是 done 状态
+		alreadyNotified int // 已经在 finished 里
+		noCompletedOn int // completed_on=0
 	)
 	for _, t := range list {
 		if t.Progress >= 0.98 {
 			nearDone++
+			// 诊断：记录 nearDone 但没被选中的原因
+			if !isDoneState(t.State) {
+				stateMismatch++
+			} else if s.finished[t.Hash] {
+				alreadyNotified++
+			} else if t.CompletedOn == 0 {
+				noCompletedOn++
+			}
 		}
 		if t.Progress >= 0.98 && isDoneState(t.State) && !s.finished[t.Hash] {
-			// completed_on 必须 > 0，qBittorrent 有少数 edge case 会 progress=1 但 completed_on=0
 			if t.CompletedOn > 0 {
 				s.finished[t.Hash] = true
 				newlyDone = append(newlyDone, t)
@@ -227,8 +236,23 @@ func (s *Scheduler) scanCompleted() {
 		}
 	}
 
+	// 每次扫描都输出诊断日志，方便排查
+	logger.Info.Printf("scheduler: scan done — total=%d nearDone(>=0.98)=%d newlyDone=%d | skipped reasons: stateMismatch=%d alreadyNotified=%d noCompletedOn=%d",
+		total, nearDone, len(newlyDone), stateMismatch, alreadyNotified, noCompletedOn)
+
+	// 如果 nearDone > 0 但 newlyDone == 0 且 stateMismatch > 0，打印 nearDone torrent 的 state
+	// 这是最常见的"静默失败"场景
+	if nearDone > 0 && len(newlyDone) == 0 && stateMismatch > 0 {
+		logger.Info.Printf("scheduler: found %d torrents with progress>=0.98 but non-done state — dumping details:", stateMismatch)
+		for _, t := range list {
+			if t.Progress >= 0.98 && !isDoneState(t.State) {
+				logger.Info.Printf("  → %s | progress=%.4f | state=%s | completed_on=%d | hash=%s",
+					t.Name, t.Progress, t.State, t.CompletedOn, t.Hash[:10])
+			}
+		}
+	}
+
 	if len(newlyDone) > 0 {
-		logger.Info.Printf("scheduler: total=%d nearDone(>=0.98)=%d newly done=%d", total, nearDone, len(newlyDone))
 		for _, t := range newlyDone {
 			logger.Info.Printf("completed: %s | size=%s | state=%s | category=%s",
 				t.Name, humanSize(t.Size), t.State, t.Category)
@@ -241,6 +265,8 @@ func (s *Scheduler) scanCompleted() {
 				} else {
 					logger.Info.Printf("scheduler: notification sent for %s", t.Name)
 				}
+			} else {
+				logger.Warn.Printf("scheduler: notifier disabled or no URLs — skipping notification for %s", t.Name)
 			}
 		}
 		s.saveFinished()
@@ -283,8 +309,10 @@ func buildCompletedBody(t models.QBTorrent) string {
 }
 
 func isDoneState(state string) bool {
+	// qBittorrent v5.0+ 状态：stoppedUP 是暂停且已完成，
+	// 其他都是做种相关状态
 	switch state {
-	case "pausedUP", "stalledUP", "uploading", "checkingUP", "queuedUP":
+	case "stoppedUP", "stalledUP", "uploading", "checkingUP", "queuedUP", "forcedUP":
 		return true
 	}
 	return false

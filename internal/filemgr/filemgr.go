@@ -100,7 +100,8 @@ func (m *Manager) scan() {
 	}
 	for _, t := range list {
 		// 只处理已暂停的已完成任务，避免破坏正在做种/下载的 torrent 数据库
-		if t.State != "pausedUP" {
+		// qBittorrent v5.0+ 状态：stoppedUP
+		if t.State != "stoppedUP" {
 			continue
 		}
 		if m.done[t.Hash] {

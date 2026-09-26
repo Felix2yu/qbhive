@@ -414,7 +414,7 @@ func TestTorrentsStats_HappyPath(t *testing.T) {
 		if r.URL.Path == "/api/v2/transfer/info" {
 			w.Write([]byte(`{"dl_info_speed":1024,"up_info_speed":2048}`))
 		} else {
-			w.Write([]byte(`[{"state":"active"},{"state":"active"},{"state":"pausedUP"}]`))
+			w.Write([]byte(`[{"state":"active"},{"state":"active"},{"state":"stoppedUP"}]`))
 		}
 	}))
 	defer mockQB.Close()

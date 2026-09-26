@@ -9,13 +9,22 @@ import (
 )
 
 func TestIsDoneState(t *testing.T) {
-	done := []string{"pausedUP", "stalledUP", "uploading", "checkingUP", "queuedUP"}
+	// qBittorrent v5.0+ 状态
+	done := []string{
+		"stoppedUP",
+		"stalledUP", "uploading", "checkingUP", "queuedUP", "forcedUP",
+	}
 	for _, s := range done {
 		if !isDoneState(s) {
 			t.Errorf("expected %q to be done", s)
 		}
 	}
-	notDone := []string{"downloading", "stalledDL", "metaDL", "checkingDL", "queuedDL", "forcedDL", "forcedUP", "missingFiles", "error", ""}
+	notDone := []string{
+		"downloading", "stalledDL", "metaDL", "forcedMetaDL",
+		"checkingDL", "queuedDL", "forcedDL",
+		"stoppedDL", "checkingResumeData",
+		"allocating", "missingFiles", "error", "",
+	}
 	for _, s := range notDone {
 		if isDoneState(s) {
 			t.Errorf("expected %q NOT to be done", s)

@@ -234,15 +234,15 @@ let _refreshRunning = false;
 async function renderDashboard(root) {
   const t = await api("GET", "/torrents/stats");
   const s = t.data || {};
-  const active  = s.activeCount || 0;
-  const paused  = s.pausedUp || 0;
-  const dlSpeed = s.dlSpeed || 0;
-  const upSpeed = s.upSpeed || 0;
+  const active    = s.activeCount || 0;
+  const stoppedUp = s.stoppedUP || 0;
+  const dlSpeed   = s.dlSpeed || 0;
+  const upSpeed   = s.upSpeed || 0;
 
   root.innerHTML = `
     <div class="grid grid-2">
       <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">活跃任务</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${paused}</div><div class="lbl">已完成历史</div></div></div>
+      <div class="card"><div class="stat"><div class="num">${stoppedUp}</div><div class="lbl">已完成历史</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(dlSpeed)}</div><div class="lbl">当前下载速度</div></div></div>
       <div class="card"><div class="stat"><div class="num">${humanSpeed(upSpeed)}</div><div class="lbl">当前上传速度</div></div></div>
     </div>
@@ -265,15 +265,24 @@ async function renderDashboard(root) {
 
 function stateTag(s) {
   const map = {
-    downloading: { t: "下载中", c: "var(--accent)" },
-    stalledDL:   { t: "下载停滞", c: "var(--warn)" },
-    pausedDL:    { t: "暂停下载", c: "var(--text-dim)" },
-    pausedUP:    { t: "已完成", c: "var(--success)" },
-    stalledUP:   { t: "做种停滞", c: "var(--warn)" },
-    uploading:   { t: "做种中", c: "var(--success)" },
-    metaDL:      { t: "元数据", c: "var(--accent-2)" },
-    checkingDL:  { t: "校验中", c: "var(--accent-2)" },
-    errored:     { t: "错误", c: "var(--danger)" },
+    downloading:   { t: "下载中", c: "var(--accent)" },
+    stalledDL:     { t: "下载停滞", c: "var(--warn)" },
+    stoppedDL:     { t: "暂停下载", c: "var(--text-dim)" },
+    stoppedUP:     { t: "已完成", c: "var(--success)" },
+    stalledUP:     { t: "做种停滞", c: "var(--warn)" },
+    uploading:     { t: "做种中", c: "var(--success)" },
+    forcedUP:      { t: "强制做种", c: "var(--success)" },
+    queuedUP:      { t: "排队做种", c: "var(--text-dim)" },
+    queuedDL:      { t: "排队下载", c: "var(--text-dim)" },
+    checkingUP:    { t: "校验中", c: "var(--accent-2)" },
+    metaDL:        { t: "元数据", c: "var(--accent-2)" },
+    checkingDL:    { t: "校验中", c: "var(--accent-2)" },
+    forcedDL:      { t: "强制下载", c: "var(--accent)" },
+    allocating:    { t: "分配中", c: "var(--accent-2)" },
+    checkingResumeData: { t: "恢复数据校验", c: "var(--accent-2)" },
+    missingFiles:  { t: "文件缺失", c: "var(--danger)" },
+    errored:       { t: "错误", c: "var(--danger)" },
+    error:         { t: "错误", c: "var(--danger)" },
   };
   const v = map[s] || { t: s, c: "var(--text-dim)" };
   return `<span style="color:${v.c}">● ${v.t}</span>`;
@@ -342,14 +351,15 @@ let _torrentsState = {
 };
 
 // 前端友好的窄 filter 选项（带中文标签）
+// 值为 qBittorrent v5.0+ 的 torrent state 值，后端会映射到对应的 qB API filter 参数
 const torrentFilterOptions = [
-  { value: "active",      label: "活跃（下载+做种）" },
-  { value: "downloading", label: "下载中" },
-  { value: "pausedDL",    label: "暂停下载（未完成）" },
-  { value: "pausedUP",    label: "已完成历史（暂停）" },
-  { value: "stalledUP",   label: "历史（做种停滞）" },
-  { value: "completed",   label: "所有已完成" },
-  { value: "all",         label: "全部（⚠️ 可能很慢）" },
+  { value: "active",       label: "活跃（下载+做种）" },
+  { value: "downloading",  label: "下载中" },
+  { value: "stoppedDL",    label: "暂停下载（未完成）" },
+  { value: "stoppedUP",    label: "已完成历史（暂停）" },
+  { value: "stalledUP",    label: "历史（做种停滞）" },
+  { value: "completed",    label: "所有已完成" },
+  { value: "all",          label: "全部（⚠️ 可能很慢）" },
 ];
 
 async function renderTorrents(root) {
@@ -935,7 +945,7 @@ async function updateStatus() {
     const el = $("#qb-status");
     if (r.success) {
       const s = r.data || {};
-      el.textContent = "qb 已连接 · 活跃 " + (s.activeCount || 0) + " · 历史 " + (s.pausedUp || 0);
+      el.textContent = "qb 已连接 · 活跃 " + (s.activeCount || 0) + " · 历史 " + (s.stoppedUP || 0);
       el.className = "status ok";
     } else {
       el.textContent = "qb 未连接"; el.className = "status bad";
