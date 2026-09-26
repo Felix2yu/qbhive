@@ -334,38 +334,51 @@ async function renderDashboard(root) {
 
 
 function stateTag(s) {
+  // 窄屏友好：短名 + emoji 配色
   const map = {
-    downloading:   { t: "下载中", c: "var(--accent)" },
-    stalledDL:     { t: "下载停滞", c: "var(--warn)" },
-    stoppedDL:     { t: "暂停下载", c: "var(--text-dim)" },
+    downloading:   { t: "下载", c: "var(--accent)" },
+    forcedDL:      { t: "下载", c: "var(--accent)" },
+    stalledDL:     { t: "停滞", c: "var(--warn)" },
+    stoppedDL:     { t: "暂停", c: "var(--text-dim)" },
     stoppedUP:     { t: "已完成", c: "var(--success)" },
-    stalledUP:     { t: "做种停滞", c: "var(--warn)" },
-    uploading:     { t: "做种中", c: "var(--success)" },
-    forcedUP:      { t: "强制做种", c: "var(--success)" },
-    queuedUP:      { t: "排队做种", c: "var(--text-dim)" },
-    queuedDL:      { t: "排队下载", c: "var(--text-dim)" },
-    checkingUP:    { t: "校验中", c: "var(--accent-2)" },
+    stalledUP:     { t: "做种", c: "var(--warn)" },
+    uploading:     { t: "做种", c: "var(--success)" },
+    forcedUP:      { t: "做种", c: "var(--success)" },
+    queuedUP:      { t: "排队", c: "var(--text-dim)" },
+    queuedDL:      { t: "排队", c: "var(--text-dim)" },
+    checkingUP:    { t: "校验", c: "var(--accent-2)" },
+    checkingDL:    { t: "校验", c: "var(--accent-2)" },
     metaDL:        { t: "元数据", c: "var(--accent-2)" },
-    checkingDL:    { t: "校验中", c: "var(--accent-2)" },
-    forcedDL:      { t: "强制下载", c: "var(--accent)" },
-    allocating:    { t: "分配中", c: "var(--accent-2)" },
-    checkingResumeData: { t: "恢复数据校验", c: "var(--accent-2)" },
-    missingFiles:  { t: "文件缺失", c: "var(--danger)" },
+    allocating:    { t: "分配", c: "var(--accent-2)" },
+    checkingResumeData: { t: "恢复", c: "var(--accent-2)" },
+    missingFiles:  { t: "缺文件", c: "var(--danger)" },
     errored:       { t: "错误", c: "var(--danger)" },
     error:         { t: "错误", c: "var(--danger)" },
   };
   const v = map[s] || { t: s, c: "var(--text-dim)" };
-  return `<span style="color:${v.c}">● ${v.t}</span>`;
+  return `<span class="state-tag" style="color:${v.c}">${v.t}</span>`;
 }
 
 function torrentTable(list, withActions) {
   if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
   const rows = list.map(t => torrentRow(t, withActions)).join("");
-  return `<table class="torrent-table"><thead><tr>
+  return `<table class="torrent-table">
+<colgroup>
+  <col style="width:auto;min-width:200px">
+  <col style="width:72px">
+  <col style="width:140px">
+  <col style="width:96px">
+  <col style="width:88px">
+  <col style="width:88px">
+  <col style="width:auto">
+  ${withActions ? '<col style="width:90px">' : ''}
+</colgroup>
+<thead><tr>
     <th>名称</th><th>状态</th><th>进度</th><th>大小</th>
     <th>下速</th><th>上速</th><th>分类</th>${withActions ? "<th>限速</th>" : ""}
-  </tr></thead><tbody>${rows}</tbody></table>`;
+</tr></thead><tbody>${rows}</tbody></table>`;
 }
+
 function torrentRow(t, withActions) {
   const pct = (t.progress * 100).toFixed(1);
   const safeName = escapeHTML(t.name);
@@ -373,18 +386,47 @@ function torrentRow(t, withActions) {
   const safeCat = escapeHTML(t.category || "-");
   const safeHash = escapeHTML(t.hash);
   return `<tr>
-    <td><div title="${safeName}">${shortName}</div>
-        <div style="color:var(--text-dim);font-size:11px">${humanSize(t.size)} · ${safeCat}</div></td>
-    <td>${stateTag(t.state)}</td>
-    <td><div class="progress-bar"><div style="width:${pct}%"></div></div>${pct}%</td>
-    <td>${humanSize(t.downloaded)}/${humanSize(t.size)}</td>
-    <td>${humanSpeed(t.dlspeed)}</td>
-    <td>${humanSpeed(t.upspeed)}</td>
-    <td>${safeCat}</td>
-    ${withActions ? `<td><input type="number" id="limit-${safeHash}" style="width:80px" placeholder="KB/s"/>
-        <button class="btn small" data-limit="${safeHash}">应用</button></td>` : ""}
+    <td class="col-name">
+      <div class="torr-name" title="${safeName}">${shortName}</div>
+      <div class="torr-sub">${humanSize(t.size)} · ${safeCat}</div>
+    </td>
+    <td class="col-state">${stateTag(t.state)}</td>
+    <td class="col-progress">
+      <div class="progress-bar"><div style="width:${pct}%"></div></div>
+      <span class="progress-text">${pct}%</span>
+    </td>
+    <td class="col-size">${humanSize(t.downloaded)}<span class="text-dim">/${humanSize(t.size)}</span></td>
+    <td class="col-speed dl">${humanSpeed(t.dlspeed)}</td>
+    <td class="col-speed up">${humanSpeed(t.upspeed)}</td>
+    <td class="col-cat">${safeCat}</td>
+    ${withActions ? `<td class="col-limit">
+        <button class="btn small" data-limit-btn="${safeHash}">限速</button></td>` : ""}
   </tr>`;
 }
+
+// 限速按钮弹框绑定
+function bindLimitButtons() {
+  $$("[data-limit-btn]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
+    btn.addEventListener("click", () => openLimitDialog(btn.dataset.limitBtn));
+  });
+}
+
+async function openLimitDialog(hash) {
+  let currentLimit = 0;
+  try {
+    const r = await api("GET", `/torrents/${hash}`);
+    if (r.success && r.data) currentLimit = r.data.uploadLimit || 0;
+  } catch {}
+
+  const val = prompt(`设置单任务上传限速（KB/s）\n当前：${currentLimit}  KB/s\n设为 0 = 不限速`, currentLimit);
+  if (val === null) return;
+  const v = parseInt(val, 10);
+  if (isNaN(v) || v < 0) { toast("请输入 ≥ 0 的数字", "err"); return; }
+  const res = await api("POST", `/torrents/${hash}/limit`, { uploadLimit: v });
+  toast(res.success ? "已应用限速" : (res.message || "失败"), res.success ? "ok" : "err");
+}
+
 function filterList(list, kw) {
   if (!kw) return list;
   return list.filter(t =>
@@ -393,19 +435,6 @@ function filterList(list, kw) {
     (t.tags || "").toLowerCase().includes(kw)
   );
 }
-function bindLimitButtons() {
-  $$("[data-limit]").forEach(btn => {
-    if (btn.__bound) return; btn.__bound = true;
-    btn.addEventListener("click", async () => {
-      const hash = btn.dataset.limit;
-      const input = document.getElementById("limit-" + hash);
-      const v = parseInt(input.value || "0", 10);
-      const r = await api("POST", `/torrents/${hash}/limit`, { uploadLimit: v });
-      toast(r.success ? "已应用限速" : (r.message || "失败"), r.success ? "ok" : "err");
-    });
-  });
-}
-
 
 // ---------- 任务 ----------
 // 任务列表状态（模块级，切 filter/limit 不丢）
