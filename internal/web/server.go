@@ -393,11 +393,32 @@ func (s *Server) listTorrents(c *gin.Context) {
 
 	sortField := c.Query("sort")
 	if sortField == "" {
-		sortField = "added_time" // 默认按添加时间倒序，新任务排前
+		sortField = "added_on" // 默认按添加时间倒序，新任务排前
+	}
+	// 旧版 sort 字段名兼容：added_time → added_on，其他旧名同理
+	sortAlias := map[string]string{
+		"added_time":   "added_on",
+		"leechs":       "num_leechs",
+		"seeds":        "num_seeds",
+		"size_proxy":   "size",
+	}
+	if newName, ok := sortAlias[sortField]; ok {
+		logger.Warn.Printf("listTorrents: mapped legacy sort %q → %q (client may be pre v4.4)", sortField, newName)
+		sortField = newName
 	}
 	reverse := c.Query("reverse")
 	if reverse == "" {
 		reverse = "true"
+	}
+	// qBittorrent 的 reverse 参数只接受 "true"/"false"
+	r := strings.ToLower(reverse)
+	switch r {
+	case "1", "yes", "on":
+		reverse = "true"
+	case "0", "no", "off":
+		reverse = "false"
+	default:
+		// 保持原值，让 qB 自己校验
 	}
 
 	// limit 处理：默认 500，最大 2000，0 表示全量（加 warning）

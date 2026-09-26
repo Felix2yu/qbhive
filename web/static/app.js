@@ -327,7 +327,7 @@ let _torrentsState = {
   page: 1,
   pageSize: 50,
   search: "",
-  sort: "added_time",
+  sort: "added_on",
   reverse: "true",
   rawList: [],    // 后端返回的原始列表（未过滤未分页）
 };
