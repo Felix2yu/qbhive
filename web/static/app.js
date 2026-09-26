@@ -272,18 +272,50 @@ let _refreshRunning = false;
 async function renderDashboard(root) {
   const t = await api("GET", "/torrents/stats");
   const s = t.data || {};
-  const active    = s.activeCount || 0;
-  const stoppedUp = s.stoppedUP || 0;
-  const dlSpeed   = s.dlSpeed || 0;
-  const upSpeed   = s.upSpeed || 0;
+
+  // —— 紧凑状态带（一行搞定）——
+  const dlSpeed    = s.dlSpeed    || 0;
+  const upSpeed    = s.upSpeed    || 0;
+  const dlLimit    = s.dlSpeedLimit || 0;
+  const upLimit    = s.upSpeedLimit || 0;
+  const downloading = s.downloadingCount || 0;
+  const seeding     = s.seedingCount     || 0;
+  const stalled     = s.stalledCount     || 0;
+  const errored     = s.erroredCount     || 0;
+  const stoppedDl   = s.stoppedDL        || 0;
+  const stoppedUp   = s.stoppedUP        || 0;
+
+  const speedBar = (cur, limit, kind) => {
+    if (cur === 0 && limit === 0) return "";
+    const pct = limit > 0 ? Math.min(100, Math.round(cur / limit * 100)) : 0;
+    const speedCls = kind === "dl" ? "var(--accent)" : "var(--success)";
+    const dirIcon  = kind === "dl" ? "▼" : "▲";
+    const limitStr = limit > 0 ? humanSpeed(limit) : "∞";
+    return `<div class="speed">
+      <div class="speed-label"><span style="color:${speedCls}">${dirIcon}</span>
+        <span>${humanSpeed(cur)}</span>
+        <span class="speed-limit">/ ${limitStr}</span>
+      </div>
+      <div class="progress-bar"><div style="width:${pct}%;background:${speedCls}"></div></div>
+    </div>`;
+  };
 
   root.innerHTML = `
-    <div class="grid grid-2">
-      <div class="card"><div class="stat"><div class="num">${active}</div><div class="lbl">活跃任务</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${stoppedUp}</div><div class="lbl">已完成历史</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${humanSpeed(dlSpeed)}</div><div class="lbl">当前下载速度</div></div></div>
-      <div class="card"><div class="stat"><div class="num">${humanSpeed(upSpeed)}</div><div class="lbl">当前上传速度</div></div></div>
+    <div class="status-bar">
+      <div class="status-group">
+        <span class="status-chip dl">下载中 ${downloading}</span>
+        <span class="status-chip up">做种中 ${seeding}</span>
+        ${stalled > 0 ? `<span class="status-chip warn">停滞 ${stalled}</span>` : ""}
+        ${stoppedDl > 0 ? `<span class="status-chip dim">暂停未完成 ${stoppedDl}</span>` : ""}
+        ${stoppedUp > 0 ? `<span class="status-chip ok">已完成 ${stoppedUp}</span>` : ""}
+        ${errored > 0 ? `<span class="status-chip danger">⚠ 异常 ${errored}</span>` : ""}
+      </div>
+      <div class="speed-group">
+        ${speedBar(dlSpeed, dlLimit, "dl")}
+        ${speedBar(upSpeed, upLimit, "up")}
+      </div>
     </div>
+
     <div class="card">
       <h2>最近活跃任务</h2>
       <div id="dash-latest"><div style="color:var(--text-dim)">加载中…</div></div>

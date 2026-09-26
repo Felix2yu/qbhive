@@ -594,7 +594,14 @@ func (s *Server) torrentsStats(c *gin.Context) {
 	// qBittorrent v5.0+ stopped filter 包含 stoppedUP + stoppedDL
 	stoppedList, _ := s.qbClient.GetTorrents("stopped", "", "")
 
-	stoppedUpCount, stoppedDlCount := 0, 0
+	var (
+		stoppedUpCount int
+		stoppedDlCount int
+		downloadingCount int
+		seedingCount  int
+		stalledCount  int
+		erroredCount  int
+	)
 	for _, t := range stoppedList {
 		switch t.State {
 		case "stoppedUP":
@@ -603,13 +610,31 @@ func (s *Server) torrentsStats(c *gin.Context) {
 			stoppedDlCount++
 		}
 	}
+	for _, t := range activeList {
+		switch t.State {
+		case "downloading", "forcedDL":
+			downloadingCount++
+		case "uploading", "forcedUP", "checkingUP", "queuedUP":
+			seedingCount++
+		case "stalledDL", "stalledUP", "metaDL", "checkingDL", "queuedDL":
+			stalledCount++
+		case "errored", "error", "missingFiles":
+			erroredCount++
+		}
+	}
 
 	out := map[string]interface{}{
-		"dlSpeed":     ti.DlSpeed,
-		"upSpeed":     ti.UpSpeed,
-		"activeCount": len(activeList),
-		"stoppedUP":   stoppedUpCount,
-		"stoppedDL":   stoppedDlCount,
+		"dlSpeed":         ti.DlSpeed,
+		"upSpeed":         ti.UpSpeed,
+		"dlSpeedLimit":    ti.DlSpeedLimit,
+		"upSpeedLimit":    ti.UpSpeedLimit,
+		"activeCount":     len(activeList),
+		"stoppedUP":       stoppedUpCount,
+		"stoppedDL":       stoppedDlCount,
+		"downloadingCount": downloadingCount,
+		"seedingCount":    seedingCount,
+		"stalledCount":    stalledCount,
+		"erroredCount":    erroredCount,
 	}
 
 	// 写缓存
