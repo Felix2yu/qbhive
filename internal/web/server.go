@@ -395,17 +395,6 @@ func (s *Server) listTorrents(c *gin.Context) {
 	if sortField == "" {
 		sortField = "added_on" // 默认按添加时间倒序，新任务排前
 	}
-	// 旧版 sort 字段名兼容：added_time → added_on，其他旧名同理
-	sortAlias := map[string]string{
-		"added_time":   "added_on",
-		"leechs":       "num_leechs",
-		"seeds":        "num_seeds",
-		"size_proxy":   "size",
-	}
-	if newName, ok := sortAlias[sortField]; ok {
-		logger.Warn.Printf("listTorrents: mapped legacy sort %q → %q (client may be pre v4.4)", sortField, newName)
-		sortField = newName
-	}
 	reverse := c.Query("reverse")
 	if reverse == "" {
 		reverse = "true"

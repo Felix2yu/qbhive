@@ -236,31 +236,11 @@ func isQBErrorString(data []byte) bool {
 	return false
 }
 
-// sortAliases 旧版 qBittorrent sort 字段名 → 新版（v4.4+）
-var sortAliases = map[string]string{
-	"added_time": "added_on",
-	"leechs":     "num_leechs",
-	"seeds":      "num_seeds",
-}
-
 func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 	var filter, sort, reverse string
 	if len(params) > 0 { filter = params[0] }
 	if len(params) > 1 { sort = params[1] }
 	if len(params) > 2 { reverse = params[2] }
-
-	// 旧版 sort 字段名 → 新版
-	if newName, ok := sortAliases[strings.TrimSpace(sort)]; ok {
-		sort = newName
-	}
-	// reverse 规范化：qB 只认 "true"/"false"
-	switch strings.ToLower(strings.TrimSpace(reverse)) {
-	case "1", "yes", "on":
-		reverse = "true"
-	case "0", "no", "off":
-		reverse = "false"
-	}
-
 	v := url.Values{}
 	if f := strings.TrimSpace(filter); f != "" && f != "all" { v.Set("filter", f) }
 	if s := strings.TrimSpace(sort); s != "" { v.Set("sort", s) }
