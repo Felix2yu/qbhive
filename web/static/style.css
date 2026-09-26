@@ -39,7 +39,15 @@ body { display: flex; flex-direction: column; }
 .status.ok { color: var(--success); }
 .status.bad { color: var(--danger); }
 
-main { flex: 1; padding: 24px; overflow: auto; }
+main {
+  flex: 1; padding: 24px; overflow: auto;
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+}
+main > * { width: 100%; max-width: 1100px; }
+/* 卡片本来就有 margin-bottom，flex gap 会叠加 → 清掉 card 的 margin-bottom */
+main > .card { margin-bottom: 0; }
+
+/* 设置页（短表单）单独收紧 */
 
 .card {
   background: var(--panel); border: 1px solid var(--border);

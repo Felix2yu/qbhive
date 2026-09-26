@@ -216,6 +216,7 @@ async function switchView(name) {
   currentView = name;
   $$(".tab").forEach(b => b.classList.toggle("active", b.dataset.view === name));
   const root = $("#content");
+  root.dataset.view = name;
   root.innerHTML = '<div class="empty">加载中…</div>';
   try {
     await views[name](root);
