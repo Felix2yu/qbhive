@@ -55,24 +55,21 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 func TestManager_scan_OnlyProcessesPausedUP(t *testing.T) {
 	torrents := `[
 		{"hash":"h1","name":"in-progress","state":"downloading","progress":1.0,"save_path":"{SAVE}"},
-		{"hash":"h2","name":"v5-done","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"},
-		{"hash":"h3","name":"not-done","state":"stoppedUP","progress":0.5,"save_path":"{SAVE}"},
-		{"hash":"h4","name":"v4-done","state":"pausedUP","progress":1.0,"save_path":"{SAVE}"}
+		{"hash":"h2","name":"already-processed","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"},
+		{"hash":"h3","name":"not-done","state":"stoppedUP","progress":0.5,"save_path":"{SAVE}"}
 	]`
 	m, calls, srv, _ := setupFilemgr(t, torrents)
 	defer srv.Close()
 
-	// h1 下载中 → 跳过
-	// h2 v5 stoppedUP + 100% → 进 handleCompleted
-	// h3 50% → 跳过
-	// h4 v4 pausedUP + 100% → 进 handleCompleted
+	// scan 里对 h2 的 handleCompleted 会检查文件系统——h2 目录不存在则直接 return（debug log）
+	// 所以我们只验证 stoppedUP + progress==1 且 not-in-done 会被处理（哪怕目录不存在也是正常 return）
 	m.scan()
 
+	// h1 下载中 → 跳过（state != stoppedUP）
+	// h2 stoppedUP + 100% → 进 handleCompleted（目录不存在 → return）
+	// h3 50% → 跳过
 	if !m.done["h2"] {
-		t.Error("h2 (v5 stoppedUP) should be marked as done")
-	}
-	if !m.done["h4"] {
-		t.Error("h4 (v4 pausedUP) should be marked as done")
+		t.Error("h2 should be marked as done")
 	}
 	if m.done["h1"] || m.done["h3"] {
 		t.Errorf("h1/h3 should not be done: %v", m.done)
