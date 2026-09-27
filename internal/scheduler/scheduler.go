@@ -227,12 +227,12 @@ func (s *Scheduler) scanCompleted() {
 			}
 		}
 		if t.Progress >= 0.98 && isDoneState(t.State) && !s.finished[t.Hash] {
-			if t.CompletedOn > 0 {
-				s.finished[t.Hash] = true
-				newlyDone = append(newlyDone, t)
-			}
-			// completed_on==0 的 nearDone 老任务不打印逐条日志，
-			// 汇总统计里已有 noCompletedOn 字段，需要排查时看那个数字就够了
+			// 注意：不要求 CompletedOn > 0。qBittorrent 在某些场景
+			// （比如 pausedUP 启动后下完、部分版本、迁移 resume 场景）
+			// completed_on 不会立刻填上甚至保持 0。但 Progress + State
+			// 本身就足够判定"已完成"了。finished map 保证了不会重复通知。
+			s.finished[t.Hash] = true
+			newlyDone = append(newlyDone, t)
 		}
 	}
 
