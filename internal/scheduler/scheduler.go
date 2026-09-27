@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -274,7 +275,7 @@ func (s *Scheduler) scanCompleted() {
 
 			if cfg.Notifier.Enabled && len(cfg.Notifier.AppriseURLs) > 0 {
 				title := fmt.Sprintf("✅ 下载完成 · %s", t.Name)
-				body := buildCompletedBody(t)
+				body := buildCompletedBody(t, cfg.Notifier.Fields)
 				if err := s.notifier.Notify(title, body); err != nil {
 					logger.Warn.Printf("调度器：通知发送失败 %s：%v", t.Name, err)
 				} else {
@@ -288,39 +289,43 @@ func (s *Scheduler) scanCompleted() {
 	}
 }
 
-// buildCompletedBody 构造通知正文，包含用户期望的所有字段：
-// 任务名、大小、开始时间、完成时间、分类
-func buildCompletedBody(t models.QBTorrent) string {
-	var startedAt, finishedAt string
+// buildCompletedBody 构造通知正文，只包含 fields 勾选的字段（key 见
+// models.NotifyFields），行顺序与该清单一致；fields 为空表示全部发送。
+func buildCompletedBody(t models.QBTorrent, fields []string) string {
+	selected := make(map[string]bool, len(models.NotifyFields))
+	if len(fields) == 0 {
+		for _, f := range models.NotifyFields {
+			selected[f.Key] = true
+		}
+	} else {
+		for _, k := range fields {
+			selected[k] = true
+		}
+	}
+
+	startedAt, finishedAt := "-", "-"
 	if t.AddedOn > 0 {
 		startedAt = time.Unix(t.AddedOn, 0).Format("2006-01-02 15:04:05")
-	} else {
-		startedAt = "-"
 	}
 	if t.CompletedOn > 0 {
 		finishedAt = time.Unix(t.CompletedOn, 0).Format("2006-01-02 15:04:05")
-	} else {
-		finishedAt = "-"
 	}
 
-	return fmt.Sprintf(
-		"📦 任务名: %s\n"+
-			"💾 文件大小: %s\n"+
-			"🗂️ 分类: %s\n"+
-			"🕐 添加时间: %s\n"+
-			"✅ 完成时间: %s\n"+
-			"📁 保存路径: %s\n"+
-			"🏷️ 标签: %s\n"+
-			"🔗 Hash: %s",
-		t.Name,
-		humanSize(t.Size),
-		t.Category,
-		startedAt,
-		finishedAt,
-		t.SavePath,
-		t.Tags,
-		t.Hash,
-	)
+	var lines []string
+	add := func(key, line string) {
+		if selected[key] {
+			lines = append(lines, line)
+		}
+	}
+	add("name", fmt.Sprintf("📦 任务名: %s", t.Name))
+	add("size", fmt.Sprintf("💾 文件大小: %s", humanSize(t.Size)))
+	add("category", fmt.Sprintf("🗂️ 分类: %s", t.Category))
+	add("addedOn", fmt.Sprintf("🕐 添加时间: %s", startedAt))
+	add("completedOn", fmt.Sprintf("✅ 完成时间: %s", finishedAt))
+	add("savePath", fmt.Sprintf("📁 保存路径: %s", t.SavePath))
+	add("tags", fmt.Sprintf("🏷️ 标签: %s", t.Tags))
+	add("hash", fmt.Sprintf("🔗 Hash: %s", t.Hash))
+	return strings.Join(lines, "\n")
 }
 
 func isDoneState(state string) bool {

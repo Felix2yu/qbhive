@@ -25,6 +25,25 @@ type NotifierConfig struct {
 	Enabled     bool     `json:"enabled"`
 	AppriseURLs []string `json:"appriseUrls"`
 	FilterTitle string   `json:"filterTitle"`
+	// Fields 完成通知正文包含的字段 key（取值见 NotifyFields）；
+	// 空表示全部发送（兼容未配置该选项的旧 config.json）
+	Fields []string `json:"fields"`
+}
+
+// NotifyFields 完成通知的可选字段清单：
+// Key 用于配置持久化，Label 用于 UI 展示；切片顺序即通知正文中的行顺序。
+var NotifyFields = []struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}{
+	{"name", "任务名"},
+	{"size", "文件大小"},
+	{"category", "分类"},
+	{"addedOn", "添加时间"},
+	{"completedOn", "完成时间"},
+	{"savePath", "保存路径"},
+	{"tags", "标签"},
+	{"hash", "Hash"},
 }
 
 type RSSConfig struct {

@@ -138,21 +138,39 @@ func TestSaveFinished_CreatesParentDir(t *testing.T) {
 }
 
 func TestBuildCompletedBody_IncludesAllFields(t *testing.T) {
-	body := buildCompletedBody(models.QBTorrent{
+	torrent := models.QBTorrent{
 		Name: "My.Movie.4K.mkv", Size: 1024 * 1024 * 1024,
 		Category: "Movies", Tags: "4k,hdr",
 		Hash: "abc123", SavePath: "/downloads/",
 		AddedOn: 1700000000, CompletedOn: 1700086400,
-	})
+	}
+	// fields 为空 → 全部字段
+	body := buildCompletedBody(torrent, nil)
 	for _, want := range []string{"📦", "My.Movie.4K.mkv", "Movies", "abc123", "Movies", "1.00 GB"} {
 		if !contains(body, want) {
 			t.Errorf("body missing %q:\n%s", want, body)
 		}
 	}
 	// 零值时间应渲染为 "-"
-	zeroBody := buildCompletedBody(models.QBTorrent{Name: "x", Size: 0})
+	zeroBody := buildCompletedBody(models.QBTorrent{Name: "x", Size: 0}, nil)
 	if !contains(zeroBody, "-") {
 		t.Errorf("zero time should render '-': %s", zeroBody)
+	}
+}
+
+func TestBuildCompletedBody_FiltersFields(t *testing.T) {
+	torrent := models.QBTorrent{
+		Name: "Sel", Size: 42, Category: "C", Tags: "t",
+		Hash: "h1", SavePath: "/p", AddedOn: 1, CompletedOn: 2,
+	}
+	body := buildCompletedBody(torrent, []string{"name", "size"})
+	if !contains(body, "📦 任务名: Sel") || !contains(body, "💾 文件大小") {
+		t.Errorf("selected fields missing:\n%s", body)
+	}
+	for _, unwanted := range []string{"分类", "保存路径", "Hash", "完成时间"} {
+		if contains(body, unwanted) {
+			t.Errorf("unselected field %q should be excluded:\n%s", unwanted, body)
+		}
 	}
 }
 

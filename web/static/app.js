@@ -5,6 +5,21 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const API = window.location.origin + "/api";
 const genID = () => Math.random().toString(36).slice(2, 10);
 
+// 完成通知可选字段（与后端 models.NotifyFields 保持一致，顺序即通知正文顺序）
+const NOTIFY_FIELDS = [
+  ["name", "任务名"], ["size", "文件大小"], ["category", "分类"],
+  ["addedOn", "添加时间"], ["completedOn", "完成时间"],
+  ["savePath", "保存路径"], ["tags", "标签"], ["hash", "Hash"],
+];
+
+// 渲染通知字段复选框组；未配置（空）时默认全选
+function renderNotifyFieldChecks(sel) {
+  const chosen = new Set(sel && sel.length ? sel : NOTIFY_FIELDS.map(f => f[0]));
+  return NOTIFY_FIELDS.map(([k, label]) =>
+    `<label class="inline-check"><input type="checkbox" data-nt-field="${k}"${chosen.has(k) ? " checked" : ""}> ${label}</label>`
+  ).join("");
+}
+
 // escapeHTML 防 XSS：把外部可控文本安全地嵌入 innerHTML / 属性
 function escapeHTML(s) {
   if (s == null) return "";
@@ -168,6 +183,9 @@ function validateConfigJS(cfg) {
     const urls = (c.notifier.appriseUrls || []).map(s => (s || "").trim()).filter(Boolean);
     for (const u of urls) {
       if (!u.includes("://")) return `通知 URL 缺少协议前缀: ${u.slice(0, 60)}`;
+    }
+    if (c.notifier.enabled && (c.notifier.fields || []).length === 0) {
+      return "请至少勾选一个通知字段";
     }
   }
   // RSS feeds
@@ -886,6 +904,7 @@ function syncFormToCfg() {
   // 掩码项原样传回去让后端按 index 保留真实值，非掩码值作为新值替换对应位置，
   // 空字符串表示用户删除该行。后端 saveConfig 会统一处理这三种情况。
   c.notifier.appriseUrls = $("#nt-urls").value.split("\n").map(s => s.trim());
+  c.notifier.fields = $$("[data-nt-field]").filter(n => n.checked).map(n => n.dataset.ntField);
   c.fileManager.enabled = $("#fm-enabled").checked;
   c.fileManager.scanInterval = parseInt($("#fm-interval").value || "15", 10);
 }
@@ -991,6 +1010,12 @@ async function renderSettings(root) {
           <div class="hint">使用 <a href="https://github.com/unraid/apprise-go" target="_blank">Apprise-Go</a>，原生支持上百种渠道（Telegram / Discord / Slack / 企业微信 / 邮件 / Gotify / Bark ...）。每行填一个 URL，格式参见 <a href="https://github.com/caronc/apprise/wiki" target="_blank">Apprise Wiki</a>。</div>
         </div>
       </div>
+      <div class="form-row"><label>通知字段</label>
+        <div style="flex:1;display:flex;flex-wrap:wrap;gap:6px 16px">
+          ${renderNotifyFieldChecks(cfg.notifier.fields)}
+        </div>
+      </div>
+      <div class="hint" style="margin-left:160px">勾选完成通知正文要包含的字段，至少一项（标题始终包含任务名）。</div>
     </div>
 
     <!-- 文件管理 -->

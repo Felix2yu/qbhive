@@ -32,6 +32,7 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 - 基于 [Apprise-Go](https://github.com/unraid/apprise-go)，一行一个 URL 即可接入上百种渠道
   （Telegram / Discord / Slack / 企业微信 / 邮件 / Gotify / Bark ...）
 - 每 10 秒扫描完成事件，已通知哈希持久化到 `data/finished.json`，重启不重发
+- 可在设置页勾选通知正文包含的字段（任务名 / 大小 / 分类 / 时间 / 路径 / 标签 / Hash）
 - 支持一键发送测试通知
 
 ### 限速规则
@@ -111,7 +112,8 @@ go build -o qbhive ./cmd/server
   "notifier": {
     "enabled": false,
     "appriseUrls": ["telegram://BOT_TOKEN/CHAT_ID"],
-    "filterTitle": ""
+    "filterTitle": "",
+    "fields": ["name", "size", "category", "addedOn", "completedOn", "savePath", "tags", "hash"]
   },
   "rss": {
     "enabled": true,
@@ -160,6 +162,7 @@ go build -o qbhive ./cmd/server
 | `qbittorrent.apiKey` | qBittorrent v5.2.0+ 的 API Key，**填写后优先使用并跳过 Cookie 登录** |
 | `server.listen` | Web 监听地址，默认 `:8088` |
 | `notifier.appriseUrls` | 每行/每项一个 Apprise URL |
+| `notifier.fields` | 完成通知正文包含的字段 key 列表，缺省/空 = 全部发送 |
 | `rss.interval` | RSS 拉取间隔（分钟） |
 | `rss.proxies` | 可选代理列表 |
 | `rss.feeds[].rules[].mode` | `keyword` 或 `regex` |

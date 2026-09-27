@@ -264,6 +264,18 @@ func validateConfig(in *models.AppConfig) string {
 			return fmt.Sprintf("Apprise URL 缺少协议前缀: %s", u)
 		}
 	}
+	// 通知字段：key 必须来自 models.NotifyFields；空列表合法（= 全部发送）
+	if len(in.Notifier.Fields) > 0 {
+		allowed := make(map[string]bool, len(models.NotifyFields))
+		for _, f := range models.NotifyFields {
+			allowed[f.Key] = true
+		}
+		for _, k := range in.Notifier.Fields {
+			if !allowed[k] {
+				return fmt.Sprintf("未知的通知字段: %s", k)
+			}
+		}
+	}
 	// RSS 规则正则编译（仅 regex 模式校验）
 	for _, feed := range in.RSS.Feeds {
 		if strings.TrimSpace(feed.URL) != "" && !strings.HasPrefix(feed.URL, "http") {
