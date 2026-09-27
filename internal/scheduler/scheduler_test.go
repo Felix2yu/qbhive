@@ -20,10 +20,12 @@ func TestIsDoneState(t *testing.T) {
 		}
 	}
 	notDone := []string{
+		// 5.x 其余全部状态：未完成 / 校验 / 元数据 / 停止未完成 / 异常 /
+		// 移动中 / 未知（5.x 已无 4.x 的 allocating 状态）
 		"downloading", "stalledDL", "metaDL", "forcedMetaDL",
 		"checkingDL", "queuedDL", "forcedDL",
 		"stoppedDL", "checkingResumeData",
-		"allocating", "missingFiles", "error", "",
+		"moving", "missingFiles", "error", "unknown", "",
 	}
 	for _, s := range notDone {
 		if isDoneState(s) {

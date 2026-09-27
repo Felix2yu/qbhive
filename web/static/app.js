@@ -372,7 +372,6 @@ function stateTag(s) {
     metaDL:        { t: "元数据", c: "var(--accent-2)" },
     forcedMetaDL:  { t: "元数据", c: "var(--accent-2)" },
     moving:        { t: "移动", c: "var(--accent-2)" },
-    allocating:    { t: "分配", c: "var(--accent-2)" },
     checkingResumeData: { t: "恢复", c: "var(--accent-2)" },
     missingFiles:  { t: "缺文件", c: "var(--danger)" },
     error:         { t: "错误", c: "var(--danger)" },

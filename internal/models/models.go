@@ -117,12 +117,13 @@ type QBTorrent struct {
 	Peers         int     `json:"num_leechs"`
 }
 
-// torrent 文件列表项
+// torrent 文件列表项（来自 /api/v2/torrents/files）
+// 5.x 返回字段：index / name / size / progress / priority / availability /
+// piece_range；4.x 独有的 downloaded 字段已移除
 type QBFile struct {
-	Name       string  `json:"name"`
-	Size       int64   `json:"size"`
-	Progress   float64 `json:"progress"`
-	Downloaded int64   `json:"downloaded"`
+	Name     string  `json:"name"`
+	Size     int64   `json:"size"`
+	Progress float64 `json:"progress"`
 }
 
 // API 通用响应

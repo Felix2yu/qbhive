@@ -60,9 +60,10 @@ const (
 	maxLimit        = 2000
 )
 
-// qBittorrent v5.0+ 的 filter 参数值：
-// all, downloading, seeding, completed, stopped, active, inactive, running,
-// stalled, stalled_uploading, stalled_downloading, errored
+// qBittorrent 5.x 的 filter 参数值（torrentscontroller.cpp parseTorrentStatus）：
+// all, downloading, seeding, completed, stopped, running, active, inactive,
+// stalled, stalled_uploading, stalled_downloading, checking, moving, errored
+// （4.x 的 paused 在 5.x 已移除，传入会被静默忽略并返回全部）
 //
 // 前端用 torrent 的 state 值（如 stoppedUP、stoppedDL、stalledUP）作为 filter，
 // 这里把 state 值映射到 qB 的 filter 参数；拉回后再按 state 二次过滤，
