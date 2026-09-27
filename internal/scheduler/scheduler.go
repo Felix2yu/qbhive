@@ -163,7 +163,9 @@ func (s *Scheduler) Start() {
 }
 
 func (s *Scheduler) prefillFinished() {
-	list, err := s.client.GetTorrents("completed", "", "")
+	// 拉 "all" 而不是 "completed"：某些 qB 版本的 "completed" 过滤器
+	// 只按 CompletedOn > 0 过滤，会漏掉 Progress=1.0 但 CompletedOn=0 的任务。
+	list, err := s.client.GetTorrents("all", "", "")
 	if err != nil {
 		logger.Warn.Printf("调度器预填充获取已完成任务失败：%v", err)
 		return
@@ -171,9 +173,10 @@ func (s *Scheduler) prefillFinished() {
 	s.mu.Lock()
 	n := 0
 	for _, t := range list {
-		// 只把 completed_on > 0 的（即真正完成过的）预填充进去，
-		// uploading 状态还在做种但可能刚完成，不要预填充
-		if t.CompletedOn > 0 {
+		// 和 scanCompleted 用完全相同的判断：Progress + State，不依赖 CompletedOn。
+		// 这样无论 qB 有没有填 completed_on，真正完成过的任务都能被预填充进去，
+		// 避免启动后第一次 scanCompleted 把老任务误判为"新完成"而错发通知。
+		if t.Progress >= 0.98 && isDoneState(t.State) {
 			if !s.finished[t.Hash] {
 				s.finished[t.Hash] = true
 				n++
