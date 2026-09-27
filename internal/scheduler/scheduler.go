@@ -174,7 +174,7 @@ func (s *Scheduler) prefillFinished() {
 	n := 0
 	for _, t := range list {
 		// 和 scanCompleted 用完全相同的判断：Progress + State，不依赖 CompletedOn。
-		// 这样无论 qB 有没有填 completed_on，真正完成过的任务都能被预填充进去，
+		// 这样无论 qB 有没有填 completion_on，真正完成过的任务都能被预填充进去，
 		// 避免启动后第一次 scanCompleted 把老任务误判为"新完成"而错发通知。
 		if t.Progress >= 0.98 && isDoneState(t.State) {
 			if !s.finished[t.Hash] {
@@ -215,7 +215,7 @@ func (s *Scheduler) scanCompleted() {
 		// 诊断：nearDone 但没触发通知的原因统计
 		stateMismatch   int // progress>=0.98 但 state 不是 done 状态
 		alreadyNotified int // 已经在 finished 里
-		noCompletedOn   int // completed_on=0（老任务或 qB 迁移后丢了时间戳）
+		noCompletedOn   int // completion_on=0（添加时即完成等场景 qB 不填时间戳）
 	)
 	for _, t := range list {
 		if t.Progress >= 0.98 {
@@ -230,17 +230,17 @@ func (s *Scheduler) scanCompleted() {
 			}
 		}
 		if t.Progress >= 0.98 && isDoneState(t.State) && !s.finished[t.Hash] {
-			// 注意：不要求 CompletedOn > 0。qBittorrent 在某些场景
-			// （比如 stoppedUP 启动后下完、部分版本、迁移场景）
-			// completed_on 不会立刻填上甚至保持 0。但 Progress + State
-			// 本身就足够判定"已完成"了。finished map 保证了不会重复通知。
+			// 注意：不要求 CompletedOn > 0。qBittorrent 在"添加时数据已完整、
+			// 跳过校验直接完成"等场景 completion_on 不会填上（保持 0）。
+			// 但 Progress + State 本身就足够判定"已完成"了。
+			// finished map 保证了不会重复通知。
 			s.finished[t.Hash] = true
 			newlyDone = append(newlyDone, t)
 		}
 	}
 
 	// 每次扫描输出汇总日志（一行搞定，6000 条任务也只打一行）
-	logger.Info.Printf("调度器：扫描完成 — 总数=%d 接近完成(>=0.98)=%d 新完成=%d | 跳过原因：状态不匹配=%d 已通知=%d completed_on=0=%d",
+	logger.Info.Printf("调度器：扫描完成 — 总数=%d 接近完成(>=0.98)=%d 新完成=%d | 跳过原因：状态不匹配=%d 已通知=%d completion_on=0=%d",
 		total, nearDone, len(newlyDone), stateMismatch, alreadyNotified, noCompletedOn)
 
 	// 诊断 dump（默认不输出，只有 DEBUG 级别或状态异常时才输出，且有数量上限）
@@ -264,6 +264,13 @@ func (s *Scheduler) scanCompleted() {
 		for _, t := range newlyDone {
 			logger.Info.Printf("下载完成：名称=%s 大小=%s 状态=%s 分类=%s",
 				t.Name, humanSize(t.Size), t.State, t.Category)
+
+			// 兜底：qBittorrent 在"添加时数据已完整、跳过校验直接完成"等场景
+			// 不填 completion_on，此时用检测到完成的时刻近似（扫描间隔 10 秒，
+			// 误差可忽略），避免通知里完成时间显示 "-"
+			if t.CompletedOn == 0 {
+				t.CompletedOn = time.Now().Unix()
+			}
 
 			if cfg.Notifier.Enabled && len(cfg.Notifier.AppriseURLs) > 0 {
 				title := fmt.Sprintf("✅ 下载完成 · %s", t.Name)

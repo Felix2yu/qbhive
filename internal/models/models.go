@@ -90,8 +90,8 @@ type QBTorrent struct {
 	Category      string  `json:"category"`
 	Tags          string  `json:"tags"`
 	SavePath      string  `json:"save_path"`
-	AddedOn       int64   `json:"added_on"`     // Unix 秒，任务被添加到 qBittorrent 的时间（可视为开始时间）
-	CompletedOn   int64   `json:"completed_on"` // Unix 秒，完成时间；未完成时为 0
+	AddedOn       int64   `json:"added_on"`       // Unix 秒，任务被添加到 qBittorrent 的时间（可视为开始时间）
+	CompletedOn   int64   `json:"completion_on"`  // Unix 秒，完成时间；未完成时为 0（5.x 字段名，4.x 为 completed_on）
 	LastActivity  int64   `json:"last_activity"`
 	Ratio         float64 `json:"ratio"`
 	Seeds         int     `json:"num_seeds"`

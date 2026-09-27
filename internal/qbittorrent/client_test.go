@@ -135,7 +135,9 @@ func TestClient_GetTorrents_AndParse(t *testing.T) {
 	srv, cli := newMockQB(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v2/torrents/info" {
 			w.Header().Set("Content-Type", "application/x-bittorrent")
-			w.Write([]byte(`[{"hash":"aaa","name":"Movie.mkv","state":"downloading","progress":0.25,"size":1073741824,"num_leechs":1,"num_seeds":5}]`))
+			// completion_on 是 qBittorrent 5.x 的字段名（serialize_torrent.cpp：
+			// KEY_TORRENT_COMPLETION_ON = "completion_on"），4.x 才叫 completed_on
+			w.Write([]byte(`[{"hash":"aaa","name":"Movie.mkv","state":"uploading","progress":1,"size":1073741824,"num_leechs":1,"num_seeds":5,"added_on":1700000000,"completion_on":1700086400}]`))
 			return
 		}
 		w.WriteHeader(404)
@@ -147,6 +149,12 @@ func TestClient_GetTorrents_AndParse(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Name != "Movie.mkv" {
 		t.Errorf("unexpected result: %v", list)
+	}
+	if list[0].CompletedOn != 1700086400 {
+		t.Errorf("completion_on parse mismatch, got %d", list[0].CompletedOn)
+	}
+	if list[0].AddedOn != 1700000000 {
+		t.Errorf("added_on parse mismatch, got %d", list[0].AddedOn)
 	}
 }
 
