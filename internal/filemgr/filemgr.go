@@ -99,8 +99,8 @@ func (m *Manager) scan() {
 		return
 	}
 	for _, t := range list {
-		// 只处理已暂停的已完成任务，避免破坏正在做种/下载的 torrent 数据库
-		// qBittorrent v5.0+ 状态：stoppedUP
+		// 只处理已停止的已完成任务，避免破坏正在做种/下载的 torrent 数据库
+		// qBittorrent 5.x 状态：stoppedUP
 		if t.State != "stoppedUP" {
 			continue
 		}
@@ -164,9 +164,9 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	torrentRelativeOld := t.Name + "/" + fileName
 	torrentRelativeNew := fileName
 
-	// 1) 先通过 qB API 暂停 torrent
-	if err := m.client.PauseTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("文件管理 [%s] 暂停失败：%v", t.Name, err)
+	// 1) 先通过 qB API 停止 torrent
+	if err := m.client.StopTorrents(t.Hash); err != nil {
+		logger.Warn.Printf("文件管理 [%s] 停止失败：%v", t.Name, err)
 	}
 
 	// 2) 走 qB renameFile API，失败时回退本地 os.Rename
@@ -183,16 +183,16 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 			dst = filepath.Join(t.SavePath, base+"_"+t.Hash[:8]+ext)
 		}
 		if err := os.Rename(src, dst); err != nil {
-			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，恢复 torrent 后下次重试",
+			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，启动 torrent 后下次重试",
 				t.Name, src, dst, err)
-			_ = m.client.ResumeTorrents(t.Hash)
+			_ = m.client.StartTorrents(t.Hash)
 			return false, false
 		}
 	}
 
-	// 3) 恢复 torrent
-	if err := m.client.ResumeTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("文件管理 [%s] 恢复失败：%v", t.Name, err)
+	// 3) 启动 torrent
+	if err := m.client.StartTorrents(t.Hash); err != nil {
+		logger.Warn.Printf("文件管理 [%s] 启动失败：%v", t.Name, err)
 	}
 
 	method := "fallback local"

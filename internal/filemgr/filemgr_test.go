@@ -34,14 +34,14 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 		*calls = append(*calls, "renameFile:"+r.FormValue("hash"))
 		w.WriteHeader(200)
 	})
-	mux.HandleFunc("/api/v2/torrents/pause", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v2/torrents/stop", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		*calls = append(*calls, "pause:"+r.FormValue("hashes"))
+		*calls = append(*calls, "stop:"+r.FormValue("hashes"))
 		w.WriteHeader(200)
 	})
-	mux.HandleFunc("/api/v2/torrents/resume", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v2/torrents/start", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		*calls = append(*calls, "resume:"+r.FormValue("hashes"))
+		*calls = append(*calls, "start:"+r.FormValue("hashes"))
 		w.WriteHeader(200)
 	})
 	srv := httptest.NewServer(mux)
@@ -52,7 +52,7 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 	return New(cfg, qb.New(srv.URL, "u", "p", "")), calls, srv, saveDir
 }
 
-func TestManager_scan_OnlyProcessesPausedUP(t *testing.T) {
+func TestManager_scan_OnlyProcessesStoppedUP(t *testing.T) {
 	torrents := `[
 		{"hash":"h1","name":"in-progress","state":"downloading","progress":1.0,"save_path":"{SAVE}"},
 		{"hash":"h2","name":"already-processed","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"},
@@ -114,15 +114,15 @@ func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
 	// 调 scan → 只 stoppedUP + 100% 会进 handleCompleted
 	m.scan()
 
-	// handleCompleted 应：pause → renameFile（video.mkv 扁平到 saveDir/video.mkv）→ resume
-	hasPause := false; hasRename := false; hasResume := false
+	// handleCompleted 应：stop → renameFile（video.mkv 扁平到 saveDir/video.mkv）→ start
+	hasStop := false; hasRename := false; hasStart := false
 	for _, c := range *calls {
-		if strings.HasPrefix(c, "pause:") { hasPause = true }
+		if strings.HasPrefix(c, "stop:") { hasStop = true }
 		if strings.HasPrefix(c, "renameFile:") { hasRename = true }
-		if strings.HasPrefix(c, "resume:") { hasResume = true }
+		if strings.HasPrefix(c, "start:") { hasStart = true }
 	}
-	if !hasPause || !hasRename || !hasResume {
-		t.Errorf("expected pause+renameFile+resume cycle, got: %v", *calls)
+	if !hasStop || !hasRename || !hasStart {
+		t.Errorf("expected stop+renameFile+start cycle, got: %v", *calls)
 	}
 
 	// 文件系统校验

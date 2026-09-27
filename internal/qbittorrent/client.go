@@ -210,7 +210,7 @@ func (c *Client) TestConnection() error {
 }
 
 // GetTorrents 拉 torrent 列表，透传给 qBittorrent 原生参数：
-//   - filter: active/downloading/seeding/completed/paused/all 等
+//   - filter: 5.x 合法值 active/downloading/seeding/completed/stopped/running/all 等
 //   - sort:   name/size/progress/upspeed/dlspeed/added_time 等
 //   - reverse: 1 或 true 表示倒序
 // 所有参数都是可选的；filter/sort 为空或 all 时不拼 query。
@@ -297,12 +297,14 @@ func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 	return list, nil
 }
 
-// TransferInfo 是 qBittorrent /api/v2/transfer/info 的返回
+// TransferInfo 是 qBittorrent /api/v2/transfer/info 的返回。
+// 字段名严格按 qB 5.x 源码（transfercontroller.cpp）：dl_info_speed / up_info_speed
+// / dl_rate_limit / up_rate_limit；qB 从不返回 dl_speed / up_speed 这类 key。
 type TransferInfo struct {
-	DlSpeed      int64 `json:"dl_speed"`
-	UpSpeed      int64 `json:"up_speed"`
-	DlSpeedLimit int64 `json:"dl_speed_limit"`
-	UpSpeedLimit int64 `json:"up_speed_limit"`
+	DlSpeed      int64 `json:"dl_info_speed"`
+	UpSpeed      int64 `json:"up_info_speed"`
+	DlSpeedLimit int64 `json:"dl_rate_limit"`
+	UpSpeedLimit int64 `json:"up_rate_limit"`
 }
 
 // GetTransferInfo 拉全局速度信息（很轻量，不走 info 大接口）
@@ -357,11 +359,35 @@ func (c *Client) SetUploadLimit(hash string, limitBytesPerSec int64) error {
 	return nil
 }
 
-// PauseTorrents 暂停一个或多个 torrent（hashes 逗号分隔）
-func (c *Client) PauseTorrents(hashes ...string) error {
+// GetUploadLimit 读取单个 torrent 的当前上传限速（字节/秒；qB 返回 -1 表示不限速）。
+// 对应 qBittorrent 5.x 的 GET /api/v2/torrents/uploadLimit?hashes=...
+func (c *Client) GetUploadLimit(hash string) (int64, error) {
+	resp, err := c.do("GET", "/api/v2/torrents/uploadLimit?hashes="+url.QueryEscape(hash), nil, "")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	// 返回形如 {"<hash>": 1048576}；未找到时 map 为空
+	var m map[string]int64
+	if err := json.Unmarshal(data, &m); err != nil {
+		return 0, err
+	}
+	if v, ok := m[hash]; ok {
+		return v, nil
+	}
+	return 0, fmt.Errorf("uploadLimit: hash %s not found in qB response", hash)
+}
+
+// StopTorrents 停止一个或多个 torrent（hashes 用 | 分隔）。
+// qBittorrent 5.x 端点为 /api/v2/torrents/stop（4.x 的 /pause 已移除）。
+func (c *Client) StopTorrents(hashes ...string) error {
 	form := url.Values{}
 	form.Set("hashes", strings.Join(hashes, "|"))
-	resp, err := c.do("POST", "/api/v2/torrents/pause",
+	resp, err := c.do("POST", "/api/v2/torrents/stop",
 		strings.NewReader(form.Encode()),
 		"application/x-www-form-urlencoded")
 	if err != nil {
@@ -369,16 +395,17 @@ func (c *Client) PauseTorrents(hashes ...string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("pause status: %d", resp.StatusCode)
+		return fmt.Errorf("stop status: %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// ResumeTorrents 恢复一个或多个 torrent
-func (c *Client) ResumeTorrents(hashes ...string) error {
+// StartTorrents 启动一个或多个 torrent。
+// qBittorrent 5.x 端点为 /api/v2/torrents/start（4.x 的 /resume 已移除）。
+func (c *Client) StartTorrents(hashes ...string) error {
 	form := url.Values{}
 	form.Set("hashes", strings.Join(hashes, "|"))
-	resp, err := c.do("POST", "/api/v2/torrents/resume",
+	resp, err := c.do("POST", "/api/v2/torrents/start",
 		strings.NewReader(form.Encode()),
 		"application/x-www-form-urlencoded")
 	if err != nil {
@@ -386,14 +413,14 @@ func (c *Client) ResumeTorrents(hashes ...string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("resume status: %d", resp.StatusCode)
+		return fmt.Errorf("start status: %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// RenameFile 通过 qB API 重命名 torrent 内的文件/子目录（qB 4.6+）。
+// RenameFile 通过 qB API 重命名 torrent 内的文件/子目录（qBittorrent 5.x）。
 // oldPath/newPath 是 torrent 内的相对路径（例："Movie/Video.mkv" -> "Video.mkv"）。
-// 调用前应先暂停 torrent，避免做种中断。
+// 调用前应先停止 torrent，避免做种中断。
 func (c *Client) RenameFile(hash, oldPath, newPath string) error {
 	form := url.Values{}
 	form.Set("hash", hash)
@@ -412,7 +439,7 @@ func (c *Client) RenameFile(hash, oldPath, newPath string) error {
 	}
 	return nil
 }
-func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int, paused bool) error {
+func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string, uploadLimitKB int, stopped bool) error {
 	var buf bytes.Buffer
 	boundary := "qbhive"
 	writeFormField := func(name, value string, isFile bool, filename string, fileData []byte) {
@@ -441,11 +468,13 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 	// 如果磁盘已有同名但大小不匹配的残留文件（常见于重复添加或中途放弃的下载），
 	// skip_checking=true 会导致 qB 跳过 hash check 后陷入 fast resume rejected → 报"丢失文件"。
 	// 让 qB 正常做 hash check，它会自动识别不匹配文件并重新下载。
-	pausedStr := "false"
-	if paused {
-		pausedStr = "true"
+	// 注意：qBittorrent 5.x 的 /torrents/add 只读 "stopped" 参数（4.x 的 "paused"
+	// 已被移除且会被静默忽略，见 qB issue #22766）。
+	stoppedStr := "false"
+	if stopped {
+		stoppedStr = "true"
 	}
-	writeFormField("paused", pausedStr, false, "", nil)
+	writeFormField("stopped", stoppedStr, false, "", nil)
 	buf.WriteString("--" + boundary + "--\r\n")
 
 	resp, err := c.do("POST", "/api/v2/torrents/add", &buf,

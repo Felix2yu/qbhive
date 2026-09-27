@@ -172,6 +172,7 @@ func (s *Server) Start(webRoot string) error {
 		api.GET("/torrents", s.listTorrents)
 		api.GET("/debug/qb-raw", s.debugQBRaw)
 		api.GET("/torrents/stats", s.torrentsStats)
+		api.GET("/torrents/:hash/limit", s.getTorrentLimit)
 		api.POST("/torrents/:hash/limit", s.setTorrentLimit)
 
 		api.GET("/rss/status", s.rssStatus)
@@ -575,9 +576,9 @@ func (s *Server) torrentsStats(c *gin.Context) {
 			downloadingCount++
 		case "uploading", "forcedUP", "checkingUP", "queuedUP":
 			seedingCount++
-		case "stalledDL", "stalledUP", "metaDL", "checkingDL", "queuedDL":
+		case "stalledDL", "stalledUP", "metaDL", "forcedMetaDL", "checkingDL", "queuedDL":
 			stalledCount++
-		case "errored", "error", "missingFiles":
+		case "error", "missingFiles":
 			erroredCount++
 		}
 	}
@@ -630,6 +631,23 @@ func (s *Server) setTorrentLimit(c *gin.Context) {
 		return
 	}
 	c.JSON(200, models.APIResponse{Success: true})
+}
+
+// getTorrentLimit 读取单任务当前上传限速（KB/s，0 = 不限速），
+// 对应 qBittorrent 5.x 的 GET /api/v2/torrents/uploadLimit
+func (s *Server) getTorrentLimit(c *gin.Context) {
+	hash := c.Param("hash")
+	limit, err := s.qbClient.GetUploadLimit(hash)
+	if err != nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	// qB 用 -1 表示不限速
+	var kb int
+	if limit > 0 {
+		kb = int(limit) / 1024
+	}
+	c.JSON(200, models.APIResponse{Success: true, Data: limitPayload{UploadLimit: kb}})
 }
 
 func (s *Server) forceRSS(c *gin.Context) {

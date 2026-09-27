@@ -53,7 +53,7 @@ type RSSRule struct {
 	Category    string `json:"category"`
 	Tags        string `json:"tags"`
 	UploadLimit int    `json:"uploadLimit"` // KB/s，0 表示不限制
-	Paused      bool   `json:"paused"`      // 添加到 qBittorrent 后是否暂停（不自动开始下载）
+	Stopped     bool   `json:"stopped"`     // 添加到 qBittorrent 后是否保持停止（不自动开始下载）
 }
 
 type LimiterConfig struct {

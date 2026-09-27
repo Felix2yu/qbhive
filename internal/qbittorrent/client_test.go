@@ -123,7 +123,7 @@ func TestClient_Login_ErrorWhenQBUnreachable(t *testing.T) {
 
 func TestClient_TestConnection_Success(t *testing.T) {
 	srv, cli := newMockQB(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`"4.6.0"`))
+		w.Write([]byte(`"5.2.1"`))
 	})
 	defer srv.Close()
 	if err := cli.TestConnection(); err != nil {
@@ -153,7 +153,8 @@ func TestClient_GetTorrents_AndParse(t *testing.T) {
 func TestClient_GetTransferInfo(t *testing.T) {
 	srv, cli := newMockQB(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v2/transfer/info" {
-			w.Write([]byte(`{"up_speed_limit":524288}`))
+			// 字段名与 qB 5.x transfercontroller.cpp 一致（dl_rate_limit 而非 dl_speed_limit）
+			w.Write([]byte(`{"dl_info_speed":1024,"up_info_speed":2048,"dl_rate_limit":0,"up_rate_limit":524288}`))
 			return
 		}
 		w.WriteHeader(404)
@@ -164,11 +165,14 @@ func TestClient_GetTransferInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if info.UpSpeedLimit != 524288 {
-		t.Errorf("transfer up_speed_limit mismatch: %+v", info)
+		t.Errorf("transfer up_rate_limit mismatch: %+v", info)
+	}
+	if info.DlSpeed != 1024 || info.UpSpeed != 2048 {
+		t.Errorf("transfer speed mismatch: %+v", info)
 	}
 }
 
-func TestClient_SetUploadLimit_PauseResume(t *testing.T) {
+func TestClient_SetUploadLimit_StopStart(t *testing.T) {
 	var gotPath string
 	srv, cli := newMockQB(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -183,30 +187,53 @@ func TestClient_SetUploadLimit_PauseResume(t *testing.T) {
 		t.Errorf("wrong path: %s", gotPath)
 	}
 
-	if err := cli.PauseTorrents("h1", "h2"); err != nil {
-		t.Errorf("PauseTorrents: %v", err)
+	// qBittorrent 5.x：暂停/恢复端点为 stop/start（4.x 的 pause/resume 已移除）
+	if err := cli.StopTorrents("h1", "h2"); err != nil {
+		t.Errorf("StopTorrents: %v", err)
 	}
-	if gotPath != "/api/v2/torrents/pause" {
-		t.Errorf("wrong pause path: %s", gotPath)
+	if gotPath != "/api/v2/torrents/stop" {
+		t.Errorf("wrong stop path: %s", gotPath)
 	}
 
-	if err := cli.ResumeTorrents("h1"); err != nil {
-		t.Errorf("ResumeTorrents: %v", err)
+	if err := cli.StartTorrents("h1"); err != nil {
+		t.Errorf("StartTorrents: %v", err)
 	}
-	if gotPath != "/api/v2/torrents/resume" {
-		t.Errorf("wrong resume path: %s", gotPath)
+	if gotPath != "/api/v2/torrents/start" {
+		t.Errorf("wrong start path: %s", gotPath)
 	}
 }
 
-func TestClient_PauseTorrents_ErrorStatus(t *testing.T) {
+func TestClient_StopTorrents_ErrorStatus(t *testing.T) {
 	srv, cli := newMockQB(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v2/torrents/pause" {
+		if r.URL.Path == "/api/v2/torrents/stop" {
 			w.WriteHeader(500)
 		}
 	})
 	defer srv.Close()
-	if err := cli.PauseTorrents("h1"); err == nil {
+	if err := cli.StopTorrents("h1"); err == nil {
 		t.Error("expected error on 500 response")
+	}
+}
+
+func TestClient_GetUploadLimit(t *testing.T) {
+	srv, cli := newMockQB(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/torrents/uploadLimit" {
+			if r.URL.Query().Get("hashes") != "h1" {
+				t.Errorf("wrong hashes param: %q", r.URL.Query().Get("hashes"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"h1":1048576}`))
+			return
+		}
+		w.WriteHeader(404)
+	})
+	defer srv.Close()
+	limit, err := cli.GetUploadLimit("h1")
+	if err != nil {
+		t.Fatalf("GetUploadLimit: %v", err)
+	}
+	if limit != 1048576 {
+		t.Errorf("expected 1048576, got %d", limit)
 	}
 }
 

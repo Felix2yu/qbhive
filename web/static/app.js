@@ -316,7 +316,7 @@ async function refreshDashboard(root) {
     <span class="status-chip dl">下载中 ${downloading}</span>
     <span class="status-chip up">做种中 ${seeding}</span>
     ${stalled > 0 ? `<span class="status-chip warn">停滞 ${stalled}</span>` : ""}
-    ${stoppedDl > 0 ? `<span class="status-chip dim">暂停未完成 ${stoppedDl}</span>` : ""}
+    ${stoppedDl > 0 ? `<span class="status-chip dim">停止未完成 ${stoppedDl}</span>` : ""}
     ${stoppedUp > 0 ? `<span class="status-chip ok">已完成 ${stoppedUp}</span>` : ""}
     ${errored > 0 ? `<span class="status-chip danger">⚠ 异常 ${errored}</span>` : ""}
   `;
@@ -342,7 +342,7 @@ function stateTag(s) {
     downloading:   { t: "下载", c: "var(--accent)" },
     forcedDL:      { t: "下载", c: "var(--accent)" },
     stalledDL:     { t: "停滞", c: "var(--warn)" },
-    stoppedDL:     { t: "暂停", c: "var(--text-dim)" },
+    stoppedDL:     { t: "停止", c: "var(--text-dim)" },
     stoppedUP:     { t: "已完成", c: "var(--success)" },
     stalledUP:     { t: "做种", c: "var(--warn)" },
     uploading:     { t: "做种", c: "var(--success)" },
@@ -352,10 +352,11 @@ function stateTag(s) {
     checkingUP:    { t: "校验", c: "var(--accent-2)" },
     checkingDL:    { t: "校验", c: "var(--accent-2)" },
     metaDL:        { t: "元数据", c: "var(--accent-2)" },
+    forcedMetaDL:  { t: "元数据", c: "var(--accent-2)" },
+    moving:        { t: "移动", c: "var(--accent-2)" },
     allocating:    { t: "分配", c: "var(--accent-2)" },
     checkingResumeData: { t: "恢复", c: "var(--accent-2)" },
     missingFiles:  { t: "缺文件", c: "var(--danger)" },
-    errored:       { t: "错误", c: "var(--danger)" },
     error:         { t: "错误", c: "var(--danger)" },
   };
   const v = map[s] || { t: s, c: "var(--text-dim)" };
@@ -412,7 +413,7 @@ function bindLimitButtons() {
 async function openLimitDialog(hash) {
   let currentLimit = 0;
   try {
-    const r = await api("GET", `/torrents/${hash}`);
+    const r = await api("GET", `/torrents/${hash}/limit`);
     if (r.success && r.data) currentLimit = r.data.uploadLimit || 0;
   } catch {}
 
@@ -451,8 +452,8 @@ let _torrentsState = {
 const torrentFilterOptions = [
   { value: "active",       label: "活跃（下载+做种）" },
   { value: "downloading",  label: "下载中" },
-  { value: "stoppedDL",    label: "暂停下载（未完成）" },
-  { value: "stoppedUP",    label: "已完成历史（暂停）" },
+  { value: "stoppedDL",    label: "停止下载（未完成）" },
+  { value: "stoppedUP",    label: "已完成历史（停止）" },
   { value: "stalledUP",    label: "历史（做种停滞）" },
   { value: "completed",    label: "所有已完成" },
   { value: "all",          label: "全部（⚠️ 可能很慢）" },
@@ -494,7 +495,7 @@ async function renderTorrents(root, background = false) {
   if (_torrentsState.filter === "all" || _torrentsState.filter === "completed") {
     $("#tf-progress").textContent = _torrentsState.filter === "all"
       ? "⚠️ 全量模式可能加载数千条任务，首次请求会较慢；后端会返回完整列表后再前端分页。"
-      : "⚠️ 已完成包含暂停+做种+停滞，数量可能很多；建议用「已完成历史（暂停）」替代。";
+      : "⚠️ 已完成包含停止+做种+停滞，数量可能很多；建议用「已完成历史（停止）」替代。";
   }
 
   // 事件绑定
@@ -693,7 +694,7 @@ function renderRuleBlock(fid, r, ri) {
         </div>
       </div>
       <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-rule-upload="${fid}-${ri}" value="${r.uploadLimit || 0}" min="0" placeholder="0 = 不限" style="width:150px"/></div>
-      <div class="form-row"><label class="inline-check"><input type="checkbox" data-rule-paused="${fid}-${ri}" ${r.paused ? "checked" : ""}> 添加后暂停（不自动开始下载）</label></div>
+      <div class="form-row"><label class="inline-check"><input type="checkbox" data-rule-stopped="${fid}-${ri}" ${r.stopped ? "checked" : ""}> 添加后停止（不自动开始下载）</label></div>
     </div>`;
 }
 
@@ -710,7 +711,7 @@ function bindFeedEvents(rss) {
     const fid = b.dataset.addRule;
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules = feed.rules || [];
-    feed.rules.push({ id: genID(), name: "规则 " + (feed.rules.length + 1), enabled: true, mode: "keyword", include: "", exclude: "", savePath: "", category: "", tags: "", uploadLimit: 0, paused: false });
+    feed.rules.push({ id: genID(), name: "规则 " + (feed.rules.length + 1), enabled: true, mode: "keyword", include: "", exclude: "", savePath: "", category: "", tags: "", uploadLimit: 0, stopped: false });
     renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-del-rule]").forEach(b => b.addEventListener("click", () => {
@@ -836,7 +837,7 @@ function collectRSS(rss) {
       r.category = document.querySelector(`[data-rule-category="${key}"]`).value;
       r.tags = document.querySelector(`[data-rule-tags="${key}"]`).value;
       r.uploadLimit = parseInt(document.querySelector(`[data-rule-upload="${key}"]`).value || "0", 10);
-      r.paused = document.querySelector(`[data-rule-paused="${key}"]`).checked;
+      r.stopped = document.querySelector(`[data-rule-stopped="${key}"]`).checked;
     });
   });
   return rss;

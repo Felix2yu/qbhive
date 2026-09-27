@@ -5,12 +5,13 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 
 - 后端：Go + [Gin](https://github.com/gin-gonic/gin)，`CGO_ENABLED=0` 纯静态二进制
 - 前端：原生 HTML/CSS/JS，构建时随二进制一同打包，无需 Node 工具链
-- 对接：qBittorrent WebUI API v2（支持 Cookie 登录与 v5.2.0+ 的 API Key）
+- 对接：qBittorrent WebUI API v2，**仅支持 qBittorrent 5.x**（stop/start 端点、`stopped` 状态与 filter；
+  不兼容 4.x 的 pause/resume 端点），支持 Cookie 登录与 v5.2.0+ 的 API Key
 
 ## 功能
 
 ### 概览
-- 紧凑状态带：下载中 / 做种中 / 停滞 / 暂停未完成 / 已完成 / 异常 计数
+- 紧凑状态带：下载中 / 做种中 / 停滞 / 停止未完成 / 已完成 / 异常 计数
 - 上下行速度条，直观显示当前速度占全局限速的比例
 - 最近活跃任务列表，后台静默刷新不打断操作
 

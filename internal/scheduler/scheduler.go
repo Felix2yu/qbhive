@@ -231,7 +231,7 @@ func (s *Scheduler) scanCompleted() {
 		}
 		if t.Progress >= 0.98 && isDoneState(t.State) && !s.finished[t.Hash] {
 			// 注意：不要求 CompletedOn > 0。qBittorrent 在某些场景
-			// （比如 pausedUP 启动后下完、部分版本、迁移 resume 场景）
+			// （比如 stoppedUP 启动后下完、部分版本、迁移场景）
 			// completed_on 不会立刻填上甚至保持 0。但 Progress + State
 			// 本身就足够判定"已完成"了。finished map 保证了不会重复通知。
 			s.finished[t.Hash] = true
@@ -317,7 +317,7 @@ func buildCompletedBody(t models.QBTorrent) string {
 }
 
 func isDoneState(state string) bool {
-	// qBittorrent v5.0+ 状态：stoppedUP 是暂停且已完成，
+	// qBittorrent 5.x 状态：stoppedUP 是已停止且已完成，
 	// 其他都是做种相关状态
 	switch state {
 	case "stoppedUP", "stalledUP", "uploading", "checkingUP", "queuedUP", "forcedUP":
