@@ -426,8 +426,20 @@ func TestTorrentsStats_HappyPath(t *testing.T) {
 		}
 		if r.URL.Path == "/api/v2/transfer/info" {
 			w.Write([]byte(`{"dl_info_speed":1024,"up_info_speed":2048}`))
-		} else {
-			w.Write([]byte(`[{"state":"active"},{"state":"active"},{"state":"stoppedUP"}]`))
+			return
+		}
+		// 按 filter 返回对应列表（5.x 语义：active 只含"有速度"的任务）
+		switch r.URL.Query().Get("filter") {
+		case "active":
+			w.Write([]byte(`[{"state":"downloading"},{"state":"uploading"}]`))
+		case "stopped":
+			w.Write([]byte(`[{"state":"stoppedUP"},{"state":"stoppedDL"}]`))
+		case "stalled":
+			w.Write([]byte(`[{"state":"stalledDL"},{"state":"stalledUP"},{"state":"stalledUP"}]`))
+		case "errored":
+			w.Write([]byte(`[{"state":"error"},{"state":"missingFiles"}]`))
+		default:
+			w.Write([]byte(`[]`))
 		}
 	}))
 	defer mockQB.Close()
@@ -442,6 +454,27 @@ func TestTorrentsStats_HappyPath(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("torrentsStats got %d: %s", w.Code, w.Body.String())
+	}
+	var resp models.APIResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := resp.Data.(map[string]interface{})
+	want := map[string]float64{
+		"dlSpeed":          1024,
+		"upSpeed":          2048,
+		"activeCount":      2,
+		"stoppedUP":        1,
+		"stoppedDL":        1,
+		"downloadingCount": 1,
+		"seedingCount":     1,
+		"stalledCount":     3,
+		"erroredCount":     2,
+	}
+	for k, v := range want {
+		if got, ok := data[k].(float64); !ok || got != v {
+			t.Errorf("stats[%s] = %v, want %v", k, data[k], v)
+		}
 	}
 }
 

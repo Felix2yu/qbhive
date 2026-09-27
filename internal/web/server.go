@@ -523,8 +523,8 @@ func (s *Server) listTorrents(c *gin.Context) {
 }
 
 // torrentsStats 是概览页用的轻量统计，不走 info 大接口。
-// 并发拉 transfer info（全局速度）+ active 列表 + stopped 列表，3 秒缓存。
-// 原先是串行 3 次 qB 请求，每次网络往返延迟叠加；改为并发后墙钟时间降到「取单次最大延迟」。
+// 并发拉 5 路：transfer info（全局速度）+ active + stopped + stalled + errored，
+// 3 秒缓存；并发后墙钟时间降到「取单次最大延迟」。
 
 func (s *Server) torrentsStats(c *gin.Context) {
 	// 查缓存
@@ -542,10 +542,16 @@ func (s *Server) torrentsStats(c *gin.Context) {
 		tiErr       error
 		activeList  []models.QBTorrent
 		stoppedList []models.QBTorrent
+		stalledList []models.QBTorrent
+		erroredList []models.QBTorrent
 	)
-	// 三次 qB 请求并发：transferInfo + active + stopped（保持原计数语义，仅消除串行延迟）
+	// 五路 qB 请求并发：transferInfo + active + stopped + stalled + errored。
+	// 5.x 语义（torrentimpl.cpp）：active filter = 有实际传输速度的任务
+	// （isActive: upload/download payload rate > 0），停滞与异常任务没有速度、
+	// 进不了 active 列表，所以 stalled/errored 必须各走独立 filter（均在
+	// 5.x parseTorrentStatus 白名单内），否则这两项计数恒为 0。
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		ti, tiErr = s.qbClient.GetTransferInfo()
@@ -556,8 +562,18 @@ func (s *Server) torrentsStats(c *gin.Context) {
 	}()
 	go func() {
 		defer wg.Done()
-		// qBittorrent v5.0+ stopped filter 包含 stoppedUP + stoppedDL
+		// qBittorrent 5.x stopped filter 包含 stoppedUP + stoppedDL
 		stoppedList, _ = s.qbClient.GetTorrents("stopped", "", "")
+	}()
+	go func() {
+		defer wg.Done()
+		// stalled filter = stalledUP + stalledDL
+		stalledList, _ = s.qbClient.GetTorrents("stalled", "", "")
+	}()
+	go func() {
+		defer wg.Done()
+		// errored filter = error + missingFiles（TorrentImpl::isErrored）
+		erroredList, _ = s.qbClient.GetTorrents("errored", "", "")
 	}()
 	wg.Wait()
 
@@ -583,14 +599,24 @@ func (s *Server) torrentsStats(c *gin.Context) {
 			stoppedDlCount++
 		}
 	}
+	// active = 有速度的任务：下载（含元数据）与做种各自计数；
+	// checking/queued/stalled/error 等无速度状态不会出现在该列表里
 	for _, t := range activeList {
 		switch t.State {
-		case "downloading", "forcedDL":
+		case "downloading", "forcedDL", "metaDL", "forcedMetaDL":
 			downloadingCount++
-		case "uploading", "forcedUP", "checkingUP", "queuedUP":
+		case "uploading", "forcedUP":
 			seedingCount++
-		case "stalledDL", "stalledUP", "metaDL", "forcedMetaDL", "checkingDL", "queuedDL":
+		}
+	}
+	for _, t := range stalledList {
+		switch t.State {
+		case "stalledDL", "stalledUP":
 			stalledCount++
+		}
+	}
+	for _, t := range erroredList {
+		switch t.State {
 		case "error", "missingFiles":
 			erroredCount++
 		}
