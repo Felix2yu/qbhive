@@ -109,6 +109,7 @@ type QBTorrent struct {
 	Category      string  `json:"category"`
 	Tags          string  `json:"tags"`
 	SavePath      string  `json:"save_path"`
+	ContentPath   string  `json:"content_path"` // 5.x：单文件种子=文件完整路径，多文件种子=内容根目录完整路径
 	AddedOn       int64   `json:"added_on"`       // Unix 秒，任务被添加到 qBittorrent 的时间（可视为开始时间）
 	CompletedOn   int64   `json:"completion_on"`  // Unix 秒，完成时间；未完成时为 0（5.x 字段名，4.x 为 completed_on）
 	LastActivity  int64   `json:"last_activity"`

@@ -3,6 +3,7 @@ package filemgr
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
@@ -99,15 +100,22 @@ func (m *Manager) scan() {
 		return
 	}
 	for _, t := range list {
-		// 只处理已停止的已完成任务，避免破坏正在做种/下载的 torrent 数据库
-		// qBittorrent 5.x 状态：stoppedUP
-		if t.State != "stoppedUP" {
+		if m.done[t.Hash] {
 			continue
 		}
 		if t.Progress < 0.999 {
 			continue
 		}
-		// done 标记在 handleCompleted 成功后设置，避免早返回导致永久跳过
+		// 处理所有已完成的做种态（与 scheduler.isDoneState 保持一致）。
+		// 不能只认 stoppedUP：未配置「完成即暂停」的任务完成后是
+		// uploading/stalledUP/queuedUP/forcedUP，只认 stoppedUP 永远轮不到。
+		// checkingUP（校验中）移动文件有风险，跳过且不标 done，校验结束后下轮处理。
+		switch t.State {
+		case "stoppedUP", "stalledUP", "uploading", "queuedUP", "forcedUP":
+		default:
+			continue
+		}
+		// done 标记在 handleCompleted 确认后设置，避免早返回导致永久跳过
 		already, didWork := m.handleCompleted(t)
 		if didWork {
 			m.done[t.Hash] = true
@@ -120,12 +128,18 @@ func (m *Manager) scan() {
 
 // handleCompleted 检查并扁平化只含单个普通文件的 torrent 目录。
 // 返回值:
-//   already=true  — 确认不是目标场景（single file torrent、目录不存在、文件数不对），
+//   already=true  — 确认不是目标场景（single file torrent、内容路径不存在、文件数不符），
 //                   调用方应标记 done 不再重试
-//   didWork=true  — 成功完成了移动 + 清理
-//   两者都 false  — 遇到临时错误（权限、网络等），下次 scan 可重试
+//   didWork=true  — 本轮工作已完成（残留目录已清理），调用方应标记 done
+//   两者都 false  — 临时错误，或 qB 移动已提交但待下轮清理，下次 scan 重试
 func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork bool) {
-	torrentDir := filepath.Join(t.SavePath, t.Name)
+	// 5.x 的 content_path 是最准确的内容路径（单文件种子=文件完整路径，
+	// 多文件种子=内容根目录），避免任务名与磁盘目录名不一致时误判「目录不存在」；
+	// 为空时回退 save_path/name
+	torrentDir := t.ContentPath
+	if torrentDir == "" {
+		torrentDir = filepath.Join(t.SavePath, t.Name)
+	}
 	info, err := os.Stat(torrentDir)
 	if err != nil {
 		logger.Debug.Printf("文件管理 [%s] 跳过：目录 %s 不存在（可能是 single file torrent）：%v", t.Name, torrentDir, err)
@@ -148,8 +162,14 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		files = append(files, e)
 	}
 	if len(files) == 0 {
-		logger.Debug.Printf("文件管理 [%s] 跳过：目录 %s 无可见文件", t.Name, torrentDir)
-		return true, false
+		// 目录已无可见文件：多是上一轮移动落地后的残留空壳（可能还有隐藏文件），
+		// 直接删除不会丢数据
+		if err := os.RemoveAll(torrentDir); err != nil {
+			logger.Warn.Printf("文件管理 [%s] 清理空目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
+			return false, false
+		}
+		logger.Info.Printf("文件管理 [%s] 已清理空目录 %s", t.Name, torrentDir)
+		return false, true
 	}
 	if len(files) != 1 {
 		logger.Debug.Printf("文件管理 [%s] 跳过：目录 %s 有 %d 个可见文件（非单文件场景）", t.Name, torrentDir, len(files))
@@ -161,7 +181,12 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	}
 
 	fileName := files[0].Name()
+	// qB renameFile 的路径基准是相对 save_path 的 torrent 内部路径；
+	// content_path 的目录名可能与任务名不一致，按实际目录相对 save_path 推导
 	torrentRelativeOld := t.Name + "/" + fileName
+	if rel, err := filepath.Rel(t.SavePath, torrentDir); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		torrentRelativeOld = filepath.ToSlash(filepath.Join(rel, fileName))
+	}
 	torrentRelativeNew := fileName
 
 	// 1) 先通过 qB API 停止 torrent
@@ -180,7 +205,11 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		if _, e := os.Stat(dst); e == nil {
 			ext := filepath.Ext(fileName)
 			base := fileName[:len(fileName)-len(ext)]
-			dst = filepath.Join(t.SavePath, base+"_"+t.Hash[:8]+ext)
+			suffix := t.Hash
+			if len(suffix) > 8 {
+				suffix = suffix[:8]
+			}
+			dst = filepath.Join(t.SavePath, base+"_"+suffix+ext)
 		}
 		if err := os.Rename(src, dst); err != nil {
 			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，启动 torrent 后下次重试",
@@ -195,15 +224,19 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		logger.Warn.Printf("文件管理 [%s] 启动失败：%v", t.Name, err)
 	}
 
-	method := "fallback local"
 	if viaQB {
-		method = "via qB API"
+		logger.Info.Printf("文件管理 [%s] 已提交移动 %s → %s（qB API）", t.Name, torrentRelativeOld, torrentRelativeNew)
+		// qB renameFile 的磁盘移动是异步的（libtorrent disk thread），
+		// API 返回 200 时文件可能还在原地，立即 RemoveAll 会把尚未移走的
+		// 文件一起删掉造成数据丢失。这里不删目录，返回 false,false 使
+		// 任务不标 done，等下一轮扫描时目录已空再清理。
+		return false, false
 	}
-	logger.Info.Printf("文件管理 [%s] 移动 %s → %s（%s）", t.Name, torrentRelativeOld, torrentRelativeNew, method)
-
-	// 4) 移除 torrent 目录及其残留
+	logger.Info.Printf("文件管理 [%s] 已本地移动 %s → %s", t.Name, torrentRelativeOld, torrentRelativeNew)
+	// 本地 os.Rename 是同步的，移动已落地，可直接清理残留目录
 	if err := os.RemoveAll(torrentDir); err != nil {
-		logger.Warn.Printf("文件管理 [%s] 清理目录 %s 失败：%v", t.Name, torrentDir, err)
+		logger.Warn.Printf("文件管理 [%s] 清理目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
+		return false, false
 	}
 	return false, true
 }

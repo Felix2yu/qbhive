@@ -31,7 +31,7 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 	})
 	mux.HandleFunc("/api/v2/torrents/renameFile", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		*calls = append(*calls, "renameFile:"+r.FormValue("hash"))
+		*calls = append(*calls, "renameFile:"+r.FormValue("hash")+":"+r.FormValue("oldPath")+"->"+r.FormValue("newPath"))
 		w.WriteHeader(200)
 	})
 	mux.HandleFunc("/api/v2/torrents/stop", func(w http.ResponseWriter, r *http.Request) {
@@ -52,27 +52,34 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 	return New(cfg, qb.New(srv.URL, "u", "p", "")), calls, srv, saveDir
 }
 
-func TestManager_scan_OnlyProcessesStoppedUP(t *testing.T) {
+func TestManager_scan_ProcessesAllDoneStates(t *testing.T) {
 	torrents := `[
 		{"hash":"h1","name":"in-progress","state":"downloading","progress":1.0,"save_path":"{SAVE}"},
-		{"hash":"h2","name":"already-processed","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"},
-		{"hash":"h3","name":"not-done","state":"stoppedUP","progress":0.5,"save_path":"{SAVE}"}
+		{"hash":"h2","name":"stopped","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"},
+		{"hash":"h3","name":"seeding","state":"uploading","progress":1.0,"save_path":"{SAVE}"},
+		{"hash":"h4","name":"stalled-seed","state":"stalledUP","progress":1.0,"save_path":"{SAVE}"},
+		{"hash":"h5","name":"not-done","state":"stoppedUP","progress":0.5,"save_path":"{SAVE}"},
+		{"hash":"h6","name":"checking","state":"checkingUP","progress":1.0,"save_path":"{SAVE}"}
 	]`
 	m, calls, srv, _ := setupFilemgr(t, torrents)
 	defer srv.Close()
 
-	// scan 里对 h2 的 handleCompleted 会检查文件系统——h2 目录不存在则直接 return（debug log）
-	// 所以我们只验证 stoppedUP + progress==1 且 not-in-done 会被处理（哪怕目录不存在也是正常 return）
 	m.scan()
 
-	// h1 下载中 → 跳过（state != stoppedUP）
-	// h2 stoppedUP + 100% → 进 handleCompleted（目录不存在 → return）
-	// h3 50% → 跳过
-	if !m.done["h2"] {
-		t.Error("h2 should be marked as done")
+	// 5.x 完成做种态（stoppedUP/uploading/stalledUP）都应处理（目录不存在 → already → done）。
+	// 此前只认 stoppedUP，未配置「完成即暂停」的 uploading/stalledUP 任务永远轮不到
+	for _, h := range []string{"h2", "h3", "h4"} {
+		if !m.done[h] {
+			t.Errorf("%s (done state) should be marked done", h)
+		}
 	}
-	if m.done["h1"] || m.done["h3"] {
-		t.Errorf("h1/h3 should not be done: %v", m.done)
+	// 下载中（哪怕 progress=1）与未完成的不处理
+	if m.done["h1"] || m.done["h5"] {
+		t.Errorf("h1/h5 should not be done: %v", m.done)
+	}
+	// checkingUP 校验中不碰文件、也不标 done（校验结束后下轮处理）
+	if m.done["h6"] {
+		t.Error("h6 (checkingUP) should not be marked done")
 	}
 	_ = calls
 }
@@ -111,27 +118,43 @@ func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
 	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
 
-	// 调 scan → 只 stoppedUP + 100% 会进 handleCompleted
+	// 第一轮：stop → renameFile → start，提交移动
 	m.scan()
 
-	// handleCompleted 应：stop → renameFile（video.mkv 扁平到 saveDir/video.mkv）→ start
-	hasStop := false; hasRename := false; hasStart := false
-	for _, c := range *calls {
-		if strings.HasPrefix(c, "stop:") { hasStop = true }
-		if strings.HasPrefix(c, "renameFile:") { hasRename = true }
-		if strings.HasPrefix(c, "start:") { hasStart = true }
+	// 调用序列与 rename 参数
+	if len(*calls) != 3 ||
+		!strings.HasPrefix((*calls)[0], "stop:") ||
+		!strings.HasPrefix((*calls)[1], "renameFile:h1:Movie.mkv/video.mkv->video.mkv") ||
+		!strings.HasPrefix((*calls)[2], "start:") {
+		t.Fatalf("expected stop + renameFile(Movie.mkv/video.mkv->video.mkv) + start, got: %v", *calls)
 	}
-	if !hasStop || !hasRename || !hasStart {
-		t.Errorf("expected stop+renameFile+start cycle, got: %v", *calls)
+	// 关键回归：qB renameFile 的磁盘移动是异步的，此时目录必须保留、
+	// 文件绝不能被删（此前提交后立即 RemoveAll 会删掉尚未移走的文件）
+	if _, err := os.Stat(filepath.Join(torrentDir, "video.mkv")); err != nil {
+		t.Fatalf("video.mkv must remain before qB lands the move: %v", err)
+	}
+	if m.done["h1"] {
+		t.Error("move just submitted, should not be marked done yet")
 	}
 
-	// 文件系统校验
-	// saveDir/video.mkv 应存在（renameFile 走 qB 但我们只 mock 了，没真搬）
-	// torrentDir/video.mkv 仍存在因为 mock 的 renameFile 不会真改 os
-	// 但 handleCompleted 里 renameFile 成功后会 os.Remove + os.RemoveAll
-	// 我们 mock renameFile 200 OK → handleCompleted 继续删文件
-	if _, err := os.Stat(filepath.Join(torrentDir, "video.mkv")); err == nil {
-		t.Logf("video.mkv still in torrent dir (expected since renameFile is mocked)")
+	// 模拟 qB 异步移动落地：文件移到 saveDir 根下，留下空目录
+	if err := os.Rename(filepath.Join(torrentDir, "video.mkv"), filepath.Join(saveDir, "video.mkv")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮：目录已空 → 清理空壳 → 标 done，且不再新增 qB 调用
+	m.scan()
+	if _, err := os.Stat(torrentDir); !os.IsNotExist(err) {
+		t.Errorf("empty torrent dir should be cleaned up, stat err = %v", err)
+	}
+	if !m.done["h1"] {
+		t.Error("second scan should mark done after cleanup")
+	}
+	if len(*calls) != 3 {
+		t.Errorf("second scan should not call qB again, got: %v", *calls)
+	}
+	if _, err := os.Stat(filepath.Join(saveDir, "video.mkv")); err != nil {
+		t.Errorf("archived file must exist: %v", err)
 	}
 }
 
@@ -147,11 +170,24 @@ func TestManager_handleCompleted_HiddenFiles_StillCleans(t *testing.T) {
 	// 模拟 macOS 访问目录自动生成的 .DS_Store
 	if err := os.WriteFile(filepath.Join(torrentDir, ".DS_Store"), []byte("\\x00\\x01"), 0o644); err != nil { t.Fatal(err) }
 
+	// 第一轮：隐藏文件不阻塞单文件判定，提交移动、目录保留
 	m.scan()
+	if _, err := os.Stat(torrentDir); err != nil {
+		t.Fatalf("dir should remain until qB move lands: %v", err)
+	}
 
-	// torrent 目录及 .DS_Store 应被 RemoveAll 一并清理
+	// 模拟 qB 移走唯一可见文件，.DS_Store 留在原目录
+	if err := os.Rename(filepath.Join(torrentDir, "video.mkv"), filepath.Join(saveDir, "video.mkv")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮：可见文件已空 → 目录（含 .DS_Store）整体清理
+	m.scan()
 	if _, err := os.Stat(torrentDir); !os.IsNotExist(err) {
 		t.Errorf("torrent dir should be removed entirely, stat err = %v", err)
+	}
+	if !m.done["h1"] {
+		t.Error("should be marked done after cleanup")
 	}
 }
 
@@ -167,10 +203,24 @@ func TestManager_handleCompleted_HiddenSubdir_StillCleans(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(torrentDir, ".hidden_cache"), 0o755); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(filepath.Join(torrentDir, ".hidden_cache", "tmp"), []byte("x"), 0o644); err != nil { t.Fatal(err) }
 
+	// 第一轮：提交移动，目录保留
 	m.scan()
+	if _, err := os.Stat(torrentDir); err != nil {
+		t.Fatalf("dir should remain until qB move lands: %v", err)
+	}
 
+	// 模拟 qB 移走唯一可见文件，隐藏子目录留在原地
+	if err := os.Rename(filepath.Join(torrentDir, "video.mkv"), filepath.Join(saveDir, "video.mkv")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮：可见文件已空 → 目录（含隐藏子目录）整体清理
+	m.scan()
 	if _, err := os.Stat(torrentDir); !os.IsNotExist(err) {
 		t.Errorf("torrent dir with hidden subdir should be removed, stat err = %v", err)
+	}
+	if !m.done["h1"] {
+		t.Error("should be marked done after cleanup")
 	}
 }
 
@@ -194,6 +244,44 @@ func TestManager_handleCompleted_MultipleNonHidden_Noop(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(torrentDir, "video.mkv")); err != nil {
 		t.Errorf("video.mkv should still be in torrent dir, err = %v", err)
+	}
+}
+
+// content_path 目录名与任务名不一致时（5.x），必须以 content_path 为准定位归档目录。
+// 若仍按 save_path/name 猜测会误判「目录不存在」直接跳过。
+func TestManager_contentPath_DirDiffersFromName(t *testing.T) {
+	m, calls, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"renamed-torrent","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}","content_path":"{SAVE}/ActualDir"}]`)
+	defer srv.Close()
+
+	torrentDir := filepath.Join(saveDir, "ActualDir")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+
+	m.scan()
+
+	// rename 的内部路径按 content_path 相对 save_path 推导，而非任务名
+	if len(*calls) != 3 || !strings.HasPrefix((*calls)[1], "renameFile:h1:ActualDir/video.mkv->video.mkv") {
+		t.Fatalf("rename should use content_path relative dir, got: %v", *calls)
+	}
+	if m.done["h1"] {
+		t.Error("move just submitted, should not be marked done yet")
+	}
+}
+
+// 单文件种子：content_path 直接指向文件本身，文件已在 save_path 下，无需归档
+func TestManager_contentPath_SingleFileSeed(t *testing.T) {
+	m, calls, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}","content_path":"{SAVE}/Movie.mkv"}]`)
+	defer srv.Close()
+
+	if err := os.WriteFile(filepath.Join(saveDir, "Movie.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+
+	m.scan()
+
+	if !m.done["h1"] {
+		t.Error("single file seed should be marked done (no archiving needed)")
+	}
+	if len(*calls) != 0 {
+		t.Errorf("single file seed should make no qB calls, got: %v", *calls)
 	}
 }
 

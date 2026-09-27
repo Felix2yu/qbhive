@@ -40,8 +40,9 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 - 只对「限速值发生变化」的任务调用 qB API，避免无效请求
 
 ### 文件管理（单文件自动归档）
-- 下载完成后若 `savePath/任务名/` 下只有一个文件，自动上移到保存路径并清理空目录
-- 优先走 qB 的 `renameFile` API（保持做种一致性），失败时回退本地 `os.Rename`
+- 下载完成后若内容目录（5.x `content_path`，回退 `savePath/任务名`）下只有一个文件，自动上移到保存路径并清理空目录
+- 对全部完成做种态生效（stoppedUP / uploading / stalledUP / queuedUP / forcedUP），不依赖「完成即暂停」设置；校验中（checkingUP）暂缓
+- 优先走 qB 的 `renameFile` API（保持做种一致性），失败时回退本地 `os.Rename`；qB 的磁盘移动是异步的，提交后不立即删目录，留待下一轮确认目录已空再清理，避免误删尚未移动的文件
 
 ### 其它
 - 亮色 / 暗色 / 跟随系统 三主题
