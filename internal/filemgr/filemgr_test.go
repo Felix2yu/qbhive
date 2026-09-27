@@ -135,6 +135,68 @@ func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
 	}
 }
 
+// TestManager_handleCompleted_HiddenFiles_StillCleans verifies that hidden files
+// (.DS_Store etc.) don't prevent flattening and are cleaned up by RemoveAll.
+func TestManager_handleCompleted_HiddenFiles_StillCleans(t *testing.T) {
+	m, _, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie.mkv","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"}]`)
+	defer srv.Close()
+
+	torrentDir := filepath.Join(saveDir, "Movie.mkv")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	// 模拟 macOS 访问目录自动生成的 .DS_Store
+	if err := os.WriteFile(filepath.Join(torrentDir, ".DS_Store"), []byte("\\x00\\x01"), 0o644); err != nil { t.Fatal(err) }
+
+	m.scan()
+
+	// torrent 目录及 .DS_Store 应被 RemoveAll 一并清理
+	if _, err := os.Stat(torrentDir); !os.IsNotExist(err) {
+		t.Errorf("torrent dir should be removed entirely, stat err = %v", err)
+	}
+}
+
+// TestManager_handleCompleted_HiddenSubdir_StillCleans verifies hidden subdirectories
+// are also removed by RemoveAll after flattening.
+func TestManager_handleCompleted_HiddenSubdir_StillCleans(t *testing.T) {
+	m, _, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie.mkv","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"}]`)
+	defer srv.Close()
+
+	torrentDir := filepath.Join(saveDir, "Movie.mkv")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(filepath.Join(torrentDir, ".hidden_cache"), 0o755); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, ".hidden_cache", "tmp"), []byte("x"), 0o644); err != nil { t.Fatal(err) }
+
+	m.scan()
+
+	if _, err := os.Stat(torrentDir); !os.IsNotExist(err) {
+		t.Errorf("torrent dir with hidden subdir should be removed, stat err = %v", err)
+	}
+}
+
+// TestManager_handleCompleted_MultipleNonHidden_Noop verifies that extra non-hidden
+// files (e.g. residual !qB) prevent the flattening logic as intended.
+func TestManager_handleCompleted_MultipleNonHidden_Noop(t *testing.T) {
+	m, _, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie.mkv","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"}]`)
+	defer srv.Close()
+
+	torrentDir := filepath.Join(saveDir, "Movie.mkv")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	// 残留的 !qB 文件（被取消勾选或未完成的下载片段）
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv!qB"), []byte("partial"), 0o644); err != nil { t.Fatal(err) }
+
+	m.scan()
+
+	// 过滤后 len(files) = 2，不满足单文件条件 → 目录应原封不动
+	if _, err := os.Stat(torrentDir); err != nil {
+		t.Errorf("torrent dir should remain untouched, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(torrentDir, "video.mkv")); err != nil {
+		t.Errorf("video.mkv should still be in torrent dir, err = %v", err)
+	}
+}
+
 func TestManager_Reload_ClearsDoneMap(t *testing.T) {
 	m, _, srv, _ := setupFilemgr(t, `[]`)
 	defer srv.Close()

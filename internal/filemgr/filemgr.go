@@ -183,12 +183,13 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 		logger.Warn.Printf("文件管理恢复任务 %s 失败：%v", t.Name, err)
 	}
 
-	// 4) 尝试移除空目录（qB renameFile 不会自动清理空目录）
-	if err := os.Remove(torrentDir); err != nil {
-		logger.Debug.Printf("文件管理删除目录 %s 失败：%v", torrentDir, err)
-	} else {
-		logger.Info.Printf("文件管理移动 %s → %s（%s）", torrentRelativeOld, torrentRelativeNew,
-			map[bool]string{true: "via qB API", false: "fallback local"}[done])
+	logger.Info.Printf("文件管理移动 %s → %s（%s）", torrentRelativeOld, torrentRelativeNew,
+		map[bool]string{true: "via qB API", false: "fallback local"}[done])
+
+	// 4) 移除 torrent 目录及其残留（隐藏文件如 .DS_Store、临时子目录等）
+	//    使用 RemoveAll 而非 Remove，因为不存在用户主动放入的文件
+	if err := os.RemoveAll(torrentDir); err != nil {
+		logger.Warn.Printf("文件管理清理目录 %s 失败：%v", torrentDir, err)
 	}
 }
 
