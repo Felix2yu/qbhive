@@ -104,35 +104,42 @@ func (m *Manager) scan() {
 		if t.State != "stoppedUP" {
 			continue
 		}
-		if m.done[t.Hash] {
-			continue
-		}
-		// 通过 progress==1 确认真的完成
 		if t.Progress < 0.999 {
 			continue
 		}
-		m.done[t.Hash] = true
-		m.handleCompleted(t)
+		// done 标记在 handleCompleted 成功后设置，避免早返回导致永久跳过
+		already, didWork := m.handleCompleted(t)
+		if didWork {
+			m.done[t.Hash] = true
+		} else if already {
+			// torrent 已被确认不是目标场景（如 single file 模式），不再重试
+			m.done[t.Hash] = true
+		}
 	}
 }
 
-func (m *Manager) handleCompleted(t models.QBTorrent) {
-	// 检查 save_path/torrentname 目录下是否只有一个文件
+// handleCompleted 检查并扁平化只含单个普通文件的 torrent 目录。
+// 返回值:
+//   already=true  — 确认不是目标场景（single file torrent、目录不存在、文件数不对），
+//                   调用方应标记 done 不再重试
+//   didWork=true  — 成功完成了移动 + 清理
+//   两者都 false  — 遇到临时错误（权限、网络等），下次 scan 可重试
+func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork bool) {
 	torrentDir := filepath.Join(t.SavePath, t.Name)
 	info, err := os.Stat(torrentDir)
 	if err != nil {
-		logger.Debug.Printf("文件管理：目录 %s 不存在，可能已扁平化：%v", torrentDir, err)
-		return
+		logger.Debug.Printf("文件管理 [%s] 跳过：目录 %s 不存在（可能是 single file torrent）：%v", t.Name, torrentDir, err)
+		return true, false
 	}
 	if !info.IsDir() {
-		return
+		logger.Debug.Printf("文件管理 [%s] 跳过：%s 是文件不是目录（single file torrent）", t.Name, torrentDir)
+		return true, false
 	}
 	entries, err := os.ReadDir(torrentDir)
 	if err != nil {
-		logger.Warn.Printf("文件管理读取目录 %s 失败：%v", torrentDir, err)
-		return
+		logger.Warn.Printf("文件管理 [%s] 读取目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
+		return false, false
 	}
-	// 过滤掉隐藏文件
 	var files []os.DirEntry
 	for _, e := range entries {
 		if e.Name()[0] == '.' {
@@ -140,27 +147,34 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 		}
 		files = append(files, e)
 	}
-	if len(files) != 1 || !files[0].Type().IsRegular() {
-		// 不是单文件场景
-		return
+	if len(files) == 0 {
+		logger.Debug.Printf("文件管理 [%s] 跳过：目录 %s 无可见文件", t.Name, torrentDir)
+		return true, false
+	}
+	if len(files) != 1 {
+		logger.Debug.Printf("文件管理 [%s] 跳过：目录 %s 有 %d 个可见文件（非单文件场景）", t.Name, torrentDir, len(files))
+		return true, false
+	}
+	if !files[0].Type().IsRegular() {
+		logger.Debug.Printf("文件管理 [%s] 跳过：%s 不是普通文件", t.Name, files[0].Name())
+		return true, false
 	}
 
 	fileName := files[0].Name()
-	torrentRelativeOld := t.Name + "/" + fileName // qB renameFile 需要的 torrent 内相对路径
-	torrentRelativeNew := fileName                // 目标：直接放到 torrent 根目录（即 savePath 下）
+	torrentRelativeOld := t.Name + "/" + fileName
+	torrentRelativeNew := fileName
 
-	// 1) 先通过 qB API 暂停 torrent（已经是 pausedUP，这里只是防御）
+	// 1) 先通过 qB API 暂停 torrent
 	if err := m.client.PauseTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("文件管理暂停任务 %s 失败：%v", t.Name, err)
-		// 继续尝试，失败再回退
+		logger.Warn.Printf("文件管理 [%s] 暂停失败：%v", t.Name, err)
 	}
 
-	// 2) 走 qB renameFile API，让 qB 感知文件移动，保护做种一致性
-	done := false
+	// 2) 走 qB renameFile API，失败时回退本地 os.Rename
+	viaQB := true
 	if err := m.client.RenameFile(t.Hash, torrentRelativeOld, torrentRelativeNew); err != nil {
-		logger.Warn.Printf("文件管理 qB renameFile 失败（%s → %s）：%v，回退到本地 os.Rename",
-			torrentRelativeOld, torrentRelativeNew, err)
-		// 回退：本地 os.Rename（仅在 qB renameFile 不可用时，且任务已暂停）
+		logger.Warn.Printf("文件管理 [%s] qB renameFile 失败（%s → %s）：%v，回退本地重命名",
+			t.Name, torrentRelativeOld, torrentRelativeNew, err)
+		viaQB = false
 		src := filepath.Join(torrentDir, fileName)
 		dst := filepath.Join(t.SavePath, fileName)
 		if _, e := os.Stat(dst); e == nil {
@@ -169,28 +183,29 @@ func (m *Manager) handleCompleted(t models.QBTorrent) {
 			dst = filepath.Join(t.SavePath, base+"_"+t.Hash[:8]+ext)
 		}
 		if err := os.Rename(src, dst); err != nil {
-			logger.Warn.Printf("文件管理本地重命名 %s → %s 失败：%v", src, dst, err)
-			// 失败尝试恢复 torrent，避免用户以为还在暂停
+			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，恢复 torrent 后下次重试",
+				t.Name, src, dst, err)
 			_ = m.client.ResumeTorrents(t.Hash)
-			return
+			return false, false
 		}
-	} else {
-		done = true
 	}
 
-	// 3) 恢复 torrent（仅针对 qB renameFile 成功 / 本地回退成功）
+	// 3) 恢复 torrent
 	if err := m.client.ResumeTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("文件管理恢复任务 %s 失败：%v", t.Name, err)
+		logger.Warn.Printf("文件管理 [%s] 恢复失败：%v", t.Name, err)
 	}
 
-	logger.Info.Printf("文件管理移动 %s → %s（%s）", torrentRelativeOld, torrentRelativeNew,
-		map[bool]string{true: "via qB API", false: "fallback local"}[done])
+	method := "fallback local"
+	if viaQB {
+		method = "via qB API"
+	}
+	logger.Info.Printf("文件管理 [%s] 移动 %s → %s（%s）", t.Name, torrentRelativeOld, torrentRelativeNew, method)
 
-	// 4) 移除 torrent 目录及其残留（隐藏文件如 .DS_Store、临时子目录等）
-	//    使用 RemoveAll 而非 Remove，因为不存在用户主动放入的文件
+	// 4) 移除 torrent 目录及其残留
 	if err := os.RemoveAll(torrentDir); err != nil {
-		logger.Warn.Printf("文件管理清理目录 %s 失败：%v", torrentDir, err)
+		logger.Warn.Printf("文件管理 [%s] 清理目录 %s 失败：%v", t.Name, torrentDir, err)
 	}
+	return false, true
 }
 
 // Reset 重置完成状态（服务重启时调用）
