@@ -45,7 +45,11 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 		w.WriteHeader(200)
 	})
 	srv := httptest.NewServer(mux)
-	cfg := config.New("")
+	// 隔离持久化状态：cleanState / audit 路径都取自 QBHIVE_CONFIG 所在目录，
+	// 不设就会共用相对的 data/ 文件，导致归档 pending 记录跨测试串味。
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("QBHIVE_CONFIG", cfgPath)
+	cfg := config.New(cfgPath)
 	cfg.Set(models.AppConfig{
 		FileManager: models.FileManagerConfig{Enabled: true, ScanInterval: 15},
 	})

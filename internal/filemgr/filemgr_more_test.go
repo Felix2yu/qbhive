@@ -79,7 +79,11 @@ func newFilemgrEnv(t *testing.T, enabled bool, scanInterval int, torrentsJSON st
 	env.srv = httptest.NewServer(mux)
 	t.Cleanup(env.srv.Close)
 
-	cfg := config.New(filepath.Join(t.TempDir(), "config.json"))
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	// 隔离持久化状态：cleanState / audit 路径取自 QBHIVE_CONFIG 所在目录，
+	// 否则会共用相对 data/ 文件，归档 pending 记录会跨测试串味。
+	t.Setenv("QBHIVE_CONFIG", cfgPath)
+	cfg := config.New(cfgPath)
 	cfg.Set(models.AppConfig{
 		FileManager: models.FileManagerConfig{Enabled: enabled, ScanInterval: scanInterval},
 	})
@@ -495,6 +499,167 @@ func TestManager_handleCompleted_FallbackRenameErrorResumes(t *testing.T) {
 	// 目录不能被删掉
 	if _, err := os.Stat(torrentDir); err != nil {
 		t.Errorf("改名失败时源目录应保留: %v", err)
+	}
+}
+
+// TestManager_handleCompleted_ContentPathEqualsSavePath_NeverDeletesRoot 是 DSOD
+// 删库事故的回归：content_path == save_path（多文件种子无根目录、文件散在共享保存根）
+// 时 rel == "."。此路径下既无可上移的子目录，也绝不允许对保存根做 os.RemoveAll。
+// 即便保存根里恰好只剩一个「别人的」文件（被其它任务归档移进来的），本任务也必须
+// 原样跳过——无任何 qB 调用、不删保存根、不动其中文件。
+func TestManager_handleCompleted_ContentPathEqualsSavePath_NeverDeletesRoot(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	saveRoot := env.saveDir // save_path 本身就是共享保存根
+	// 另一个任务的大文件恰好躺在保存根（模拟别的 torrent 归档把它移到了这里）
+	precious := filepath.Join(saveRoot, "489155_someoneelse.mkv")
+	if err := os.WriteFile(precious, []byte("7.3GB precious data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// DSOD 的 content_path == save_path，目录里只有那一个（别人的）文件
+	already, didWork := env.m.handleCompleted(models.QBTorrent{
+		Hash: testHash, Name: "DSOD-060-UC", SavePath: saveRoot, ContentPath: saveRoot,
+	})
+
+	if !already || didWork {
+		t.Errorf("内容路径==保存路径应跳过（already=true,didWork=false），got already=%v didWork=%v", already, didWork)
+	}
+	if len(env.calls()) != 0 {
+		t.Errorf("内容路径==保存路径绝不能触发任何 qB 调用: %v", env.calls())
+	}
+	// 保存根与其中文件必须原封不动
+	if _, err := os.Stat(saveRoot); err != nil {
+		t.Errorf("保存根绝不能被删除: %v", err)
+	}
+	if data, err := os.ReadFile(precious); err != nil || string(data) != "7.3GB precious data" {
+		t.Errorf("保存根内文件绝不能被动/删: err=%v data=%q", err, data)
+	}
+	if env.m.getFlattenDir(testHash) != "" {
+		t.Errorf("跳过场景不应记录 pending 清理目录: %q", env.m.getFlattenDir(testHash))
+	}
+}
+
+// TestManager_handleCompleted_CleansDirAfterContentPathBecomesFile 模拟真实 qB 5.x：
+// 移动落地后 content_path 会从目录变成新文件路径。旧实现依赖 content_path 定位目录，
+// 下一轮会判定 !IsDir 直接 done，空目录永远泄漏；新实现用记录的 pending 目录完成清理。
+func TestManager_handleCompleted_CleansDirAfterContentPathBecomesFile(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	save := env.saveDir
+	sub := filepath.Join(save, "Foo")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "Foo.mkv"), []byte("movie"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一轮：content_path 指向子目录，提交 qB 移动（mock 不真搬），记录 pending
+	already1, did1 := env.m.handleCompleted(models.QBTorrent{
+		Hash: testHash, Name: "Foo", SavePath: save, ContentPath: sub,
+	})
+	if already1 || did1 {
+		t.Fatalf("第一轮应提交移动并等待清理（false,false），got (%v,%v)", already1, did1)
+	}
+	if env.callCount("renameFile") != 1 {
+		t.Fatalf("第一轮应提交 renameFile: %v", env.calls())
+	}
+	if env.m.getFlattenDir(testHash) != sub {
+		t.Fatalf("应记录待清理目录 %s，实际 %q", sub, env.m.getFlattenDir(testHash))
+	}
+
+	// 模拟 qB 异步移动落地：文件移到保存根，子目录变空，content_path 变为文件路径
+	if err := os.Rename(filepath.Join(sub, "Foo.mkv"), filepath.Join(save, "Foo.mkv")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮：content_path 已变成文件路径（旧实现会 !IsDir 直接 done，泄漏空目录）
+	already2, did2 := env.m.handleCompleted(models.QBTorrent{
+		Hash: testHash, Name: "Foo", SavePath: save, ContentPath: filepath.Join(save, "Foo.mkv"),
+	})
+	if already2 || !did2 {
+		t.Fatalf("第二轮应清理空目录并标记完成（false,true），got (%v,%v)", already2, did2)
+	}
+	if _, err := os.Stat(sub); !os.IsNotExist(err) {
+		t.Errorf("空目录应被清理，stat err=%v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(save, "Foo.mkv")); err != nil || string(data) != "movie" {
+		t.Errorf("归档后的文件必须完好: err=%v data=%q", err, data)
+	}
+	if env.m.getFlattenDir(testHash) != "" {
+		t.Errorf("清理后应清空 pending，实际 %q", env.m.getFlattenDir(testHash))
+	}
+	if env.callCount("renameFile") != 1 {
+		t.Errorf("第二轮不应再提交 qB 调用: %v", env.calls())
+	}
+}
+
+// TestManager_finishFlatten_NeverDeletesNonEmptyDir 保证 qB 移动迟迟不落地时，
+// finishFlatten 只等待/放弃，绝不删除仍有文件的目录（防数据丢失）。
+func TestManager_finishFlatten_NeverDeletesNonEmptyDir(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	save := env.saveDir
+	sub := filepath.Join(save, "Foo")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 文件仍在原目录（模拟 qB 移动尚未落地）
+	if err := os.WriteFile(filepath.Join(sub, "Foo.mkv"), []byte("movie"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tor := models.QBTorrent{Hash: testHash, Name: "Foo", SavePath: save, ContentPath: sub}
+
+	// 未落地：应等待（false,false），绝不删目录
+	env.m.setFlattenDir(testHash, sub)
+	if already, did := env.m.finishFlatten(tor, sub); already || did {
+		t.Errorf("目录仍有文件时应等待（false,false），got (%v,%v)", already, did)
+	}
+	if data, err := os.ReadFile(filepath.Join(sub, "Foo.mkv")); err != nil || string(data) != "movie" {
+		t.Fatalf("非空目录绝不能被删: err=%v data=%q", err, data)
+	}
+
+	// 把等待计数推到上限前一轮，再触发一次即放弃：应清 pending 且返回 (true,false)，仍不删目录
+	env.m.mu.Lock()
+	env.m.cleanState[testHash].FlattenAttempts = flattenMaxAttempts - 1
+	env.m.mu.Unlock()
+	if already, did := env.m.finishFlatten(tor, sub); !already || did {
+		t.Errorf("超过上限应放弃（true,false），got (%v,%v)", already, did)
+	}
+	if data, err := os.ReadFile(filepath.Join(sub, "Foo.mkv")); err != nil || string(data) != "movie" {
+		t.Errorf("放弃后也绝不能删非空目录: err=%v data=%q", err, data)
+	}
+	if env.m.getFlattenDir(testHash) != "" {
+		t.Errorf("放弃后应清空 pending，实际 %q", env.m.getFlattenDir(testHash))
+	}
+}
+
+func TestIsStrictSubdir(t *testing.T) {
+	cases := []struct {
+		parent, child string
+		want          bool
+	}{
+		{"/a", "/a/b", true},
+		{"/a", "/a/b/c", true},
+		{"/a", "/a", false},       // 相等 → 不是严格子目录（保存根本身）
+		{"/a", "/b", false},       // 完全在外
+		{"/a", "/ab", false},      // 前缀障眼（不是 /a 的子路径）
+		{"/a", "/a/../a/b", true}, // Clean 后为 /a/b
+		{"/a/b", "/a", false},     // child 是 parent 的祖先
+		{"", "/a", false},
+		{"/a", "", false},
+	}
+	for _, c := range cases {
+		if got := isStrictSubdir(c.parent, c.child); got != c.want {
+			t.Errorf("isStrictSubdir(%q,%q)=%v want %v", c.parent, c.child, got, c.want)
+		}
+	}
+}
+
+func TestConflictFreeName(t *testing.T) {
+	if got := conflictFreeName("video.mkv", "h1h2h3h4h5h6"); got != "video_h1h2h3h4.mkv" {
+		t.Errorf("长 hash 应截前 8 位: %q", got)
+	}
+	if got := conflictFreeName("video.mkv", "abc"); got != "video_abc.mkv" {
+		t.Errorf("短 hash 应用全量: %q", got)
 	}
 }
 

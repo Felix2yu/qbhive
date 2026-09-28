@@ -44,9 +44,21 @@ type cleanRecord struct {
 	Done       bool          `json:"done,omitempty"`     // 已无待办且全部落地
 	AiAttempts int           `json:"aiAttempts,omitempty"`
 	AISettled  bool          `json:"aiSettled,omitempty"` // AI 已成功调用过 / 无可用通道 / 重试耗尽
+
+	// FlattenDir 记录单文件归档已提交 qB 异步移动、等待清空后删除的原目录（绝对路径）。
+	// 非空表示上一轮已把 savePath 子目录里唯一的文件移到保存根，qB 的磁盘移动是异步的，
+	// 必须等原目录真正变空才能删，否则会连未移走的文件一起删掉。持久化以便重启后续清。
+	FlattenDir string `json:"flattenDir,omitempty"`
+	// FlattenAttempts 归档清理连续等待/失败的轮数，超过上限则放弃（绝不删非空目录）
+	FlattenAttempts int `json:"flattenAttempts,omitempty"`
 }
 
 const cleanStateFile = "filemgr_clean.json"
+
+// flattenMaxAttempts 等待 qB 异步移动落地、清理归档残留目录的最大轮数。
+// 同一卷内移动是元数据操作（秒级），20 轮（默认间隔约 5 分钟）足够；
+// 超过说明移动异常，放弃清理但绝不删除仍有文件的目录。
+const flattenMaxAttempts = 20
 
 // defaultCleanStatePath 推导清理状态文件路径（与 scheduler 的 finished.json 同目录规则）
 func defaultCleanStatePath() string {
@@ -173,16 +185,42 @@ func (m *Manager) scan() {
 	}
 }
 
-// handleCompleted 检查并扁平化只含单个普通文件的 torrent 目录。
+// handleCompleted 检查并扁平化「savePath 子目录下只含单个普通文件」的 torrent，
+// 把该文件上移到 savePath 根并清理残留空目录。
+//
+// 安全铁律：只有当内容目录是 savePath 的**严格子目录**时才可能触发归档与删除。
+// content_path == save_path（多文件种子无根目录、文件直接散在共享保存根）时
+// rel == "."，此路径下既无可上移的子目录，也绝不可 os.RemoveAll —— 否则会删掉
+// 整个保存根（含其它任务的文件），造成不可恢复的数据丢失。
+//
 // 返回值:
-//   already=true  — 确认不是目标场景（single file torrent、内容路径不存在、文件数不符），
-//                   调用方应标记 done 不再重试
-//   didWork=true  — 本轮工作已完成（残留目录已清理），调用方应标记 done
-//   两者都 false  — 临时错误，或 qB 移动已提交但待下轮清理，下次 scan 重试
+//
+//	already=true  — 确认不是目标场景（single file torrent、内容即保存根、文件数不符、
+//	                  清理多次未果而放弃），调用方标记 done 不再重试
+//	didWork=true  — 本轮工作已完成（残留空目录已清理），调用方标记 done
+//	两者都 false  — 临时错误，或 qB 移动已提交但待下轮清理，下次 scan 重试
 func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork bool) {
-	// 5.x 的 content_path 是最准确的内容路径（单文件种子=文件完整路径，
-	// 多文件种子=内容根目录），避免任务名与磁盘目录名不一致时误判「目录不存在」；
-	// 为空时回退 save_path/name
+	// 步骤 1：上一轮已提交 qB 异步移动，优先收尾清理原目录。
+	// 必须排在 content_path 判定之前——移动落地后 qB 会把 content_path 改成
+	// 新文件路径，届时再也无法从任务当前路径反推出需要清理的原目录。
+	if dir := m.getFlattenDir(t.Hash); dir != "" {
+		return m.finishFlatten(t, dir)
+	}
+
+	// 清洗 pass 若仍有已提交未落地的重命名，推迟归档：清洗可能改动目录/文件名，
+	// 过早归档会与之争用同一源路径，或使随后记录的原目录因被改名而失效。
+	if m.cfg.Get().FileManager.CleanEnabled {
+		m.mu.Lock()
+		rec := m.cleanState[t.Hash]
+		cleanPending := rec != nil && len(rec.Pending) > 0
+		m.mu.Unlock()
+		if cleanPending {
+			return false, false
+		}
+	}
+
+	// 步骤 2：定位归档目录。5.x 的 content_path 最准确（单文件种子=文件完整路径，
+	// 多文件种子=内容根目录），为空时回退 save_path/name。
 	torrentDir := t.ContentPath
 	if torrentDir == "" {
 		torrentDir = filepath.Join(t.SavePath, t.Name)
@@ -196,6 +234,17 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		logger.Debug.Printf("文件管理 [%s] 跳过：%s 是文件不是目录（single file torrent）", t.Name, torrentDir)
 		return true, false
 	}
+
+	// 安全闸：torrentDir 必须是 savePath 的严格子目录。rel == "."（内容即保存根，
+	// 文件散在共享根）或 ".."（在保存根之外）或出错，一律跳过——既无可归档的子目录，
+	// 也绝不允许对该路径做 RemoveAll。这条闸是 DSOD 删库事故的根治点。
+	rel, relErr := filepath.Rel(t.SavePath, torrentDir)
+	if relErr != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		logger.Debug.Printf("文件管理 [%s] 跳过：内容路径 %s 不是保存路径 %s 的严格子目录（rel=%q），无需归档且严禁删除",
+			t.Name, torrentDir, t.SavePath, rel)
+		return true, false
+	}
+
 	entries, err := os.ReadDir(torrentDir)
 	if err != nil {
 		logger.Warn.Printf("文件管理 [%s] 读取目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
@@ -209,8 +258,7 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		files = append(files, e)
 	}
 	if len(files) == 0 {
-		// 目录已无可见文件：多是上一轮移动落地后的残留空壳（可能还有隐藏文件），
-		// 直接删除不会丢数据
+		// 目录已无可见文件：残留空壳（已确认是 savePath 严格子目录），整体删除不会丢数据
 		if err := os.RemoveAll(torrentDir); err != nil {
 			logger.Warn.Printf("文件管理 [%s] 清理空目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
 			return false, false
@@ -228,35 +276,35 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	}
 
 	fileName := files[0].Name()
-	// qB renameFile 的路径基准是相对 save_path 的 torrent 内部路径；
-	// content_path 的目录名可能与任务名不一致，按实际目录相对 save_path 推导
-	torrentRelativeOld := t.Name + "/" + fileName
-	if rel, err := filepath.Rel(t.SavePath, torrentDir); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
-		torrentRelativeOld = filepath.ToSlash(filepath.Join(rel, fileName))
-	}
+	// qB renameFile 的路径基准是相对 save_path 的内部路径；用 rel（真实目录相对
+	// save_path 推导）拼接，绝不按任务名猜测——猜错会 409 并触发危险的本地回退。
+	torrentRelativeOld := filepath.ToSlash(filepath.Join(rel, fileName))
 	torrentRelativeNew := fileName
+	// 目标冲突预检：savePath 根下已存在同名文件时加 _hash8 后缀，绝不覆盖
+	if _, e := os.Stat(filepath.Join(t.SavePath, torrentRelativeNew)); e == nil {
+		torrentRelativeNew = conflictFreeName(fileName, t.Hash)
+	}
 
 	// 1) 先通过 qB API 停止 torrent
 	if err := m.client.StopTorrents(t.Hash); err != nil {
 		logger.Warn.Printf("文件管理 [%s] 停止失败：%v", t.Name, err)
 	}
 
-	// 2) 走 qB renameFile API，失败时回退本地 os.Rename
+	// 2) 走 qB renameFile API，失败时回退本地 os.Rename。
+	//    此处 torrentDir 已确认是 savePath 严格子目录：src 在子目录内、dst 在保存根，
+	//    两者必不相同，不存在「同路径 no-op 被当成功」的隐患。
 	viaQB := true
 	if err := m.client.RenameFile(t.Hash, torrentRelativeOld, torrentRelativeNew); err != nil {
 		logger.Warn.Printf("文件管理 [%s] qB renameFile 失败（%s → %s）：%v，回退本地重命名",
 			t.Name, torrentRelativeOld, torrentRelativeNew, err)
 		viaQB = false
 		src := filepath.Join(torrentDir, fileName)
-		dst := filepath.Join(t.SavePath, fileName)
-		if _, e := os.Stat(dst); e == nil {
-			ext := filepath.Ext(fileName)
-			base := fileName[:len(fileName)-len(ext)]
-			suffix := t.Hash
-			if len(suffix) > 8 {
-				suffix = suffix[:8]
-			}
-			dst = filepath.Join(t.SavePath, base+"_"+suffix+ext)
+		dst := filepath.Join(t.SavePath, filepath.FromSlash(torrentRelativeNew))
+		if src == dst {
+			// 防御性兜底（rel != "." 时理论不可达）：同路径无需移动，更不可删目录
+			logger.Warn.Printf("文件管理 [%s] 本地重命名源与目标相同（%s），跳过并保留目录", t.Name, src)
+			_ = m.client.StartTorrents(t.Hash)
+			return true, false
 		}
 		if err := os.Rename(src, dst); err != nil {
 			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，启动 torrent 后下次重试",
@@ -272,20 +320,154 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	}
 
 	if viaQB {
-		logger.Info.Printf("文件管理 [%s] 已提交移动 %s → %s（qB API）", t.Name, torrentRelativeOld, torrentRelativeNew)
-		// qB renameFile 的磁盘移动是异步的（libtorrent disk thread），
-		// API 返回 200 时文件可能还在原地，立即 RemoveAll 会把尚未移走的
-		// 文件一起删掉造成数据丢失。这里不删目录，返回 false,false 使
-		// 任务不标 done，等下一轮扫描时目录已空再清理。
+		logger.Info.Printf("文件管理 [%s] 已提交移动 %s → %s（qB API），等待异步落地后清理原目录",
+			t.Name, torrentRelativeOld, torrentRelativeNew)
+		// qB renameFile 的磁盘移动是异步的（libtorrent disk thread），API 返回 200 时
+		// 文件可能还在原地，立即 RemoveAll 会把尚未移走的文件一起删掉造成数据丢失。
+		// 记录原目录绝对路径，后续轮询确认它变空后再清理。
+		m.setFlattenDir(t.Hash, torrentDir)
 		return false, false
 	}
+
 	logger.Info.Printf("文件管理 [%s] 已本地移动 %s → %s", t.Name, torrentRelativeOld, torrentRelativeNew)
-	// 本地 os.Rename 是同步的，移动已落地，可直接清理残留目录
+	// 本地 os.Rename 是同步的，移动已落地，原目录（savePath 严格子目录）可直接清理
 	if err := os.RemoveAll(torrentDir); err != nil {
 		logger.Warn.Printf("文件管理 [%s] 清理目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
 		return false, false
 	}
 	return false, true
+}
+
+// finishFlatten 收尾一次已提交 qB 异步移动的归档：轮询原目录，待其变空后删除。
+// dir 是提交时记录的绝对路径，删除前再次校验它仍是 savePath 的严格子目录，
+// 任何异常（保存根变更、目录仍有文件、读取出错）都只放弃清理，绝不删非空目录。
+func (m *Manager) finishFlatten(t models.QBTorrent, dir string) (already bool, didWork bool) {
+	if !isStrictSubdir(t.SavePath, dir) {
+		logger.Warn.Printf("文件管理 [%s] 待清理目录 %s 不再是保存路径 %s 的严格子目录，放弃清理（绝不删除）",
+			t.Name, dir, t.SavePath)
+		m.clearFlattenDir(t.Hash)
+		return true, false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 目录已不存在：qB 自行清理或上一轮已删，视为完成
+			m.clearFlattenDir(t.Hash)
+			return false, true
+		}
+		if m.bumpFlattenAttempts(t.Hash) {
+			logger.Warn.Printf("文件管理 [%s] 读取待清理目录 %s 多次失败，放弃清理：%v", t.Name, dir, err)
+			m.clearFlattenDir(t.Hash)
+			return true, false
+		}
+		return false, false
+	}
+	if countVisible(entries) > 0 {
+		// qB 异步移动尚未落地（文件仍在原目录），等待下一轮；多次不落地则放弃但不删
+		if m.bumpFlattenAttempts(t.Hash) {
+			logger.Warn.Printf("文件管理 [%s] 待清理目录 %s 多轮后仍有文件，放弃清理（绝不删非空目录）", t.Name, dir)
+			m.clearFlattenDir(t.Hash)
+			return true, false
+		}
+		return false, false
+	}
+	// 目录已空（仅剩隐藏残留也算空）→ 安全整体删除
+	if err := os.RemoveAll(dir); err != nil {
+		if m.bumpFlattenAttempts(t.Hash) {
+			logger.Warn.Printf("文件管理 [%s] 清理空目录 %s 多次失败，放弃：%v", t.Name, dir, err)
+			m.clearFlattenDir(t.Hash)
+			return true, false
+		}
+		return false, false
+	}
+	logger.Info.Printf("文件管理 [%s] 已清理归档残留空目录 %s", t.Name, dir)
+	m.clearFlattenDir(t.Hash)
+	return false, true
+}
+
+// ---- 归档 pending 状态（持久化于 cleanState）与工具函数 ----
+
+// getFlattenDir 读取某任务待清理的归档原目录（绝对路径），无则返回空串
+func (m *Manager) getFlattenDir(hash string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec := m.cleanState[hash]; rec != nil {
+		return rec.FlattenDir
+	}
+	return ""
+}
+
+// setFlattenDir 记录待清理的归档原目录并落盘（qB 移动提交成功后调用）
+func (m *Manager) setFlattenDir(hash, dir string) {
+	m.mu.Lock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		rec = &cleanRecord{}
+		m.cleanState[hash] = rec
+	}
+	rec.FlattenDir = dir
+	rec.FlattenAttempts = 0
+	m.mu.Unlock()
+	m.saveCleanState()
+}
+
+// clearFlattenDir 清除归档 pending 记录并落盘
+func (m *Manager) clearFlattenDir(hash string) {
+	m.mu.Lock()
+	if rec := m.cleanState[hash]; rec != nil {
+		rec.FlattenDir = ""
+		rec.FlattenAttempts = 0
+	}
+	m.mu.Unlock()
+	m.saveCleanState()
+}
+
+// bumpFlattenAttempts 自增等待轮数，返回是否已达上限（仅内存计数，不逐轮落盘）
+func (m *Manager) bumpFlattenAttempts(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		return true
+	}
+	rec.FlattenAttempts++
+	return rec.FlattenAttempts >= flattenMaxAttempts
+}
+
+// isStrictSubdir 判断 child 是否为 parent 的严格子目录（不相等、不在其外）。
+// 用作 RemoveAll 前的护栏，杜绝误删保存根或越界路径。
+func isStrictSubdir(parent, child string) bool {
+	if parent == "" || child == "" {
+		return false
+	}
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, "..")
+}
+
+// countVisible 统计目录条目中非隐藏（不以 . 开头）的数量
+func countVisible(entries []os.DirEntry) int {
+	n := 0
+	for _, e := range entries {
+		if e.Name()[0] == '.' {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// conflictFreeName 生成 base_hash8.ext 形式的兜底名（hash 不足 8 位则用全量）
+func conflictFreeName(fileName, hash string) string {
+	ext := filepath.Ext(fileName)
+	base := fileName[:len(fileName)-len(ext)]
+	suffix := hash
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	return base + "_" + suffix + ext
 }
 
 // Reset 重置完成状态（服务重启时调用）
