@@ -267,9 +267,22 @@ const views = {
   settings: renderSettings,
 };
 
+// 从 location.hash 解析目标视图（#/torrents → torrents）；无效 hash 一律回落到概览
+function hashToView() {
+  const m = /^#\/([A-Za-z]+)/.exec(location.hash || "");
+  return m && views[m[1]] ? m[1] : "dashboard";
+}
+
 let currentView = "dashboard";
 async function switchView(name, background = false) {
+  if (!views[name]) name = "dashboard";
   currentView = name;
+  // hash 路由：把 URL 同步成当前页，刷新/分享链接都能停留在原页面；
+  // 后台自动刷新（background）不改 URL。赋值会触发 hashchange，
+  // 监听器里目标与 currentView 相同则忽略，不会重复渲染。
+  if (!background && location.hash !== "#/" + name) {
+    location.hash = "#/" + name;
+  }
   $$(".tab").forEach(b => b.classList.toggle("active", b.dataset.view === name));
   const root = $("#content");
   root.dataset.view = name;
@@ -285,6 +298,12 @@ async function switchView(name, background = false) {
 }
 
 $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.view)));
+
+// 浏览器前进/后退、手动改 hash 时切换到对应页面
+window.addEventListener("hashchange", () => {
+  const v = hashToView();
+  if (v !== currentView) switchView(v);
+});
 
 // ---------- 主题 ----------
 // 三种模式：auto（跟随系统）、dark、light；持久化到 localStorage
@@ -1429,7 +1448,10 @@ async function updateStatus() {
 
 
 // ---------- 启动 ----------
-switchView("dashboard");
+// 初始页面：按 URL hash 决定（刷新不回首页）；hash 缺失/无效时用 replaceState 规范化，不产生多余历史
+const _initView = hashToView();
+if (location.hash !== "#/" + _initView) history.replaceState(null, "", "#/" + _initView);
+switchView(_initView);
 updateStatus();
 setInterval(updateStatus, 30000);
 // 概览/任务页自动刷新（防抖；间隔 8s；后台刷新不清空页面）
