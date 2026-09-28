@@ -206,9 +206,9 @@ func (s *Scheduler) scanCompleted() {
 		logger.Warn.Printf("调度器扫描全部任务失败：%v", err)
 		return
 	}
+	// 只在读写 finished 集合期间持锁：通知是网络 IO，持锁发会拖慢整轮扫描；
+	// 而且下面的 saveFinished 内部还要再加一次锁，持锁调用会自锁死。
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var (
 		total     = len(list)
 		nearDone  int
@@ -239,6 +239,7 @@ func (s *Scheduler) scanCompleted() {
 			newlyDone = append(newlyDone, t)
 		}
 	}
+	s.mu.Unlock()
 
 	// 每次扫描输出汇总日志（一行搞定，6000 条任务也只打一行）
 	logger.Info.Printf("调度器：扫描完成 — 总数=%d 接近完成(>=0.98)=%d 新完成=%d | 跳过原因：状态不匹配=%d 已通知=%d completion_on=0=%d",
