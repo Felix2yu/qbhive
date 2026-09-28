@@ -39,10 +39,18 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 - 按正则匹配任务名称，批量下发上传限速
 - 只对「限速值发生变化」的任务调用 qB API，避免无效请求
 
-### 文件管理（单文件自动归档）
-- 下载完成后若内容目录（5.x `content_path`，回退 `savePath/任务名`）下只有一个文件，自动上移到保存路径并清理空目录
+### 文件管理（自动归档 & 文件名清理）
+- **单文件自动归档**：下载完成后若内容目录（5.x `content_path`，回退 `savePath/任务名`）下只有一个文件，自动上移到保存路径并清理空目录
 - 对全部完成做种态生效（stoppedUP / uploading / stalledUP / queuedUP / forcedUP），不依赖「完成即暂停」设置；校验中（checkingUP）暂缓
 - 优先走 qB 的 `renameFile` API（保持做种一致性），失败时回退本地 `os.Rename`；qB 的磁盘移动是异步的，提交后不立即删目录，留待下一轮确认目录已空再清理，避免误删尚未移动的文件
+- **文件名自动清理**：自动识别并移除下载站附加的域名水印（`www.xxx.com - ` 前缀、`[xxx.com]`/`【xxx.com】` 括号、`@xxx.com` 后缀等）与 emoji / 颜文字装饰（🔥★♥、`(◕‿◕)`、`(╯°□°）╯` 等）；带域名合法性启发式（不误删 `S01E01`、`v1.2.3`、`Movie.2023.GER`），含实文字的括号组（`(2023)`、`【4K】`、假名/韩文）不受影响，覆盖种子内全部文件名与顶层目录名；内置规则 + 自定义正则
+- **AI 格式化**（可选）：正则清洗后调用 OpenAI 兼容接口二次美化文件名，支持本地（Ollama 等）与云端多通道切换、自定义提示词；每任务只调用一次，失败自动降级为仅正则清洗
+- **安全护栏**：保留扩展名、结果非空、不含非法字符；目标已存在时自动加 `_hash8` 兜底名，仍冲突则跳过——**任何情况下绝不覆盖、不删除已有文件**
+- **审计与回退**：每次自动重命名记录在 `data/filemgr_audit.jsonl`，网页「文件」页可查看（时间 / 任务 / 变更 / 方式 / 状态）并一键回退
+- **批量重命名（模板）**：「文件」页选任务 → 输入模板 → 预览 → 执行。变量：`{date}` 完成日期、
+  `{type}` 类型分类（video/audio/image/archive/doc/other）、`{index}` 任务内序号、
+  `{orig}` 原文件名、`{title}` 任务名；仅重命名文件名（扩展名保留），目录名不变；
+  执行时按当前文件列表重新计算，同样写入审计日志、可回退
 
 ### 其它
 - 亮色 / 暗色 / 跟随系统 三主题
@@ -150,7 +158,25 @@ go build -o qbhive ./cmd/server
       { "id": "l1", "name": "限速示例", "enabled": true, "match": "^SomePrefix", "uploadLimit": 512 }
     ]
   },
-  "fileManager": { "enabled": false, "scanInterval": 15 }
+  "fileManager": {
+    "enabled": false,
+    "scanInterval": 15,
+    "cleanEnabled": false,
+    "cleanRules": ["^【[^】]*】\\s*"],
+    "aiEnabled": false,
+    "aiActive": "ai1",
+    "aiChannels": [
+      {
+        "id": "ai1",
+        "name": "本地 Ollama",
+        "baseURL": "http://127.0.0.1:11434/v1",
+        "apiKey": "",
+        "model": "qwen2.5:7b",
+        "prompt": "",
+        "enabled": true
+      }
+    ]
+  }
 }
 ```
 
@@ -171,6 +197,11 @@ go build -o qbhive ./cmd/server
 | `limiter.rules[].match` | 匹配任务名的正则 |
 | `limiter.rules[].uploadLimit` | 命中后的上传限速（KB/s），`0` 表示不限制 |
 | `fileManager.scanInterval` | 单文件归档扫描间隔（秒） |
+| `fileManager.cleanEnabled` | 文件名自动清理开关（默认关闭） |
+| `fileManager.cleanRules` | 自定义清理正则列表（在内置规则之后执行，匹配内容被移除），最多 32 条、单条 ≤256 字符 |
+| `fileManager.aiEnabled` | AI 格式化文件名开关（默认关闭） |
+| `fileManager.aiActive` | 当前使用的 AI 通道 ID；未指定时用第一个启用的通道 |
+| `fileManager.aiChannels[]` | OpenAI 兼容通道（`baseURL`/`apiKey`/`model`/`prompt`），本地与云端皆可；`prompt` 为空用内置默认，支持 `{files}`/`{torrent}` 变量，≤4000 字符 |
 
 ### 环境变量
 
@@ -187,8 +218,9 @@ go build -o qbhive ./cmd/server
 
 1. **概览** —— 速度、状态计数、最近活跃任务
 2. **任务** —— 全量任务浏览、搜索、排序、单任务限速
-3. **RSS** —— 订阅源与规则管理，查看每个源的抓取状态与最近条目
-4. **设置** —— 主题、qBittorrent 连接（可测试连接）、监听地址、限速规则、通知、文件管理，
+3. **文件** —— 文件名审计日志（时间 / 任务 / 变更 / 方式 / 状态），可一键回退任意自动重命名
+4. **RSS** —— 订阅源与规则管理，查看每个源的抓取状态与最近条目
+5. **设置** —— 主题、qBittorrent 连接（可测试连接）、监听地址、限速规则、通知、文件管理，
    改完点「保存全部设置」即热生效
 
 ## 项目结构
@@ -202,11 +234,11 @@ internal/
   notifier/          Apprise-Go 通知
   rss/               RSS 拉取、规则匹配、去重与提交
   limiter/           按规则下发上传限速
-  filemgr/           单文件自动归档
+  filemgr/           单文件自动归档、文件名清理（正则 + AI）、审计与回退
   web/               HTTP API + 鉴权
   models/            配置与数据结构
 web/static/          前端（原生 HTML/CSS/JS）
-data/                运行状态（finished.json / rss_seen.json），不入库
+data/                运行状态（finished.json / rss_seen.json / filemgr_clean.json / filemgr_audit.jsonl），不入库
 ```
 
 ## CI / 发布

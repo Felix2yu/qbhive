@@ -74,6 +74,15 @@ function pageNav(total, page, pageSize, onChange) {
   return `<div class="actions-bar" style="justify-content:center;margin-top:12px;gap:4px">${parts.join("")}</div>`;
 }
 
+// 绑定 pageNav 生成的分页按钮（此前从未绑定，分页按钮一直是死的）
+function bindPageNav(onChange) {
+  $$("[data-p]").forEach(b => {
+    if (b.__bound) return;
+    b.__bound = true;
+    b.addEventListener("click", () => onChange(parseInt(b.dataset.p, 10)));
+  });
+}
+
 
 async function api(method, path, body) {
   const opts = { method, headers: {}, credentials: "include" };
@@ -218,6 +227,34 @@ function validateConfigJS(cfg) {
       }
     }
   }
+  // 文件管理：清理自定义正则 + AI 通道
+  if (c.fileManager) {
+    const fm = c.fileManager;
+    const rules = fm.cleanRules || [];
+    if (rules.length > 32) return "文件名清理自定义规则不能超过 32 条";
+    for (let i = 0; i < rules.length; i++) {
+      if ((rules[i] || "").length > 256) return `文件名清理规则 ${i + 1} 长度超过 256 字符`;
+      if ((rules[i] || "").trim()) {
+        try { new RegExp(rules[i]); } catch (e) {
+          return `文件名清理规则 ${i + 1} 正则无效: ${e.message}`;
+        }
+      }
+    }
+    const chans = fm.aiChannels || [];
+    if (chans.length > 8) return "AI 通道不能超过 8 个";
+    for (const ch of chans) {
+      if (!ch.enabled) continue;
+      if (!/^https?:\/\//.test((ch.baseURL || "").trim())) {
+        return `AI 通道 "${ch.name || ch.id || ""}" 的 BaseURL 必须以 http:// 或 https:// 开头`;
+      }
+      if (!(ch.model || "").trim()) {
+        return `AI 通道 "${ch.name || ch.id || ""}" 未填写模型名`;
+      }
+      if ((ch.prompt || "").length > 4000) {
+        return `AI 通道 "${ch.name || ch.id || ""}" 的提示词超过 4000 字符`;
+      }
+    }
+  }
   return "";
 }
 
@@ -225,6 +262,7 @@ function validateConfigJS(cfg) {
 const views = {
   dashboard: renderDashboard,
   torrents: renderTorrents,
+  files: renderFiles,
   rss: renderRSS,
   settings: renderSettings,
 };
@@ -567,9 +605,8 @@ function renderPage() {
     return;
   }
 
-  body.innerHTML = torrentTable(pageSlice, true) + pageNav(list.length, page, _torrentsState.pageSize, p => {
-    _torrentsState.page = p; renderPage();
-  });
+  body.innerHTML = torrentTable(pageSlice, true) + pageNav(list.length, page, _torrentsState.pageSize);
+  bindPageNav(p => { _torrentsState.page = p; renderPage(); });
   bindLimitButtons();
 }
 
@@ -906,6 +943,28 @@ function syncFormToCfg() {
   c.notifier.fields = $$("[data-nt-field]").filter(n => n.checked).map(n => n.dataset.ntField);
   c.fileManager.enabled = $("#fm-enabled").checked;
   c.fileManager.scanInterval = parseInt($("#fm-interval").value || "15", 10);
+  if ($("#fm-clean-enabled")) {
+    c.fileManager.cleanEnabled = $("#fm-clean-enabled").checked;
+    c.fileManager.cleanRules = ($("#fm-clean-rules").value || "")
+      .split("\n").map(s => s.trim()).filter(Boolean);
+    c.fileManager.aiEnabled = $("#fm-ai-enabled").checked;
+    c.fileManager.aiActive = $("#fm-ai-active").value;
+    // AI 通道：掩码值 "********" 不覆盖原 apiKey（后端按 index 保留真实值）
+    c.fileManager.aiChannels = $$("[data-ai-name]").map(n => {
+      const i = n.dataset.aiName;
+      const oldCh = (c.fileManager.aiChannels || [])[i] || {};
+      const kv = document.querySelector(`[data-ai-key="${i}"]`).value;
+      return {
+        id: oldCh.id || genID(),
+        enabled: document.querySelector(`[data-ai-enabled="${i}"]`).checked,
+        name: n.value,
+        baseURL: document.querySelector(`[data-ai-url="${i}"]`).value.trim(),
+        apiKey: (kv && kv !== "********") ? kv : (oldCh.apiKey || ""),
+        model: document.querySelector(`[data-ai-model="${i}"]`).value.trim(),
+        prompt: document.querySelector(`[data-ai-prompt="${i}"]`).value,
+      };
+    });
+  }
 }
 
 // 只重渲 limiter 规则那一块（加/删规则时调用，不碰整页）
@@ -928,6 +987,52 @@ function renderLimiterRules() {
       </div>`).join("");
   // 重新绑定删除按钮（checkbox/input 的 change 不丢值，不需要重绑）
   $$("[data-lm-del]", box).forEach(b => b.addEventListener("click", onLimDel));
+}
+
+// 只重渲 AI 通道那一块（加/删通道时调用，不碰整页）
+function renderAIChannels() {
+  if (!_settingsCfg) return;
+  const box = $("#ai-channels");
+  if (!box) return;
+  const chans = _settingsCfg.fileManager.aiChannels || [];
+  box.innerHTML = chans.length === 0
+    ? `<div class="empty">暂无 AI 通道。可添加本地（如 Ollama）或云端（OpenAI 兼容）通道。</div>`
+    : chans.map((ch, i) => `
+      <div class="rule-block">
+        <div class="rule-header">
+          <input type="checkbox" data-ai-enabled="${i}" ${ch.enabled ? "checked" : ""}>
+          <input type="text" data-ai-name="${i}" value="${escapeHTML(ch.name || "")}" placeholder="通道名，如 本地 Ollama" style="flex:1;margin:0 12px" />
+          <button class="btn danger small" data-ai-del="${i}">删除</button>
+        </div>
+        <div class="form-row"><label>BaseURL</label><input type="text" data-ai-url="${i}" value="${escapeHTML(ch.baseURL || "")}" placeholder="http://localhost:11434/v1 或 https://api.deepseek.com/v1" /></div>
+        <div class="form-row"><label>API Key</label><input type="password" data-ai-key="${i}" value="${escapeHTML(ch.apiKey || "")}" placeholder="本地模型可留空" /></div>
+        <div class="form-row"><label>模型</label><input type="text" data-ai-model="${i}" value="${escapeHTML(ch.model || "")}" placeholder="qwen2.5:7b / deepseek-chat / gpt-4o-mini" /></div>
+        <div class="form-row"><label>提示词</label>
+          <div style="flex:1">
+            <textarea data-ai-prompt="${i}" placeholder="留空使用内置默认提示词。支持变量 {files}（文件名 JSON 数组）与 {torrent}（任务名），要求模型只输出 JSON 映射。">${escapeHTML(ch.prompt || "")}</textarea>
+          </div>
+        </div>
+      </div>`).join("");
+  $$("[data-ai-del]", box).forEach(b => b.addEventListener("click", onAIDel));
+  // 当前使用通道下拉
+  const sel = $("#fm-ai-active");
+  if (sel) {
+    const cur = _settingsCfg.fileManager.aiActive;
+    sel.innerHTML = chans.map(ch =>
+      `<option value="${escapeHTML(ch.id)}" ${ch.id === cur ? "selected" : ""}>${escapeHTML(ch.name || ch.id)}${ch.enabled ? "" : "（未启用）"}</option>`
+    ).join("") || `<option value="">（无通道）</option>`;
+  }
+}
+
+function onAIDel() {
+  syncFormToCfg();
+  const idx = parseInt(this.dataset.aiDel, 10);
+  const removed = _settingsCfg.fileManager.aiChannels.splice(idx, 1)[0];
+  // 删除的是当前活动通道时重置选择
+  if (removed && _settingsCfg.fileManager.aiActive === removed.id) {
+    _settingsCfg.fileManager.aiActive = (_settingsCfg.fileManager.aiChannels.find(ch => ch.enabled) || {}).id || "";
+  }
+  renderAIChannels();
 }
 
 async function renderSettings(root) {
@@ -1019,11 +1124,31 @@ async function renderSettings(root) {
 
     <!-- 文件管理 -->
     <div class="card">
-      <h2>文件管理（单文件自动归档）</h2>
+      <h2>文件管理（自动归档 & 文件名清理）</h2>
       <div class="form-row"><label class="inline-check"><input type="checkbox" id="fm-enabled" ${cfg.fileManager.enabled ? "checked" : ""}> 启用</label>
         <div class="form-row" style="margin:0"><label>扫描间隔 (秒)</label><input type="number" id="fm-interval" value="${cfg.fileManager.scanInterval || 15}" min="1" style="width:100px"/></div>
       </div>
-      <div style="color:var(--text-dim);font-size:12px;margin-left:160px">完成的下载如果 savePath/torrentName/ 下只有一个文件，会自动上移并清理空目录。</div>
+      <div class="hint" style="margin-left:160px">完成的下载如果 savePath/torrentName/ 下只有一个文件，会自动上移并清理空目录。</div>
+
+      <div class="form-row" style="margin-top:16px"><label class="inline-check"><input type="checkbox" id="fm-clean-enabled" ${cfg.fileManager.cleanEnabled ? "checked" : ""}> 文件名自动清理</label></div>
+      <div class="form-row"><label>自定义清理正则</label>
+        <div style="flex:1">
+          <textarea id="fm-clean-rules" placeholder="每行一个正则（Go/RE2 语法），匹配内容会被移除，例如：
+^【[^】]*】\s*
+\s*-\s*4KHDR.*$">${escapeHTML((cfg.fileManager.cleanRules || []).join("\n"))}</textarea>
+          <div class="hint">内置规则已覆盖常见站点水印（<code>www.xxx.com - </code> 前缀、<code>[xxx.com]</code>/<code>【xxx.com】</code> 括号、<code>@xxx.com</code> 后缀等），自定义规则在内置规则之后执行。清洗保证：保留扩展名、结果非空、不含非法字符；通过 qBittorrent 重命名接口执行，不影响做种；所有改动记录在「文件」页，可回退。</div>
+        </div>
+      </div>
+
+      <div class="form-row" style="margin-top:16px"><label class="inline-check"><input type="checkbox" id="fm-ai-enabled" ${cfg.fileManager.aiEnabled ? "checked" : ""}> AI 格式化文件名</label>
+        <div class="form-row" style="margin:0">
+          <label>当前使用通道</label>
+          <select id="fm-ai-active" style="width:220px"></select>
+          <button class="btn" id="ai-add">+ 添加通道</button>
+        </div>
+      </div>
+      <div id="ai-channels"></div>
+      <div class="hint" style="margin-left:160px">AI 格式化在正则清洗之后执行，对每个任务只调用一次（批量传入文件名），失败自动重试最多 3 轮后降级为仅正则清洗。任何 OpenAI 兼容接口均可（本地 Ollama / 云端服务）。</div>
     </div>
 
     <!-- 保存 -->
@@ -1034,8 +1159,9 @@ async function renderSettings(root) {
     </div>
   `;
 
-  // 首次渲染 limiter 规则
+  // 首次渲染 limiter 规则与 AI 通道
   renderLimiterRules();
+  renderAIChannels();
 
   // --- 主题按钮高亮 + 事件 ---
   applyTheme(getTheme());
@@ -1060,6 +1186,15 @@ async function renderSettings(root) {
   };
 
   $$("[data-lm-del]").forEach(b => b.addEventListener("click", onLimDel));
+
+  $("#ai-add").onclick = () => {
+    syncFormToCfg();
+    const chans = _settingsCfg.fileManager.aiChannels;
+    const ch = { id: genID(), name: `通道 ${chans.length + 1}`, baseURL: "", apiKey: "", model: "", prompt: "", enabled: true };
+    chans.push(ch);
+    _settingsCfg.fileManager.aiActive = ch.id;
+    renderAIChannels();
+  };
 
   $("#nt-test").onclick = async () => {
     syncFormToCfg();
@@ -1091,6 +1226,185 @@ function onLimDel() {
   _settingsCfg.limiter.rules.splice(idx, 1);
   renderLimiterRules();
 }
+
+// ---------- 文件（重命名审计与回退）----------
+const _filesState = { page: 1, pageSize: 20 };
+
+const AUDIT_STATUS = {
+  committed:  { t: "已提交", c: "var(--warn)" },
+  confirmed:  { t: "已生效", c: "var(--success)" },
+  failed:     { t: "失败", c: "var(--err, #e05555)" },
+  rolledback: { t: "已回退", c: "var(--text-dim)" },
+};
+
+function fmtTime(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+async function renderFiles(root, background = false) {
+  root.innerHTML = `
+    ${batchCard()}
+    <div id="audit-card"><div style="color:var(--text-dim);font-size:12px">加载审计日志…</div></div>`;
+  bindBatchCard(root);
+  await renderAudit($("#audit-card", root));
+}
+
+// ---------- 批量重命名（模板）----------
+
+const BR_VAR_HINT = "{date} 完成日期 · {type} 类型（video/audio/image/archive/doc/other） · {index} 任务内序号 · {orig} 原文件名 · {title} 任务名";
+
+function batchCard() {
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <div class="actions-bar">
+        <h2 style="margin:0">批量重命名</h2>
+        <span style="color:var(--text-dim);font-size:12px">先预览再执行；目标已存在时自动加后缀兜底，绝不覆盖</span>
+      </div>
+      <div class="actions-bar" style="gap:12px;flex-wrap:wrap;margin:12px 0 4px 0">
+        <div class="form-row" style="margin:0;flex:1;min-width:280px"><label>任务</label>
+          <select id="br-torrent" style="flex:1;min-width:200px"><option value="">加载中…</option></select>
+        </div>
+        <div class="form-row" style="margin:0;flex:2;min-width:320px"><label>模板</label>
+          <input type="text" id="br-template" placeholder="例：{date}_{type}_{index}_{orig}" style="flex:1;min-width:240px" />
+        </div>
+        <button class="btn small" id="br-preview">预览</button>
+        <button class="btn small" id="br-apply" disabled>执行重命名</button>
+      </div>
+      <div style="color:var(--text-dim);font-size:12px">变量：${BR_VAR_HINT}。仅重命名文件名（扩展名保留），目录名不变；{index} 按任务文件列表从 1 起编；执行时按当前文件列表重新计算。</div>
+      <div id="br-result" style="margin-top:10px"></div>
+    </div>`;
+}
+
+async function bindBatchCard(root) {
+  const sel = $("#br-torrent", root);
+  const tplInput = $("#br-template", root);
+  const resultBox = $("#br-result", root);
+  const applyBtn = $("#br-apply", root);
+  tplInput.value = localStorage.getItem("qbhive_batch_tpl") || "";
+  try {
+    const r = await api("GET", "/torrents?filter=all&limit=0");
+    const list = r.data || [];
+    sel.innerHTML = list.length === 0
+      ? `<option value="">暂无任务</option>`
+      : `<option value="">— 选择任务 —</option>` + list.map(t =>
+          `<option value="${escapeHTML(t.hash)}">${escapeHTML(t.name)}</option>`).join("");
+  } catch {
+    sel.innerHTML = `<option value="">任务列表加载失败</option>`;
+  }
+
+  let lastPlan = null;
+  $("#br-preview", root).onclick = async () => {
+    const hash = sel.value, tpl = tplInput.value.trim();
+    if (!hash) return toast("请先选择任务", "err");
+    if (!tpl) return toast("请输入模板", "err");
+    localStorage.setItem("qbhive_batch_tpl", tpl);
+    resultBox.innerHTML = `<div style="color:var(--text-dim);font-size:12px">生成预览中…</div>`;
+    const r = await api("POST", "/filemgr/batch/preview", { hash, template: tpl });
+    if (!r.success) {
+      lastPlan = null; applyBtn.disabled = true;
+      resultBox.innerHTML = `<div style="color:var(--danger);font-size:12px">预览失败：${escapeHTML(r.message || "未知错误")}</div>`;
+      return;
+    }
+    lastPlan = r.data.plan || [];
+    if (lastPlan.length === 0) {
+      applyBtn.disabled = true;
+      resultBox.innerHTML = `<div class="empty">没有需要重命名的文件（模板产出与现名一致，或任务无文件）。</div>`;
+      return;
+    }
+    const rows = lastPlan.map(p => `
+      <div class="torrent-row no-actions" style="grid-template-columns:1fr 1fr;font-size:12px">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(p.old)}">${escapeHTML(p.old)}</span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(p.new)}"><span style="color:var(--text-dim)">→</span> <b>${escapeHTML(p.new)}</b></span>
+      </div>`).join("");
+    resultBox.innerHTML = `
+      <div class="torrent-row no-actions" style="grid-template-columns:1fr 1fr;font-weight:600">
+        <span>当前文件名（共 ${lastPlan.length} 条）</span><span>新文件名</span>
+      </div>${rows}`;
+    applyBtn.disabled = false;
+  };
+
+  applyBtn.onclick = async () => {
+    const hash = sel.value, tpl = tplInput.value.trim();
+    if (!hash || !tpl) return;
+    if (!lastPlan || lastPlan.length === 0) return toast("请先预览", "err");
+    if (!confirm(`确认按模板重命名 ${lastPlan.length} 个文件？\n执行时将按任务当前文件列表重新计算；改动会写入审计日志，可回退。`)) return;
+    applyBtn.disabled = true;
+    const r = await api("POST", "/filemgr/batch/apply", { hash, template: tpl });
+    toast(r.message || (r.success ? "已提交 ✓" : "执行失败"), r.success ? "ok" : "err");
+    if (r.success) {
+      lastPlan = null;
+      resultBox.innerHTML = "";
+      renderAudit($("#audit-card", root));
+    } else {
+      applyBtn.disabled = false;
+    }
+  };
+}
+
+async function renderAudit(root) {
+  const offset = (_filesState.page - 1) * _filesState.pageSize;
+  const r = await api("GET", `/filemgr/audit?limit=${_filesState.pageSize}&offset=${offset}`);
+  if (!r.success) {
+    root.innerHTML = `<div class="empty">加载审计日志失败：${escapeHTML(r.message || "")}</div>`;
+    return;
+  }
+  const { entries = [], total = 0 } = r.data || {};
+
+  const rows = entries.length === 0
+    ? `<div class="empty">暂无重命名记录。启用「设置 → 文件管理 → 文件名自动清理」后，改动会记录在这里。</div>`
+    : entries.map(e => {
+        const st = AUDIT_STATUS[e.status] || { t: e.status, c: "var(--text-dim)" };
+        const canRollback = e.status === "committed" || e.status === "confirmed";
+        return `
+        <div class="torrent-row" style="grid-template-columns:140px 1fr 2.2fr 70px 76px 86px">
+          <span style="color:var(--text-dim);font-size:12px">${fmtTime(e.ts)}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(e.torrent)}">${escapeHTML(e.torrent)}</span>
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">
+            ${escapeHTML(e.old)} <span style="color:var(--text-dim)">→</span> <b>${escapeHTML(e.new)}</b>
+          </span>
+          <span style="color:var(--text-dim);font-size:12px">${e.via === "ai" ? "AI" : "正则"}</span>
+          <span class="state-tag" style="color:${st.c}">${st.t}</span>
+          <span>${canRollback
+            ? `<button class="btn small" data-audit-rollback="${escapeHTML(e.id)}">回退</button>`
+            : ""}</span>
+        </div>`;
+      }).join("");
+
+  const head = `
+    <div class="torrent-row no-actions" style="grid-template-columns:140px 1fr 2.2fr 70px 76px 86px;font-weight:600">
+      <span>时间</span><span>任务</span><span>文件名变更</span><span>方式</span><span>状态</span><span></span>
+    </div>`;
+
+  root.innerHTML = `
+    <div class="card">
+      <div class="actions-bar">
+        <h2 style="margin:0">文件名审计日志</h2>
+        <div class="spacer"></div>
+        <span style="color:var(--text-dim);font-size:12px">共 ${total} 条 · 保留最近 2000 条</span>
+        <button class="btn small" id="audit-reload">刷新</button>
+      </div>
+      ${head}
+      ${rows}
+      ${pageNav(total, _filesState.page, _filesState.pageSize)}
+    </div>`;
+
+  bindPageNav(p => { _filesState.page = p; renderAudit(root); });
+  $("#audit-reload", root).onclick = () => renderAudit(root);
+  $$("[data-audit-rollback]", root).forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.auditRollback;
+      if (!confirm("确认回退这条重命名？文件名将恢复为修改前的名称。")) return;
+      b.disabled = true;
+      const res = await api("POST", "/filemgr/audit/rollback", { id });
+      toast(res.message || (res.success ? "回退已提交 ✓" : "回退失败"), res.success ? "ok" : "err");
+      renderAudit(root);
+    };
+  });
+}
+
 // ---------- 状态 ----------
 async function updateStatus() {
   try {

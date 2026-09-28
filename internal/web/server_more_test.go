@@ -226,7 +226,7 @@ func newFullServer(t *testing.T, cfg *config.Manager, authToken string) *Server 
 	fm := filemgr.New(cfg, qbCli)
 	sch := scheduler.New(cfg, qbCli, notif, lim, fm, rssE)
 
-	srv := New(cfg, qbCli, lim, rssE, notif, sch)
+	srv := New(cfg, qbCli, lim, rssE, notif, sch, fm)
 	srv.authToken = authToken // 直接设，绕过 env 依赖（与 setupTestServer 保持一致）
 	return srv
 }
@@ -341,7 +341,7 @@ func TestNew_EnvTokenEnablesAuth(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 
 	t.Setenv("QBHIVE_TOKEN", "env-secret")
-	srv := New(config.New(cfgPath), nil, nil, nil, nil, nil)
+	srv := New(config.New(cfgPath), nil, nil, nil, nil, nil, nil)
 	if srv.authToken != "env-secret" {
 		t.Errorf("QBHIVE_TOKEN 已设置，authToken 应为 env-secret，实际 %q", srv.authToken)
 	}
@@ -350,7 +350,7 @@ func TestNew_EnvTokenEnablesAuth(t *testing.T) {
 	}
 
 	t.Setenv("QBHIVE_TOKEN", "")
-	srv2 := New(config.New(cfgPath), nil, nil, nil, nil, nil)
+	srv2 := New(config.New(cfgPath), nil, nil, nil, nil, nil, nil)
 	if srv2.authToken != "" {
 		t.Errorf("QBHIVE_TOKEN 为空时应不鉴权，实际 %q", srv2.authToken)
 	}

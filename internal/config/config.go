@@ -31,6 +31,7 @@ var (
 		FileManager: models.FileManagerConfig{
 			Enabled:      false,
 			ScanInterval: 15,
+			CleanEnabled: false,
 		},
 	}
 )

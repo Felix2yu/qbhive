@@ -147,7 +147,7 @@ func setupTestServer(t *testing.T, qbURL string, authToken string) *Server {
 	} else {
 		qbCli = qb.New("http://localhost", "", "", "")
 	}
-	srv := New(cfg, qbCli, nil, nil, notifier.New(models.NotifierConfig{Enabled: false}), nil)
+	srv := New(cfg, qbCli, nil, nil, notifier.New(models.NotifierConfig{Enabled: false}), nil, nil)
 	srv.authToken = authToken // 直接设，绕过 env 依赖
 	// 不手动 make tcache：必须依赖 New() 的初始化，
 	// 否则会掩盖 "nil map 写 panic -> listTorrents 500" 这类回归

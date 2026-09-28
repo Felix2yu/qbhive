@@ -1,9 +1,14 @@
 package filemgr
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
@@ -23,10 +28,46 @@ type Manager struct {
 
 	// 上一周期已完成的 hash 集合，避免重复通知/处理
 	done map[string]bool
+
+	// ---- 文件名自动清理（clean pass）----
+	mu         sync.Mutex
+	statePath  string                  // data/filemgr_clean.json
+	cleanState map[string]*cleanRecord // hash → 清理进度（持久化，重启不丢）
+	rulesCache []*regexp.Regexp        // 自定义规则编译缓存
+	rulesKey   string                  // rulesCache 对应的规则指纹
+	audit      *auditLog               // 重命名审计日志
+}
+
+// cleanRecord 单个任务的清理进度
+type cleanRecord struct {
+	Pending    []cleanRename `json:"pending,omitempty"`  // 已提交待确认落地的重命名
+	Done       bool          `json:"done,omitempty"`     // 已无待办且全部落地
+	AiAttempts int           `json:"aiAttempts,omitempty"`
+	AISettled  bool          `json:"aiSettled,omitempty"` // AI 已成功调用过 / 无可用通道 / 重试耗尽
+}
+
+const cleanStateFile = "filemgr_clean.json"
+
+// defaultCleanStatePath 推导清理状态文件路径（与 scheduler 的 finished.json 同目录规则）
+func defaultCleanStatePath() string {
+	if cfg := os.Getenv("QBHIVE_CONFIG"); cfg != "" {
+		return filepath.Join(filepath.Dir(cfg), cleanStateFile)
+	}
+	return filepath.Join("data", cleanStateFile)
 }
 
 func New(cfg *config.Manager, client *qb.Client) *Manager {
-	return &Manager{cfg: cfg, client: client, stop: make(chan struct{}), done: make(map[string]bool)}
+	m := &Manager{
+		cfg:        cfg,
+		client:     client,
+		stop:       make(chan struct{}),
+		done:       make(map[string]bool),
+		statePath:  defaultCleanStatePath(),
+		cleanState: make(map[string]*cleanRecord),
+	}
+	m.loadCleanState()
+	m.audit = newAuditLog(defaultAuditPath())
+	return m
 }
 
 // SetClient 热替换 qb 客户端
@@ -91,6 +132,7 @@ func (m *Manager) runTicker(interval time.Duration) {
 
 func (m *Manager) Stop() {
 	close(m.stop)
+	m.saveCleanState()
 }
 
 func (m *Manager) scan() {
@@ -100,6 +142,11 @@ func (m *Manager) scan() {
 		return
 	}
 	for _, t := range list {
+		// clean pass 先于 flatten：文件名清理独立于单文件归档，
+		// flatten 已 done 的任务照样进入清理（文件躺在 save_path 根也常带域名）
+		if m.cfg.Get().FileManager.CleanEnabled {
+			m.handleClean(t)
+		}
 		if m.done[t.Hash] {
 			continue
 		}
@@ -244,4 +291,282 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 // Reset 重置完成状态（服务重启时调用）
 func (m *Manager) Reset() {
 	m.done = make(map[string]bool)
+}
+
+// ---- 文件名自动清理（clean pass）----
+
+// ensureRules 规则指纹变化时重新编译自定义规则（仅 scan goroutine 调用，无并发）
+func (m *Manager) ensureRules() {
+	rules := m.cfg.Get().FileManager.CleanRules
+	key := strings.Join(rules, "\x00")
+	if key == m.rulesKey {
+		return
+	}
+	m.rulesKey = key
+	m.rulesCache = compileCleanRules(rules)
+}
+
+// handleClean 处理单个任务的文件名清理：核销 pending → AI（可选）→ 构建计划 →
+// Stop → 批量 renameFile → Start。全程不覆盖任何已存在的文件。
+func (m *Manager) handleClean(t models.QBTorrent) {
+	cfg := m.cfg.Get().FileManager
+	m.mu.Lock()
+	rec := m.cleanState[t.Hash]
+	if rec == nil {
+		rec = &cleanRecord{}
+		m.cleanState[t.Hash] = rec
+	}
+	if rec.Done {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	files, err := m.client.GetTorrentFiles(t.Hash)
+	if err != nil {
+		logger.Warn.Printf("文件清理 [%s] 获取文件列表失败：%v，下轮重试", t.Name, err)
+		return
+	}
+	changed := false
+
+	// 1) 核销 pending：qB renameFile 异步，按 base 名消失判定落地（防父目录改名误判）
+	m.mu.Lock()
+	if len(rec.Pending) > 0 {
+		baseSet := make(map[string]bool, len(files))
+		for _, f := range files {
+			baseSet[path.Base(f.Name)] = true
+		}
+		var remaining []cleanRename
+		for _, p := range rec.Pending {
+			if !baseSet[path.Base(p.Old)] {
+				logger.Info.Printf("文件清理 [%s] 已确认重命名落地 %s → %s", t.Name, p.Old, p.New)
+				if p.AuditID != "" {
+					m.audit.UpdateStatus(p.AuditID, AuditConfirmed)
+				}
+				changed = true
+				continue
+			}
+			p.Attempts++
+			if p.Attempts >= 3 {
+				logger.Warn.Printf("文件清理 [%s] 放弃重命名 %s（连续 %d 轮未确认落地）", t.Name, p.Old, p.Attempts)
+				if p.AuditID != "" {
+					m.audit.UpdateStatus(p.AuditID, AuditFailed)
+				}
+				changed = true
+				continue
+			}
+			remaining = append(remaining, p)
+		}
+		rec.Pending = remaining
+	}
+	m.mu.Unlock()
+
+	// 2) 规则编译缓存
+	m.ensureRules()
+
+	// 3) AI 格式化（每任务一次，失败重试至多 3 轮后降级为仅正则清洗）
+	var aiNames map[string]string
+	aiPending := false
+	if cfg.AIEnabled {
+		m.mu.Lock()
+		settled := rec.AISettled
+		m.mu.Unlock()
+		if !settled {
+			ch := activeAIChannel(cfg)
+			if ch == nil {
+				m.mu.Lock()
+				rec.AISettled = true
+				m.mu.Unlock()
+				changed = true
+			} else {
+				names := collectAINames(files, m.rulesCache)
+				aiNames = aiFormatNames(*ch, names, t.Name)
+				m.mu.Lock()
+				if aiNames != nil {
+					rec.AISettled = true
+				} else {
+					rec.AiAttempts++
+					if rec.AiAttempts >= aiMaxAttempts {
+						logger.Warn.Printf("文件清理 [%s] AI 连续 %d 次失败，降级为仅正则清洗", t.Name, rec.AiAttempts)
+						rec.AISettled = true
+					} else {
+						aiPending = true
+					}
+				}
+				m.mu.Unlock()
+				changed = true
+			}
+		}
+	}
+
+	// 4) 构建清洗计划（bottom-up 排序 + 计划内去重 + 磁盘冲突兜底，绝不覆盖）
+	plan := buildCleanPlan(files, m.rulesCache, aiNames, t.SavePath, t.Hash)
+	if len(plan) == 0 {
+		m.mu.Lock()
+		if len(rec.Pending) == 0 && !aiPending {
+			rec.Done = true
+			m.mu.Unlock()
+			logger.Info.Printf("文件清理 [%s] 已完成（无待清理项）", t.Name)
+			m.saveCleanState()
+			return
+		}
+		m.mu.Unlock()
+		if changed {
+			m.saveCleanState()
+		}
+		return
+	}
+
+	// 5) 应用：一次 Stop → 批量 rename → 必然 Start
+	committed := m.applyRenames(t.Hash, plan)
+	if len(committed) > 0 {
+		for i := range committed {
+			e := m.audit.Append(auditEntry{
+				Hash:    t.Hash,
+				Torrent: t.Name,
+				Old:     committed[i].Old,
+				New:     committed[i].New,
+				Via:     committed[i].Via,
+				Status:  AuditCommitted,
+			})
+			committed[i].AuditID = e.ID
+		}
+		m.mu.Lock()
+		rec.Pending = append(rec.Pending, committed...)
+		m.mu.Unlock()
+		m.saveCleanState()
+		logger.Info.Printf("文件清理 [%s] 本轮提交 %d 条重命名", t.Name, len(committed))
+	} else if changed {
+		m.saveCleanState()
+	}
+}
+
+// applyRenames 一次 Stop → 逐条 RenameFile → 必然 Start。
+// 返回提交成功的条目（失败的条目下轮重试）；任何情况下不覆盖已有文件
+// （冲突已在 buildCleanPlan 预检兜底）。
+func (m *Manager) applyRenames(hash string, plan []cleanRename) []cleanRename {
+	if err := m.client.StopTorrents(hash); err != nil {
+		logger.Warn.Printf("文件清理：停止任务 %s 失败：%v", hash, err)
+	}
+	var committed []cleanRename
+	for _, r := range plan {
+		if err := m.client.RenameFile(hash, r.Old, r.New); err != nil {
+			logger.Warn.Printf("文件清理：renameFile 失败（%s → %s）：%v，下轮重试", r.Old, r.New, err)
+			continue
+		}
+		logger.Info.Printf("文件清理：提交重命名 %s → %s（%s）", r.Old, r.New, r.Via)
+		committed = append(committed, r)
+	}
+	if err := m.client.StartTorrents(hash); err != nil {
+		logger.Warn.Printf("文件清理：恢复任务 %s 失败：%v", hash, err)
+	}
+	return committed
+}
+
+// RollbackAudit 回退一条审计记录（new → old）。绝不覆盖：目标旧名在任务文件
+// 列表或磁盘上已存在时拒绝回退。回退后该任务标记 Done，避免 clean pass
+// 下一轮立刻把带水印的旧名再改回去。
+func (m *Manager) RollbackAudit(id string) error {
+	e, ok := m.audit.Get(id)
+	if !ok {
+		return fmt.Errorf("审计记录不存在")
+	}
+	if e.Status == AuditRolledback {
+		return fmt.Errorf("该记录已回退过")
+	}
+	if e.Status != AuditCommitted && e.Status != AuditConfirmed {
+		return fmt.Errorf("状态为 %s 的记录不可回退", e.Status)
+	}
+	list, err := m.client.GetTorrents("all", "", "")
+	if err != nil {
+		return fmt.Errorf("获取任务列表失败：%w", err)
+	}
+	var tor *models.QBTorrent
+	for i := range list {
+		if list[i].Hash == e.Hash {
+			tor = &list[i]
+			break
+		}
+	}
+	if tor == nil {
+		return fmt.Errorf("任务已从 qBittorrent 删除，无法回退")
+	}
+	files, err := m.client.GetTorrentFiles(e.Hash)
+	if err != nil {
+		return fmt.Errorf("获取文件列表失败：%w", err)
+	}
+	foundNew, foundOld := false, false
+	for _, f := range files {
+		b := path.Base(f.Name)
+		if b == path.Base(e.New) {
+			foundNew = true
+		}
+		if b == path.Base(e.Old) {
+			foundOld = true
+		}
+	}
+	if !foundNew {
+		return fmt.Errorf("当前文件列表中找不到 %s，可能已被其他操作修改", path.Base(e.New))
+	}
+	if foundOld {
+		return fmt.Errorf("旧名 %s 已存在于任务中，拒绝回退（绝不覆盖）", path.Base(e.Old))
+	}
+	dst := filepath.Join(tor.SavePath, filepath.FromSlash(e.Old))
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("磁盘上已存在 %s，拒绝回退（绝不覆盖）", e.Old)
+	}
+	committed := m.applyRenames(e.Hash, []cleanRename{{Old: e.New, New: e.Old, Via: e.Via}})
+	if len(committed) == 0 {
+		return fmt.Errorf("renameFile 提交失败，详见服务日志")
+	}
+	m.audit.UpdateStatus(id, AuditRolledback)
+	m.mu.Lock()
+	if rec := m.cleanState[e.Hash]; rec != nil {
+		rec.Pending = nil
+		rec.Done = true
+	}
+	m.mu.Unlock()
+	m.saveCleanState()
+	logger.Info.Printf("审计回退 [%s] 已提交 %s → %s", e.Torrent, e.New, e.Old)
+	return nil
+}
+
+// AuditList 供 web 层分页查询审计记录（倒序）
+func (m *Manager) AuditList(offset, limit int) ([]auditEntry, int) {
+	return m.audit.List(offset, limit)
+}
+
+// loadCleanState 从 data/filemgr_clean.json 加载清理进度
+func (m *Manager) loadCleanState() {
+	data, err := os.ReadFile(m.statePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warn.Printf("文件管理读取清理状态失败：%v", err)
+		}
+		return
+	}
+	if err := json.Unmarshal(data, &m.cleanState); err != nil {
+		logger.Warn.Printf("文件管理解析清理状态失败：%v", err)
+		return
+	}
+	logger.Info.Printf("文件管理已加载 %d 条清理状态", len(m.cleanState))
+}
+
+// saveCleanState 原子写清理进度（tmp + rename）
+func (m *Manager) saveCleanState() {
+	m.mu.Lock()
+	data, err := json.Marshal(m.cleanState)
+	m.mu.Unlock()
+	if err != nil {
+		logger.Warn.Printf("文件管理序列化清理状态失败：%v", err)
+		return
+	}
+	dir := filepath.Dir(m.statePath)
+	_ = os.MkdirAll(dir, 0o755)
+	tmp := m.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		logger.Warn.Printf("文件管理写入清理状态失败：%v", err)
+		return
+	}
+	_ = os.Rename(tmp, m.statePath)
 }

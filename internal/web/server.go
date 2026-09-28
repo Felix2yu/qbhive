@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
+	"github.com/Felix2yu/qbhive/internal/filemgr"
 	"github.com/Felix2yu/qbhive/internal/limiter"
 	"github.com/Felix2yu/qbhive/internal/models"
 	"github.com/Felix2yu/qbhive/internal/notifier"
@@ -34,6 +35,7 @@ type Server struct {
 	rssEngine *rss.Engine
 	notifier  *notifier.Notifier
 	scheduler *scheduler.Scheduler
+	fileMgr   *filemgr.Manager
 	httpSrv   *http.Server
 
 	// 鉴权 token（从环境变量 QBHIVE_TOKEN 读取；空则不鉴权，向后兼容）
@@ -92,7 +94,7 @@ var stateFilterSets = map[string]map[string]bool{
 	"stoppedDL": {"stoppedDL": true},
 }
 
-func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngine *rss.Engine, not *notifier.Notifier, sch *scheduler.Scheduler) *Server {
+func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngine *rss.Engine, not *notifier.Notifier, sch *scheduler.Scheduler, fm *filemgr.Manager) *Server {
 	token := strings.TrimSpace(os.Getenv("QBHIVE_TOKEN"))
 	if token != "" {
 		fmt.Println("[qbhive] Web auth enabled (QBHIVE_TOKEN set); UI will require login")
@@ -104,6 +106,7 @@ func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngi
 		rssEngine: rssEngine,
 		notifier:  not,
 		scheduler: sch,
+		fileMgr:   fm,
 		authToken: token,
 		// tcache 必须显式初始化：Go 的 nil map 读安全但写会 panic，
 		// listTorrents 每次缓存 miss 后写缓存，未初始化会导致 500 空响应
@@ -181,6 +184,12 @@ func (s *Server) Start(webRoot string) error {
 		api.POST("/rss/force", s.forceRSS)
 
 		api.POST("/notify/test", s.testNotify)
+
+		// 文件管理：重命名审计日志与回退、批量重命名（模板）
+		api.GET("/filemgr/audit", s.filemgrAudit)
+		api.POST("/filemgr/audit/rollback", s.filemgrRollback)
+		api.POST("/filemgr/batch/preview", s.filemgrBatchPreview)
+		api.POST("/filemgr/batch/apply", s.filemgrBatchApply)
 	}
 
 	if webRoot != "" {
@@ -233,6 +242,12 @@ func (s *Server) getConfig(c *gin.Context) {
 	}
 	if cfg.Qbittorrent.APIKey != "" {
 		cfg.Qbittorrent.APIKey = "********"
+	}
+	// AI 通道 APIKey 与 qB 凭据同一套掩码逻辑
+	for i := range cfg.FileManager.AIChannels {
+		if cfg.FileManager.AIChannels[i].APIKey != "" {
+			cfg.FileManager.AIChannels[i].APIKey = "********"
+		}
 	}
 	// AppriseURLs 不做掩码：掩码容易导致"用户改了又丢 / 没改又被固化"的各种状态不一致问题。
 	// 密码/APIKey 掩码是因为输入敏感、输错了要改回来；Apprise URL 是复制粘贴用的，
@@ -305,6 +320,38 @@ func validateConfig(in *models.AppConfig) string {
 			}
 		}
 	}
+	// 文件管理：清理自定义正则
+	if len(in.FileManager.CleanRules) > 32 {
+		return "文件名清理自定义规则数量不能超过 32 条"
+	}
+	for i, r := range in.FileManager.CleanRules {
+		if len(r) > 256 {
+			return fmt.Sprintf("文件名清理规则 %d 长度超过 256 字符", i+1)
+		}
+		if strings.TrimSpace(r) != "" {
+			if _, err := regexp.Compile(r); err != nil {
+				return fmt.Sprintf("文件名清理规则 %d 正则无效: %v", i+1, err)
+			}
+		}
+	}
+	// 文件管理：AI 通道
+	if len(in.FileManager.AIChannels) > 8 {
+		return "AI 通道数量不能超过 8 个"
+	}
+	for _, ch := range in.FileManager.AIChannels {
+		if !ch.Enabled {
+			continue
+		}
+		if !(strings.HasPrefix(ch.BaseURL, "http://") || strings.HasPrefix(ch.BaseURL, "https://")) {
+			return fmt.Sprintf("AI 通道 %s 的 BaseURL 必须以 http:// 或 https:// 开头", ch.Name)
+		}
+		if strings.TrimSpace(ch.Model) == "" {
+			return fmt.Sprintf("AI 通道 %s 未填写模型名", ch.Name)
+		}
+		if len(ch.Prompt) > 4000 {
+			return fmt.Sprintf("AI 通道 %s 的提示词超过 4000 字符", ch.Name)
+		}
+	}
 	return ""
 }
 
@@ -339,6 +386,18 @@ func (s *Server) saveConfig(c *gin.Context) {
 			}
 		}
 		in.Notifier.AppriseURLs = cleaned
+	}
+	// AI 通道 APIKey 掩码还原；同时为缺少 ID 的通道补 ID
+	for i := range in.FileManager.AIChannels {
+		ch := &in.FileManager.AIChannels[i]
+		if strings.TrimSpace(ch.APIKey) == "" || ch.APIKey == "********" {
+			if i < len(cur.FileManager.AIChannels) {
+				ch.APIKey = cur.FileManager.AIChannels[i].APIKey
+			}
+		}
+		if strings.TrimSpace(ch.ID) == "" {
+			ch.ID = fmt.Sprintf("ai-%d-%s", time.Now().UnixMilli(), strings.ToLower(RandomID()[:6]))
+		}
 	}
 	s.cfg.Set(in)
 	if err := s.cfg.Save(); err != nil {
@@ -743,4 +802,104 @@ func RandomID() string {
 		return "0000000000000000"
 	}
 	return hex.EncodeToString(b)
+}
+
+// filemgrAudit 分页返回重命名审计日志（倒序，最新在前）
+func (s *Server) filemgrAudit(c *gin.Context) {
+	if s.fileMgr == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "文件管理模块未加载"})
+		return
+	}
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	entries, total := s.fileMgr.AuditList(offset, limit)
+	c.JSON(200, models.APIResponse{Success: true, Data: map[string]interface{}{
+		"entries": entries,
+		"total":   total,
+	}})
+}
+
+// filemgrRollback 回退一条审计记录（new → old）
+func (s *Server) filemgrRollback(c *gin.Context) {
+	if s.fileMgr == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "文件管理模块未加载"})
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.ID) == "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: "缺少审计记录 ID"})
+		return
+	}
+	if err := s.fileMgr.RollbackAudit(body.ID); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c.JSON(200, models.APIResponse{Success: true, Message: "回退已提交，文件名将在 qBittorrent 处理后恢复"})
+}
+
+// batchRenameReq 批量重命名请求体
+type batchRenameReq struct {
+	Hash     string `json:"hash"`
+	Template string `json:"template"`
+}
+
+func (r *batchRenameReq) validate() string {
+	if strings.TrimSpace(r.Hash) == "" {
+		return "缺少任务 hash"
+	}
+	if strings.TrimSpace(r.Template) == "" {
+		return "缺少重命名模板"
+	}
+	return ""
+}
+
+// filemgrBatchPreview 按模板生成批量重命名预览（只读，不提交）
+func (s *Server) filemgrBatchPreview(c *gin.Context) {
+	if s.fileMgr == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "文件管理模块未加载"})
+		return
+	}
+	var body batchRenameReq
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: "参数错误"})
+		return
+	}
+	if msg := body.validate(); msg != "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: msg})
+		return
+	}
+	plan, err := s.fileMgr.PreviewBatch(body.Hash, body.Template)
+	if err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c.JSON(200, models.APIResponse{Success: true, Data: map[string]interface{}{
+		"plan":  plan,
+		"total": len(plan),
+	}})
+}
+
+// filemgrBatchApply 执行批量重命名（写入审计日志，可回退）
+func (s *Server) filemgrBatchApply(c *gin.Context) {
+	if s.fileMgr == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "文件管理模块未加载"})
+		return
+	}
+	var body batchRenameReq
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: "参数错误"})
+		return
+	}
+	if msg := body.validate(); msg != "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: msg})
+		return
+	}
+	n, err := s.fileMgr.ApplyBatchRename(body.Hash, body.Template)
+	if err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c.JSON(200, models.APIResponse{Success: true, Message: fmt.Sprintf("已提交 %d 条重命名，稍后可在下方审计日志确认或回退", n), Data: map[string]interface{}{"applied": n}})
 }

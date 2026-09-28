@@ -92,6 +92,26 @@ type LimitRule struct {
 type FileManagerConfig struct {
 	Enabled      bool `json:"enabled"`
 	ScanInterval int  `json:"scanInterval"` // 秒
+	// CleanEnabled 文件名自动清理开关：移除下载站附加的域名前缀/后缀等冗余模式。
+	// 旧 config.json 缺省时零值 false，默认关闭
+	CleanEnabled bool     `json:"cleanEnabled"`
+	CleanRules   []string `json:"cleanRules,omitempty"` // 自定义清理正则，每条一条，匹配内容被移除
+	// AIEnabled AI 格式化文件名开关：正则清洗后调用 OpenAI 兼容接口二次美化文件名
+	AIEnabled  bool        `json:"aiEnabled"`
+	AIChannels []AIChannel `json:"aiChannels,omitempty"` // AI 通道列表（本地 / 云端皆可）
+	AIActive   string      `json:"aiActive"`             // 当前使用的通道 ID
+}
+
+// AIChannel OpenAI 兼容的 AI 通道配置（一个通道 = 一个 baseURL + model 组合，
+// 本地模型如 Ollama 与云端服务只是不同的 baseURL）
+type AIChannel struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`    // 展示名，如「本地 Ollama」
+	BaseURL string `json:"baseURL"` // 如 http://localhost:11434/v1
+	APIKey  string `json:"apiKey"`  // 可空（本地模型常无需）
+	Model   string `json:"model"`   // 如 qwen2.5:7b
+	Prompt  string `json:"prompt"`  // 自定义提示词，为空用内置默认；支持 {files}/{torrent} 变量
+	Enabled bool   `json:"enabled"`
 }
 
 // qBittorrent torrent 信息（来自 /api/v2/torrents/info）
