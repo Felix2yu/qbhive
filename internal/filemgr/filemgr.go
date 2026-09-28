@@ -186,7 +186,10 @@ func (m *Manager) scan() {
 }
 
 // handleCompleted 检查并扁平化「savePath 子目录下只含单个普通文件」的 torrent，
-// 把该文件上移到 savePath 根并清理残留空目录。
+// 把该文件沿 qB 内部路径**只上移一层**（落点为其归档目录的父目录，可能是
+// savePath 根，也可能是 savePath 下的分类目录），并清理残留空目录。
+// 例：/下载/日本/ABC/x.mp4 → /下载/日本/x.mp4，到此为止；散在分类根
+// （content_path == save_path，rel == "."）的文件绝不再上移、绝不删除。
 //
 // 安全铁律：只有当内容目录是 savePath 的**严格子目录**时才可能触发归档与删除。
 // content_path == save_path（多文件种子无根目录、文件直接散在共享保存根）时
@@ -276,13 +279,54 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	}
 
 	fileName := files[0].Name()
-	// qB renameFile 的路径基准是相对 save_path 的内部路径；用 rel（真实目录相对
-	// save_path 推导）拼接，绝不按任务名猜测——猜错会 409 并触发危险的本地回退。
-	torrentRelativeOld := filepath.ToSlash(filepath.Join(rel, fileName))
-	torrentRelativeNew := fileName
-	// 目标冲突预检：savePath 根下已存在同名文件时加 _hash8 后缀，绝不覆盖
-	if _, e := os.Stat(filepath.Join(t.SavePath, torrentRelativeNew)); e == nil {
-		torrentRelativeNew = conflictFreeName(fileName, t.Hash)
+	// 归档目录的父目录就是本任务允许的落点：move 只上升一层，绝不跨过它
+	// （rel 可能是 "Cat/ABC" 多层，落点 = savePath/Cat 而非 savePath 根）。
+	dstDir := filepath.Dir(torrentDir)
+
+	// renameFile 的路径必须用 qB 自己的内部文件路径（/torrents/files 返回的 name，
+	// 相对 save_path 且带根目录段）——按任务名猜测会 409，并触发危险的本地回退。
+	qbOld := ""
+	fetched := true
+	if qf, e := m.client.GetTorrentFiles(t.Hash); e == nil {
+		diskSize := int64(-1)
+		if fi, e2 := files[0].Info(); e2 == nil {
+			diskSize = fi.Size()
+		}
+		for _, f := range qf {
+			if path.Base(f.Name) != fileName {
+				continue
+			}
+			if qbOld == "" {
+				qbOld = f.Name // 同名多条目时的兜底；大小一致者优先（磁盘唯一对应）
+			}
+			if f.Size == diskSize {
+				qbOld = f.Name
+				break
+			}
+		}
+	} else {
+		fetched = false
+		logger.Warn.Printf("文件管理 [%s] 获取 qB 文件列表失败：%v，回退按相对路径推导", t.Name, e)
+	}
+	if qbOld == "" {
+		if fetched {
+			// 列表里没有磁盘上这个文件名（可能是残留 tmp 之类）：不猜路径，本轮跳过
+			logger.Debug.Printf("文件管理 [%s] 未在 qB 文件列表中找到 %s，跳过归档", t.Name, fileName)
+			return true, false
+		}
+		// 列表取不到：用已核验的 rel 推导（torrentDir 确为 savePath 严格子目录）
+		qbOld = filepath.ToSlash(filepath.Join(rel, fileName))
+	}
+	qbNew := upOneLevel(qbOld)
+	if qbNew == "" || qbNew == qbOld {
+		// 文件已在种子内部路径顶端，再上移就会离开分类目录：止步，不动
+		logger.Debug.Printf("文件管理 [%s] %s 无法只上移一层（已到分类目录），跳过归档", t.Name, qbOld)
+		return true, false
+	}
+	// 目标冲突预检：落点目录下已存在同名文件时加 _hash8 后缀，绝不覆盖
+	newBase := path.Base(qbNew)
+	if _, e := os.Lstat(filepath.Join(dstDir, newBase)); e == nil {
+		qbNew = path.Join(path.Dir(qbNew), conflictFreeName(newBase, t.Hash))
 	}
 
 	// 1) 先通过 qB API 停止 torrent
@@ -291,17 +335,17 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	}
 
 	// 2) 走 qB renameFile API，失败时回退本地 os.Rename。
-	//    此处 torrentDir 已确认是 savePath 严格子目录：src 在子目录内、dst 在保存根，
-	//    两者必不相同，不存在「同路径 no-op 被当成功」的隐患。
+	//    本地回退的目标固定在 dstDir（归档目录的父目录）内，任何情况下都
+	//    不会逃出分类目录，src==dst 时直接放弃。
 	viaQB := true
-	if err := m.client.RenameFile(t.Hash, torrentRelativeOld, torrentRelativeNew); err != nil {
+	if err := m.client.RenameFile(t.Hash, qbOld, qbNew); err != nil {
 		logger.Warn.Printf("文件管理 [%s] qB renameFile 失败（%s → %s）：%v，回退本地重命名",
-			t.Name, torrentRelativeOld, torrentRelativeNew, err)
+			t.Name, qbOld, qbNew, err)
 		viaQB = false
 		src := filepath.Join(torrentDir, fileName)
-		dst := filepath.Join(t.SavePath, filepath.FromSlash(torrentRelativeNew))
+		dst := filepath.Join(dstDir, filepath.FromSlash(path.Base(qbNew)))
 		if src == dst {
-			// 防御性兜底（rel != "." 时理论不可达）：同路径无需移动，更不可删目录
+			// 防御性兜底（理论不可达）：同路径无需移动，更不可删目录
 			logger.Warn.Printf("文件管理 [%s] 本地重命名源与目标相同（%s），跳过并保留目录", t.Name, src)
 			_ = m.client.StartTorrents(t.Hash)
 			return true, false
@@ -321,7 +365,7 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 
 	if viaQB {
 		logger.Info.Printf("文件管理 [%s] 已提交移动 %s → %s（qB API），等待异步落地后清理原目录",
-			t.Name, torrentRelativeOld, torrentRelativeNew)
+			t.Name, qbOld, qbNew)
 		// qB renameFile 的磁盘移动是异步的（libtorrent disk thread），API 返回 200 时
 		// 文件可能还在原地，立即 RemoveAll 会把尚未移走的文件一起删掉造成数据丢失。
 		// 记录原目录绝对路径，后续轮询确认它变空后再清理。
@@ -329,7 +373,7 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		return false, false
 	}
 
-	logger.Info.Printf("文件管理 [%s] 已本地移动 %s → %s", t.Name, torrentRelativeOld, torrentRelativeNew)
+	logger.Info.Printf("文件管理 [%s] 已本地移动 %s → %s", t.Name, qbOld, qbNew)
 	// 本地 os.Rename 是同步的，移动已落地，原目录（savePath 严格子目录）可直接清理
 	if err := os.RemoveAll(torrentDir); err != nil {
 		logger.Warn.Printf("文件管理 [%s] 清理目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
@@ -468,6 +512,23 @@ func conflictFreeName(fileName, hash string) string {
 		suffix = suffix[:8]
 	}
 	return base + "_" + suffix + ext
+}
+
+// upOneLevel 把相对路径去掉恰好一层目录（"Cat/ABC/x.mkv" → "Cat/x.mkv"，
+// "ABC/x.mkv" → "x.mkv"）。路径已在顶端（"x.mkv"）时返回原名，调用方据此
+// 判断「再上移就离开分类目录」；无意义路径（空/"."/"绝对路径"）返回空串。
+func upOneLevel(p string) string {
+	if p == "" || p == "." || p == "/" || strings.HasPrefix(p, "/") {
+		return ""
+	}
+	dir := path.Dir(p)
+	if dir == "." {
+		return path.Base(p) // 已在顶端，原样返回供调用方比较
+	}
+	if dir == "/" {
+		return ""
+	}
+	return path.Join(path.Dir(dir), path.Base(p))
 }
 
 // Reset 重置完成状态（服务重启时调用）

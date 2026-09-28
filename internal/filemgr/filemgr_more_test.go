@@ -1,6 +1,7 @@
 package filemgr
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,9 @@ type filemgrEnv struct {
 	stopStatus  int
 	renameStatus int
 	startStatus int
+	filesStatus  int    // 非 0 → /torrents/files 返回该状态码（模拟取列表失败）
+	filesJSON    string // 非空 → /torrents/files 返回该 JSON（覆盖磁盘遍历）
+	filesCalls   int
 	callLog      []string
 	infoCalls    int
 	saveDir      string
@@ -55,6 +59,9 @@ func newFilemgrEnv(t *testing.T, enabled bool, scanInterval int, torrentsJSON st
 			if id == "" {
 				id = r.FormValue("hash")
 			}
+			if kind == "renameFile" {
+				id += ":" + r.FormValue("oldPath") + "->" + r.FormValue("newPath")
+			}
 			env.mu.Lock()
 			env.callLog = append(env.callLog, kind+":"+id)
 			st := 0
@@ -76,6 +83,39 @@ func newFilemgrEnv(t *testing.T, enabled bool, scanInterval int, torrentsJSON st
 	mux.HandleFunc("/api/v2/torrents/renameFile", record("renameFile"))
 	mux.HandleFunc("/api/v2/torrents/start", record("start"))
 
+	// /torrents/files 默认以磁盘真实内容作答（遍历 saveDir，name 为相对斜杠路径），
+	// 与真实 qB「内部路径 = 相对 save_path 且含根目录段」语义一致；
+	// filesJSON/filesStatus 可覆盖，用于模拟内部路径与磁盘不同、取列表失败等分支。
+	mux.HandleFunc("/api/v2/torrents/files", func(w http.ResponseWriter, r *http.Request) {
+		env.mu.Lock()
+		env.filesCalls++
+		override, st := env.filesJSON, env.filesStatus
+		env.mu.Unlock()
+		if st != 0 {
+			w.WriteHeader(st)
+			return
+		}
+		body := override
+		if body == "" {
+			var out []models.QBFile
+			_ = filepath.Walk(env.saveDir, func(p string, info os.FileInfo, err error) error {
+				if err != nil || info.IsDir() {
+					return nil
+				}
+				rel, e := filepath.Rel(env.saveDir, p)
+				if e != nil {
+					return nil
+				}
+				out = append(out, models.QBFile{Name: filepath.ToSlash(rel), Size: info.Size(), Progress: 1})
+				return nil
+			})
+			b, _ := json.Marshal(out)
+			body = string(b)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+
 	env.srv = httptest.NewServer(mux)
 	t.Cleanup(env.srv.Close)
 
@@ -95,6 +135,20 @@ func (e *filemgrEnv) setTorrents(json string) {
 	e.mu.Lock()
 	e.torrentsJSON = json
 	e.mu.Unlock()
+}
+
+// setFiles 覆盖 /torrents/files 的应答 JSON
+func (e *filemgrEnv) setFiles(json string) {
+	e.mu.Lock()
+	e.filesJSON = json
+	e.mu.Unlock()
+}
+
+// filesCallCount 返回 /torrents/files 被请求的次数
+func (e *filemgrEnv) filesCallCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.filesCalls
 }
 
 func (e *filemgrEnv) calls() []string {
@@ -660,6 +714,158 @@ func TestConflictFreeName(t *testing.T) {
 	}
 	if got := conflictFreeName("video.mkv", "abc"); got != "video_abc.mkv" {
 		t.Errorf("短 hash 应用全量: %q", got)
+	}
+}
+
+func TestUpOneLevel(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"ABC/video.mkv", "video.mkv"},       // 一层 → 升到顶端
+		{"Cat/ABC/video.mkv", "Cat/video.mkv"}, // 多层 → 恰好升一层，前缀保留
+		{"video.mkv", "video.mkv"},           // 已在顶端：原样返回供调用方比较
+		{"", ""},
+		{".", ""},
+		{"/abs/video.mkv", ""}, // 绝对路径不是合法的 qB 内部相对路径
+		{"A/B/C/d.mkv", "A/B/d.mkv"},
+	}
+	for _, c := range cases {
+		if got := upOneLevel(c.in); got != c.want {
+			t.Errorf("upOneLevel(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// 用户核心场景：/下载/日本/ABC/x.mp4 只上移到 /下载/日本/x.mp4 就此打住。
+// rel 是多层（Cat/ABC）时，qB 内部路径必须保留分类前缀，落点在父目录而非保存根。
+func TestManager_handleCompleted_MultiLevelCategory_OneLevelUp(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	save := env.saveDir
+	abcDir := filepath.Join(save, "Cat", "ABC")
+	if err := os.MkdirAll(abcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(abcDir, "video.mkv"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tor := models.QBTorrent{Hash: testHash, Name: "ABC", SavePath: save, ContentPath: abcDir}
+
+	already, did := env.m.handleCompleted(tor)
+	if already || did {
+		t.Fatalf("应提交移动并等待（false,false），got (%v,%v)", already, did)
+	}
+	calls := env.calls()
+	if len(calls) != 3 || calls[1] != "renameFile:"+testHash+":Cat/ABC/video.mkv->Cat/video.mkv" {
+		t.Fatalf("renameFile 必须恰好上移一层且保留分类前缀: %v", calls)
+	}
+
+	// 模拟 qB 落地到分类目录（不是保存根！），第二轮清理原目录
+	if err := os.Rename(filepath.Join(abcDir, "video.mkv"), filepath.Join(save, "Cat", "video.mkv")); err != nil {
+		t.Fatal(err)
+	}
+	already2, did2 := env.m.handleCompleted(tor)
+	if already2 || !did2 {
+		t.Fatalf("第二轮应清理空目录（false,true），got (%v,%v)", already2, did2)
+	}
+	if _, err := os.Stat(abcDir); !os.IsNotExist(err) {
+		t.Errorf("Cat/ABC 空目录应被清理: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(save, "Cat", "video.mkv")); err != nil {
+		t.Errorf("分类目录下的归档文件必须完好: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(save, "Cat")); err != nil {
+		t.Errorf("分类目录 Cat 绝不能被波及: %v", err)
+	}
+}
+
+// qB 内部路径与磁盘目录名不一致时（改名过的种子），必须以 /torrents/files 的
+// name 为准提交 renameFile——这是消除 409→本地回退→误删链条的根本手段。
+func TestManager_handleCompleted_InternalPathWins(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	env.setFiles(`[{"name":"OtherDir/video.mkv","size":4,"progress":1.0}]`)
+	save := env.saveDir
+	sub := filepath.Join(save, "Movie")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "video.mkv"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: save, ContentPath: sub})
+
+	calls := env.calls()
+	if len(calls) != 3 || calls[1] != "renameFile:"+testHash+":OtherDir/video.mkv->video.mkv" {
+		t.Fatalf("应使用 qB 内部路径 OtherDir/video.mkv: %v", calls)
+	}
+}
+
+// qB 报告唯一文件已在内部路径顶端（无目录段）：再上移就离开分类目录，必须止步，
+// 连 stop 都不发。
+func TestManager_handleCompleted_InternalFileAtTop_NoMove(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	env.setFiles(`[{"name":"video.mkv","size":4,"progress":1.0}]`)
+	save := env.saveDir
+	sub := filepath.Join(save, "Movie")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "video.mkv"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	already, did := env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: save, ContentPath: sub})
+	if !already || did {
+		t.Errorf("已在顶端应跳过（true,false），got (%v,%v)", already, did)
+	}
+	if len(env.calls()) != 0 {
+		t.Errorf("止步场景不得触发任何 stop/rename/start: %v", env.calls())
+	}
+	if _, err := os.Stat(filepath.Join(sub, "video.mkv")); err != nil {
+		t.Errorf("文件必须原封不动: %v", err)
+	}
+}
+
+// /torrents/files 里找不到磁盘上这个文件（如残留临时名）：不猜路径，本轮跳过。
+func TestManager_handleCompleted_NotInFileList_Skips(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	env.setFiles(`[{"name":"Movie/other.mkv","size":99,"progress":1.0}]`)
+	save := env.saveDir
+	sub := filepath.Join(save, "Movie")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "video.mkv"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	already, did := env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: save, ContentPath: sub})
+	if !already || did {
+		t.Errorf("列表中无此文件应跳过（true,false），got (%v,%v)", already, did)
+	}
+	if env.callCount("renameFile") != 0 || env.callCount("stop") != 0 {
+		t.Errorf("跳过场景不应有 stop/rename: %v", env.calls())
+	}
+}
+
+// 拿不到文件列表（500）时回退用已核验的 rel 推导路径，功能不退化。
+func TestManager_handleCompleted_FilesFetchFails_FallsBackToRel(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	env.mu.Lock()
+	env.filesStatus = http.StatusInternalServerError
+	env.mu.Unlock()
+	save := env.saveDir
+	sub := filepath.Join(save, "Movie")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "video.mkv"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: save, ContentPath: sub})
+
+	calls := env.calls()
+	if len(calls) != 3 || calls[1] != "renameFile:"+testHash+":Movie/video.mkv->video.mkv" {
+		t.Fatalf("取列表失败应按 rel 推导回退: %v", calls)
 	}
 }
 

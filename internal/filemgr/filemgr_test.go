@@ -1,6 +1,7 @@
 package filemgr
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,6 +44,24 @@ func setupFilemgr(t *testing.T, torrentsJSON string) (*Manager, *[]string, *http
 		_ = r.ParseForm()
 		*calls = append(*calls, "start:"+r.FormValue("hashes"))
 		w.WriteHeader(200)
+	})
+	// /torrents/files 以磁盘真实内容作答：遍历 saveDir，name 用相对 saveDir 的斜杠路径，
+	// 与真实 qB「内部路径 = 相对 save_path 且含根目录段」的语义一致。
+	mux.HandleFunc("/api/v2/torrents/files", func(w http.ResponseWriter, r *http.Request) {
+		var out []models.QBFile
+		_ = filepath.Walk(saveDir, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			rel, e := filepath.Rel(saveDir, p)
+			if e != nil {
+				return nil
+			}
+			out = append(out, models.QBFile{Name: filepath.ToSlash(rel), Size: info.Size(), Progress: 1})
+			return nil
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
 	})
 	srv := httptest.NewServer(mux)
 	// 隔离持久化状态：cleanState / audit 路径都取自 QBHIVE_CONFIG 所在目录，
