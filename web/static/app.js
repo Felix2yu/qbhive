@@ -5,6 +5,30 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const API = window.location.origin + "/api";
 const genID = () => Math.random().toString(36).slice(2, 10);
 
+// ---------- 表单模板原语：全站共用，保证字段行 / 开关 / 说明的排布完全一致 ----------
+// field(label, control, hint)：一行字段 = 固定宽标签列 + 控件列（控件在上、说明紧跟其下）
+function field(label, control, hint = "") {
+  return `<div class="field">
+    ${label ? `<label>${label}</label>` : `<span></span>`}
+    <div class="field-body">${control}${hint ? `<div class="hint">${hint}</div>` : ""}</div>
+  </div>`;
+}
+
+// toggle：统一结构的开关（原生 checkbox 视觉隐藏，只留轨道）
+// id / data 属性通过 opts 传入，label 显示在开关右侧
+function toggle(checked, { id = "", data = "", label = "", sm = false } = {}) {
+  const attrs = [id && `id="${id}"`, data, checked && "checked"].filter(Boolean).join(" ");
+  return `<label class="switch${sm ? " sm" : ""}">
+    <input type="checkbox" ${attrs}>
+    <span class="track"></span>${label ? `<span class="txt">${label}</span>` : ""}
+  </label>`;
+}
+
+// notice：成段说明 / 注意事项，取代散落的行内彩色文字
+function notice(text, kind = "") {
+  return `<div class="notice ${kind}">${text}</div>`;
+}
+
 // 完成通知可选字段（与后端 models.NotifyFields 保持一致，顺序即通知正文顺序）
 const NOTIFY_FIELDS = [
   ["name", "任务名"], ["size", "文件大小"], ["category", "分类"],
@@ -16,7 +40,7 @@ const NOTIFY_FIELDS = [
 function renderNotifyFieldChecks(sel) {
   const chosen = new Set(sel && sel.length ? sel : NOTIFY_FIELDS.map(f => f[0]));
   return NOTIFY_FIELDS.map(([k, label]) =>
-    `<label class="inline-check"><input type="checkbox" data-nt-field="${k}"${chosen.has(k) ? " checked" : ""}> ${label}</label>`
+    `<label class="check"><input type="checkbox" data-nt-field="${k}"${chosen.has(k) ? " checked" : ""}> ${label}</label>`
   ).join("");
 }
 
@@ -34,6 +58,61 @@ function toast(msg, type = "ok") {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 2500);
+}
+
+// ---------- 弹窗：全站统一用这一套，取代原生 prompt / confirm ----------
+function openModal(html) {
+  const mask = document.createElement("div");
+  mask.className = "modal-mask";
+  mask.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
+  document.body.appendChild(mask);
+  const onKey = (e) => { if (e.key === "Escape") done(false); };
+  function done(v) {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+    resolve(v);
+  }
+  let resolve;
+  const result = new Promise(r => resolve = r);
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("mousedown", (e) => { if (e.target === mask) done(false); });
+  return { mask, done, result };
+}
+
+// confirmDialog：破坏性操作确认（默认焦点留在「取消」，避免回车误触）
+function confirmDialog(title, message, { danger = true, okText = "确认" } = {}) {
+  const { mask, done, result } = openModal(`
+    <h3>${escapeHTML(title)}</h3>
+    <p>${escapeHTML(message).replace(/\n/g, "<br>")}</p>
+    <div class="modal-actions">
+      <button class="btn ${danger ? "confirm-danger" : "primary"}" data-yes>${escapeHTML(okText)}</button>
+      <button class="btn" data-no>取消</button>
+    </div>`);
+  mask.querySelector("[data-yes]").onclick = () => done(true);
+  mask.querySelector("[data-no]").onclick = () => done(false);
+  setTimeout(() => mask.querySelector("[data-no]").focus(), 0);
+  return result;
+}
+
+// inputDialog：单值输入（如限速），回车提交
+function inputDialog(title, message, { value = "", unit = "", type = "number", min, max, placeholder = "" } = {}) {
+  const { mask, done, result } = openModal(`
+    <h3>${escapeHTML(title)}</h3>
+    ${message ? `<p>${escapeHTML(message).replace(/\n/g, "<br>")}</p>` : ""}
+    <div class="controls">
+      <input class="w-sm" type="${type}" min="${min ?? ""}" max="${max ?? ""}" placeholder="${escapeHTML(placeholder)}" value="${escapeHTML(value)}" data-input />
+      ${unit ? `<span class="unit">${escapeHTML(unit)}</span>` : ""}
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" data-ok>确定</button>
+      <button class="btn" data-no>取消</button>
+    </div>`);
+  const input = mask.querySelector("[data-input]");
+  mask.querySelector("[data-ok]").onclick = () => done(input.value);
+  mask.querySelector("[data-no]").onclick = () => done(null);
+  input.onkeydown = (e) => { if (e.key === "Enter") done(input.value); };
+  setTimeout(() => { input.focus(); input.select && input.select(); }, 0);
+  return result;
 }
 // --- 工具函数 ---
 function debounce(fn, wait = 300) {
@@ -66,12 +145,12 @@ function pageNav(total, page, pageSize, onChange) {
   const windowSet = new Set([1, 2, 3, pages - 2, pages - 1, pages, cur - 1, cur, cur + 1].filter(x => x >= 1 && x <= pages));
   let last = 0;
   for (const n of [...windowSet].sort((a, b) => a - b)) {
-    if (n > last + 1) parts.push(`<span style="color:var(--text-dim)">…</span>`);
+    if (n > last + 1) parts.push(`<span class="text-dim">…</span>`);
     parts.push(btn(String(n), n, n === cur ? "primary" : ""));
     last = n;
   }
   parts.push(btn("›", cur + 1), btn("»", pages));
-  return `<div class="actions-bar" style="justify-content:center;margin-top:12px;gap:4px">${parts.join("")}</div>`;
+  return `<div class="pager">${parts.join("")}</div>`;
 }
 
 // 绑定 pageNav 生成的分页按钮（此前从未绑定，分页按钮一直是死的）
@@ -119,29 +198,18 @@ function showLoginOverlay() {
     const existing = document.getElementById("__qbhive_login__");
     if (existing) existing.remove();
 
-    const wrap = document.createElement("div");
-    wrap.id = "__qbhive_login__";
-    wrap.innerHTML = `
-      <div style="position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:99999">
-        <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:24px;min-width:320px">
-          <h3 style="margin:0 0 12px">🔒 需要访问 token</h3>
-          <p style="color:var(--text-dim);font-size:12px;margin:0 0 12px">
-            服务端设置了 <code>QBHIVE_TOKEN</code> 环境变量，请输入对应的访问 token。
-          </p>
-          <input id="__qbhive_token__" type="password" placeholder="token" style="width:100%;padding:8px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none" />
-          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
-            <button id="__qbhive_cancel__" class="btn">取消</button>
-            <button id="__qbhive_ok__" class="btn primary">登录</button>
-          </div>
-        </div>
-      </div>`;
-    document.body.appendChild(wrap);
-    const input = wrap.querySelector("#__qbhive_token__");
-    input.focus();
+    const { mask, done, result } = openModal(`
+      <h3>需要访问 token</h3>
+      <p>服务端设置了 <code>QBHIVE_TOKEN</code> 环境变量，请输入对应的访问 token。</p>
+      <input type="password" data-input placeholder="token" class="mono" />
+      <div class="modal-actions">
+        <button class="btn primary" data-ok>登录</button>
+        <button class="btn" data-no>取消</button>
+      </div>`);
+    mask.id = "__qbhive_login__";
+    const input = mask.querySelector("[data-input]");
 
-    const finish = (ok) => { wrap.remove(); resolve(ok); };
-    wrap.querySelector("#__qbhive_cancel__").onclick = () => finish(false);
-    wrap.querySelector("#__qbhive_ok__").onclick = async () => {
+    const submit = async () => {
       const token = input.value.trim();
       if (!token) return;
       const r = await fetch(API + "/login", {
@@ -150,9 +218,13 @@ function showLoginOverlay() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
       });
-      finish(r.ok);
+      done(r.ok);
     };
-    input.onkeydown = (e) => { if (e.key === "Enter") wrap.querySelector("#__qbhive_ok__").click(); };
+    mask.querySelector("[data-ok]").onclick = submit;
+    mask.querySelector("[data-no]").onclick = () => done(false);
+    input.onkeydown = (e) => { if (e.key === "Enter") submit(); };
+    setTimeout(() => input.focus(), 0);
+    result.then(resolve);
   });
 }
 
@@ -293,7 +365,7 @@ async function switchView(name, background = false) {
   try {
     await views[name](root, background);
   } catch (e) {
-    root.innerHTML = `<div class="empty">出错了：${e.message}</div>`;
+    root.innerHTML = notice(`页面渲染出错：${escapeHTML(e.message || String(e))}`, "danger");
   }
 }
 
@@ -342,13 +414,22 @@ async function renderDashboard(root, background = false) {
   }
   // 首次加载：搭结构
   root.innerHTML = `
+    <div class="page-head">
+      <div class="titles">
+        <h2>概览</h2>
+        <p>下载 / 做种的实时状态，每 8 秒自动刷新。</p>
+      </div>
+    </div>
     <div class="status-bar">
       <div class="status-group" id="dash-status-group"></div>
       <div class="speed-group" id="dash-speed-group"></div>
     </div>
     <div class="card">
-      <h2>最近活跃任务</h2>
-      <div id="dash-latest"><div style="color:var(--text-dim)">加载中…</div></div>
+      <div class="card-head">
+        <h3>最近活跃任务</h3>
+        <span class="desc">按添加时间倒序，最多 10 条</span>
+      </div>
+      <div id="dash-latest"><div class="empty">加载中…</div></div>
     </div>
   `;
   await refreshDashboard(root);
@@ -411,30 +492,31 @@ async function refreshDashboard(root) {
 }
 
 
+// 任务状态 → 短标签 + 语义色档（与 .tag 一套色板，不再逐个写行内颜色）
+const STATE_TAGS = {
+  downloading:   { t: "下载",   c: "busy" },
+  forcedDL:      { t: "下载",   c: "busy" },
+  stalledDL:     { t: "停滞",   c: "warn" },
+  stoppedDL:     { t: "停止",   c: "dim" },
+  stoppedUP:     { t: "已完成", c: "ok" },
+  stalledUP:     { t: "做种",   c: "warn" },
+  uploading:     { t: "做种",   c: "ok" },
+  forcedUP:      { t: "做种",   c: "ok" },
+  queuedUP:      { t: "排队",   c: "dim" },
+  queuedDL:      { t: "排队",   c: "dim" },
+  checkingUP:    { t: "校验",   c: "alt" },
+  checkingDL:    { t: "校验",   c: "alt" },
+  metaDL:        { t: "元数据", c: "alt" },
+  forcedMetaDL:  { t: "元数据", c: "alt" },
+  moving:        { t: "移动",   c: "alt" },
+  checkingResumeData: { t: "恢复", c: "alt" },
+  missingFiles:  { t: "缺文件", c: "err" },
+  error:         { t: "错误",   c: "err" },
+};
+
 function stateTag(s) {
-  // 窄屏友好：短名 + emoji 配色
-  const map = {
-    downloading:   { t: "下载", c: "var(--accent)" },
-    forcedDL:      { t: "下载", c: "var(--accent)" },
-    stalledDL:     { t: "停滞", c: "var(--warn)" },
-    stoppedDL:     { t: "停止", c: "var(--text-dim)" },
-    stoppedUP:     { t: "已完成", c: "var(--success)" },
-    stalledUP:     { t: "做种", c: "var(--warn)" },
-    uploading:     { t: "做种", c: "var(--success)" },
-    forcedUP:      { t: "做种", c: "var(--success)" },
-    queuedUP:      { t: "排队", c: "var(--text-dim)" },
-    queuedDL:      { t: "排队", c: "var(--text-dim)" },
-    checkingUP:    { t: "校验", c: "var(--accent-2)" },
-    checkingDL:    { t: "校验", c: "var(--accent-2)" },
-    metaDL:        { t: "元数据", c: "var(--accent-2)" },
-    forcedMetaDL:  { t: "元数据", c: "var(--accent-2)" },
-    moving:        { t: "移动", c: "var(--accent-2)" },
-    checkingResumeData: { t: "恢复", c: "var(--accent-2)" },
-    missingFiles:  { t: "缺文件", c: "var(--danger)" },
-    error:         { t: "错误", c: "var(--danger)" },
-  };
-  const v = map[s] || { t: s, c: "var(--text-dim)" };
-  return `<span class="state-tag" style="color:${v.c}">${v.t}</span>`;
+  const v = STATE_TAGS[s] || { t: s, c: "dim" };
+  return `<span class="tag ${v.c}">${escapeHTML(v.t)}</span>`;
 }
 
 function torrentTable(list, withActions) {
@@ -491,7 +573,7 @@ async function openLimitDialog(hash) {
     if (r.success && r.data) currentLimit = r.data.uploadLimit || 0;
   } catch {}
 
-  const val = prompt(`设置单任务上传限速（KB/s）\n当前：${currentLimit}  KB/s\n设为 0 = 不限速`, currentLimit);
+  const val = await inputDialog("上传限速", "设为 0 表示不限速。", { value: currentLimit, unit: "KB/s", min: 0 });
   if (val === null) return;
   const v = parseInt(val, 10);
   if (isNaN(v) || v < 0) { toast("请输入 ≥ 0 的数字", "err"); return; }
@@ -530,7 +612,7 @@ const torrentFilterOptions = [
   { value: "stoppedUP",    label: "已完成历史（停止）" },
   { value: "stalledUP",    label: "历史（做种停滞）" },
   { value: "completed",    label: "所有已完成" },
-  { value: "all",          label: "全部（⚠️ 可能很慢）" },
+  { value: "all",          label: "全部任务（数量可能很大）" },
 ];
 
 async function renderTorrents(root, background = false) {
@@ -538,38 +620,53 @@ async function renderTorrents(root, background = false) {
   if (background) { await fetchTorrents(); return; }
 
   root.innerHTML = `
+    <div class="page-head">
+      <div class="titles">
+        <h2>下载任务</h2>
+        <p>按状态筛选、搜索与分页；可对单个任务直接下发上传限速。</p>
+      </div>
+    </div>
     <div class="card">
-      <h2>下载任务 <span class="badge">可配置单任务上传限速</span></h2>
-      <div class="actions-bar" style="margin:12px 0 16px 0;gap:12px;flex-wrap:wrap">
-        <div class="form-row" style="margin:0"><label>状态</label>
-          <select id="tf-filter" style="min-width:160px">
+      <div class="card-head">
+        <h3>任务列表</h3>
+        <span class="spacer"></span>
+        <div class="head-actions">
+          <span class="desc" id="tf-progress"></span>
+          <button class="btn small" id="tf-reload">刷新</button>
+        </div>
+      </div>
+      <div class="toolbar">
+        <label class="tfield"><span>状态</span>
+          <select id="tf-filter" class="w-lg">
             ${torrentFilterOptions.map(o =>
               `<option value="${o.value}" ${o.value===_torrentsState.filter?"selected":""}>${o.label}</option>`
             ).join("")}
           </select>
-        </div>
-        <div class="form-row" style="margin:0"><label>Top</label>
-          <select id="tf-limit" style="min-width:100px">
+        </label>
+        <label class="tfield"><span>数量</span>
+          <select id="tf-limit" class="w-md">
             ${[100, 200, 500, 1000, 0].map(n =>
               `<option value="${n}" ${n===_torrentsState.limit?"selected":""}>${n===0?"全量":n}</option>`
             ).join("")}
           </select>
-        </div>
-        <div class="form-row" style="margin:0;flex:1"><label>搜索</label>
-          <input type="text" id="tf-search" value="${_torrentsState.search}" placeholder="按任务名 / 分类 / 标签过滤…" style="flex:1;min-width:200px" />
-        </div>
-        <button class="btn small" id="tf-reload">刷新</button>
+        </label>
+        <label class="tfield grow"><span>搜索</span>
+          <input type="text" id="tf-search" value="${escapeHTML(_torrentsState.search)}" placeholder="任务名 / 分类 / 标签" />
+        </label>
       </div>
-      <div id="tf-progress" style="color:var(--text-dim);font-size:12px;margin-bottom:8px"></div>
-      <div id="tf-body"><div style="color:var(--text-dim)">加载中…</div></div>
+      <div class="notice-slot" id="tf-notice"></div>
+      <div id="tf-body"><div class="empty">加载中…</div></div>
     </div>
   `;
 
-  // 全量警告
+  // 全量模式警告
   if (_torrentsState.filter === "all" || _torrentsState.filter === "completed") {
-    $("#tf-progress").textContent = _torrentsState.filter === "all"
-      ? "⚠️ 全量模式可能加载数千条任务，首次请求会较慢；后端会返回完整列表后再前端分页。"
-      : "⚠️ 已完成包含停止+做种+停滞，数量可能很多；建议用「已完成历史（停止）」替代。";
+    $("#tf-notice").innerHTML = notice(
+      _torrentsState.filter === "all"
+        ? "全量模式可能加载数千条任务，首次请求较慢；后端返回完整列表后再前端分页。"
+        : "「已完成」包含停止、做种、停滞三类，数量可能很多；建议改用「已完成历史（停止）。",
+      "warn"
+    );
   }
 
   // 事件绑定
@@ -594,7 +691,7 @@ async function fetchTorrents() {
       `/torrents?filter=${_torrentsState.filter}&limit=${_torrentsState.limit}&sort=${_torrentsState.sort}&reverse=${_torrentsState.reverse}`);
     if (!t.success) {
       const body = $("#tf-body");
-      if (body) body.innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(t.message || "未知错误")}</div>`;
+      if (body) body.innerHTML = notice(`加载失败：${escapeHTML(t.message || "未知错误")}`, "danger");
       if (progress) progress.textContent = "";
       return;
     }
@@ -603,7 +700,7 @@ async function fetchTorrents() {
     renderPage();
   } catch (e) {
     const body = $("#tf-body");
-    if (body) body.innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHTML(e.message || String(e))}</div>`;
+    if (body) body.innerHTML = notice(`加载失败：${escapeHTML(e.message || String(e))}`, "danger");
     if (progress) progress.textContent = "";
   }
 }
@@ -648,26 +745,41 @@ async function renderRSS(root, rss) {
   if (!rss.feeds) rss.feeds = [];
 
   root.innerHTML = `
-    <div class="card">
-      <h2>RSS 订阅代理</h2>
-      <div class="form-row">
-        <label class="inline-check"><input type="checkbox" id="rss-enabled" ${rss.enabled ? "checked" : ""}> 启用 RSS 代理</label>
-        <div class="actions-bar">
-          <div class="form-row" style="margin:0"><label>刷新间隔 (分钟)</label><input type="number" id="rss-interval" value="${rss.interval || 15}" min="1" style="width:90px"/></div>
-          <div class="spacer"></div>
-          <button class="btn" id="rss-force">立即拉取</button>
-          <button class="btn" id="rss-reset-all">全部重新匹配</button>
-          <button class="btn primary" id="rss-save">保存</button>
-          <button class="btn" id="rss-add">+ 订阅源</button>
-        </div>
+    <div class="page-head">
+      <div class="titles">
+        <h2>RSS 订阅</h2>
+        <p>定时拉取订阅源，按规则匹配条目并自动提交下载；条目去重持久化，重启不重复下载。</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn" id="rss-add">+ 添加订阅源</button>
       </div>
     </div>
 
-    ${rss.feeds.length === 0 ? `<div class="card"><div class="empty">还没有订阅源，点击"+ 新增订阅源"开始</div></div>` :
+    <div class="card">
+      <div class="card-head">
+        <h3>全局设置</h3>
+        <span class="spacer"></span>
+        <div class="head-actions">
+          <button class="btn small" id="rss-force">立即拉取</button>
+          <button class="btn small" id="rss-reset-all">全部重新匹配</button>
+          <button class="btn small primary" id="rss-save">保存</button>
+        </div>
+      </div>
+      ${field("启用", toggle(rss.enabled, { id: "rss-enabled" }), "关闭后不再拉取任何订阅源，已提交的下载不受影响。")}
+      ${field("刷新间隔",
+        `<div class="controls"><input type="number" id="rss-interval" class="w-xs" min="1" value="${rss.interval || 15}"><span class="unit">分钟</span></div>`,
+        "到点后逐个订阅源拉取。")}
+    </div>
+
+    ${rss.feeds.length === 0 ? `<div class="card"><div class="empty">还没有订阅源，点右上角「+ 添加订阅源」开始。</div></div>` :
       rss.feeds.map((f, fi) => renderFeedBlock(f, fi)).join("")}
 
     <div class="card">
-      <h2>📡 运行状态 <span class="badge auto-refresh" id="rss-status-refresh">自动刷新中</span></h2>
+      <div class="card-head">
+        <h3>运行状态</h3>
+        <span class="desc">每 5 秒自动刷新</span>
+        <span class="spacer"></span>
+      </div>
       <div id="rss-status-panel"><div class="empty">加载中…</div></div>
     </div>
   `;
@@ -686,7 +798,10 @@ async function renderRSS(root, rss) {
     renderRSS(root, rss);
   };
   $("#rss-reset-all").onclick = async () => {
-    if (!confirm("确定让所有订阅源对历史条目重新匹配规则吗？\n已下载过的不会重复下载。")) return;
+    const ok = await confirmDialog("全部重新匹配",
+      "确定让所有订阅源对历史条目重新匹配规则吗？\n已下载过的不会重复下载。",
+      { danger: false, okText: "重置" });
+    if (!ok) return;
     const r = await api("POST", "/rss/reset", { feedId: "" });
     toast(r.success ? "已重置，正在重新拉取…" : (r.message || "重置失败"), r.success ? "ok" : "err");
     refreshRSSStatus(true);
@@ -697,7 +812,10 @@ async function renderRSS(root, rss) {
     if (!btn) return;
     const fid = btn.dataset.rssReset;
     const name = btn.dataset.feedName || "该订阅源";
-    if (!confirm(`确定让「${name}」对历史条目重新匹配规则吗？\n已下载过的不会重复下载。`)) return;
+    const ok = await confirmDialog("重新匹配",
+      `确定让「${name}」对历史条目重新匹配规则吗？\n已下载过的不会重复下载。`,
+      { danger: false, okText: "重置" });
+    if (!ok) return;
     const r = await api("POST", "/rss/reset", { feedId: fid });
     toast(r.success ? "已重置，正在重新拉取…" : (r.message || "重置失败"), r.success ? "ok" : "err");
     refreshRSSStatus(true);
@@ -716,24 +834,26 @@ async function renderRSS(root, rss) {
 function renderFeedBlock(f, fi) {
   const sName = escapeHTML(f.name || "");
   const sUrl  = escapeHTML(f.url || "");
+  const rules = f.rules || [];
   return `
-  <div class="card">
-    <div class="rule-block">
-      <div class="rule-header">
-        <input type="checkbox" id="f-${f.id}-enabled" ${f.enabled ? "checked" : ""}>
-        <input type="text" id="f-${f.id}-name" value="${sName}" style="flex:1;margin:0 12px" />
-        <button class="btn danger small" data-del-feed="${f.id}">删除</button>
+  <div class="card feed">
+    <div class="item-head">
+      <span class="idx">${fi + 1}</span>
+      <input type="text" class="name" id="f-${f.id}-name" value="${sName}" placeholder="订阅源名称" />
+      ${toggle(f.enabled, { id: `f-${f.id}-enabled`, sm: true })}
+      <button class="btn small danger" data-del-feed="${f.id}">删除</button>
+    </div>
+    ${field("订阅地址", `<input type="url" id="f-${f.id}-url" class="ctrl mono" value="${sUrl}" placeholder="https://…" />`)}
+
+    <div class="section">
+      <div class="section-title">
+        匹配规则<span class="text-dim">共 ${rules.length} 条</span>
+        <span class="spacer"></span>
+        <button class="btn small" data-add-rule="${f.id}">+ 添加规则</button>
       </div>
-      <input type="url" id="f-${f.id}-url" value="${sUrl}" placeholder="https://..." />
+      ${rules.length === 0 ? `<div class="item"><div class="empty">还没有规则，点右上角「+ 添加规则」。</div></div>` :
+        rules.map((r, ri) => renderRuleBlock(f.id, r, ri)).join("")}
     </div>
-
-    <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center">
-      <strong>匹配规则</strong>
-      <button class="btn small" data-add-rule="${f.id}">+ 添加规则</button>
-    </div>
-
-    ${(!f.rules || f.rules.length === 0) ? `<div class="empty">暂无规则，点击添加</div>` :
-      f.rules.map((r, ri) => renderRuleBlock(f.id, r, ri)).join("")}
   </div>`;
 }
 
@@ -745,29 +865,34 @@ function renderRuleBlock(fid, r, ri) {
   const sCategory = escapeHTML(r.category || "");
   const sTags     = escapeHTML(r.tags || "");
   return `
-    <div class="rule-block">
-      <div class="rule-header">
-        <input type="checkbox" data-rule-enabled="${fid}-${ri}" ${r.enabled !== false ? "checked" : ""}>
-        <input type="text" data-rule-name="${fid}-${ri}" value="${sName}" style="flex:1;margin:0 12px" />
-        <button class="btn danger small" data-del-rule="${fid}-${ri}">删除</button>
+    <div class="item">
+      <div class="item-head">
+        <span class="idx">${ri + 1}</span>
+        <input type="text" class="name" data-rule-name="${fid}-${ri}" value="${sName}" placeholder="规则名称" />
+        ${toggle(r.enabled !== false, { data: `data-rule-enabled="${fid}-${ri}"`, sm: true })}
+        <button class="btn small danger" data-del-rule="${fid}-${ri}">删除</button>
       </div>
-      <div class="form-row"><label>匹配模式</label>
-        <select data-rule-mode="${fid}-${ri}">
-          <option value="keyword" ${r.mode !== "regex" ? "selected" : ""}>关键字 (包含/排除)</option>
+      ${field("匹配模式",
+        `<select class="ctrl" data-rule-mode="${fid}-${ri}">
+          <option value="keyword" ${r.mode !== "regex" ? "selected" : ""}>关键字（包含 / 排除表达式）</option>
           <option value="regex" ${r.mode === "regex" ? "selected" : ""}>正则表达式</option>
-        </select>
-      </div>
-      <div class="form-row"><label>匹配（Include）</label><textarea wrap="soft" class="auto-h" data-rule-include="${fid}-${ri}" placeholder="${r.mode === "regex" ? "正则，需匹配" : "例: ManoJob 720p|MrLucky（|=OR  空格=AND）"}">${sInclude}</textarea></div>
-      <div class="form-row"><label>排除（Exclude）</label><textarea wrap="soft" class="auto-h" data-rule-exclude="${fid}-${ri}" placeholder="例: 1080p|2160p  命中任一跳过">${sExclude}</textarea></div>
-      <div class="form-row"><label>保存路径</label><input type="text" data-rule-path="${fid}-${ri}" value="${sPath}" placeholder="qBittorrent 保存路径 (可空)" /></div>
-      <div class="form-row"><label>分类 / 标签</label>
-        <div style="display:flex;gap:8px;flex:1">
-          <input type="text" data-rule-category="${fid}-${ri}" value="${sCategory}" placeholder="Category" style="flex:1"/>
-          <input type="text" data-rule-tags="${fid}-${ri}" value="${sTags}" placeholder="Tags (逗号分隔)" style="flex:1"/>
-        </div>
-      </div>
-      <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-rule-upload="${fid}-${ri}" value="${r.uploadLimit || 0}" min="0" placeholder="0 = 不限" style="width:150px"/></div>
-      <div class="form-row"><label class="inline-check"><input type="checkbox" data-rule-stopped="${fid}-${ri}" ${r.stopped ? "checked" : ""}> 添加后停止（不自动开始下载）</label></div>
+        </select>`)}
+      ${field("包含 Include",
+        `<textarea wrap="soft" class="auto-h ctrl" data-rule-include="${fid}-${ri}" placeholder="${r.mode === "regex" ? "正则，需匹配" : "例：ManoJob 720p|MrLucky（| 为 OR，空格为 AND）"}">${sInclude}</textarea>`)}
+      ${field("排除 Exclude",
+        `<textarea wrap="soft" class="auto-h ctrl" data-rule-exclude="${fid}-${ri}" placeholder="例：1080p|2160p，命中任一则跳过">${sExclude}</textarea>`)}
+      ${field("保存路径",
+        `<input type="text" class="ctrl mono" data-rule-path="${fid}-${ri}" value="${sPath}" placeholder="留空则用 qBittorrent 默认路径" />`)}
+      ${field("分类 / 标签",
+        `<div class="split">
+          <input type="text" data-rule-category="${fid}-${ri}" value="${sCategory}" placeholder="Category" />
+          <input type="text" data-rule-tags="${fid}-${ri}" value="${sTags}" placeholder="Tags（逗号分隔）" />
+        </div>`)}
+      ${field("上传限速",
+        `<div class="controls"><input type="number" class="w-xs" data-rule-upload="${fid}-${ri}" value="${r.uploadLimit || 0}" min="0"><span class="unit">KB/s</span></div>`,
+        "0 表示不限速。")}
+      ${field("添加后停止", toggle(r.stopped, { data: `data-rule-stopped="${fid}-${ri}"` }),
+        "只加入 qBittorrent，不自动开始下载。")}
     </div>`;
 }
 
@@ -815,10 +940,10 @@ function fmtTimeAgo(iso) {
 async function refreshRSSStatus(showLoading) {
   const panel = document.getElementById("rss-status-panel");
   if (!panel) return;
-  if (showLoading) panel.innerHTML = '<div style="color:var(--text-dim)">⏳ 拉取中…</div>';
+  if (showLoading) panel.innerHTML = '<div class="empty">拉取中…</div>';
   const res = await api("GET", "/rss/status");
   if (!res.success) {
-    panel.innerHTML = `<div style="color:var(--danger)">加载状态失败：${escapeHTML(res.message || "未知错误")}</div>`;
+    panel.innerHTML = notice(`加载状态失败：${escapeHTML(res.message || "未知错误")}`, "danger");
     return;
   }
   panel.innerHTML = renderRSSStatusList(res.data || []);
@@ -829,65 +954,61 @@ function renderRSSStatusList(list) {
     return '<div class="empty">暂无可监控的订阅源</div>';
   }
   return list.map(s => {
-    const statusBadge = renderFeedStatusBadge(s);
-    const urlShort = escapeHTML(s.url || "(未填)");
-    const seenLine = `累计已见条目 <b>${s.seenCount}</b>`;
-    let detailLine = "";
+    const seenLine = `累计已见 <b>${s.seenCount}</b>`;
+    let detailLine;
     if (s.lastOk != null) {
-      if (s.lastOk) {
-        detailLine = `解析 <b>${s.itemCount}</b> 条 · 命中规则 <b>${s.matched}</b> · 下载 <b style="color:var(--success)">${s.downloaded}</b>${s.failed > 0 ? ` · 失败 <b style="color:var(--danger)">${s.failed}</b>` : ""}`;
-        if (s.snapshot) detailLine += ` · <span style="color:var(--warn)">快照模式（首次接入）</span>`;
-      } else {
-        detailLine = `<span style="color:var(--danger)">${escapeHTML(s.lastError || "拉取失败")}</span>`;
-      }
+      detailLine = s.lastOk
+        ? `解析 <b>${s.itemCount}</b> 条 · 命中 <b>${s.matched}</b> · 提交下载 <b>${s.downloaded}</b>${s.failed > 0 ? ` · 失败 <b>${s.failed}</b>` : ""}${s.snapshot ? ` · <span class="tag warn">快照模式</span>` : ""}`
+        : `<span class="tag err">上次拉取失败</span> ${escapeHTML(s.lastError || "")}`;
     } else {
-      detailLine = '<span style="color:var(--text-dim)">尚未拉取过</span>';
+      detailLine = `<span class="text-dim">尚未拉取过</span>`;
     }
 
     const recent = (s.recentItems || []).map(r => renderRecentItem(r)).join("");
     const recentBlock = recent
-      ? `<details open><summary style="cursor:pointer;color:var(--text-dim);font-size:12px;margin-top:6px">最近 ${(s.recentItems || []).length} 条处理记录（点击展开/折叠）</summary>
-         <div class="rss-recent">${recent}</div></details>`
+      ? `<details open>
+           <summary>最近 ${(s.recentItems || []).length} 条处理记录</summary>
+           <div class="rss-recent">${recent}</div>
+         </details>`
       : "";
 
     return `
     <div class="rss-status-block">
       <div class="rss-status-head">
         <span class="rss-status-name">${escapeHTML(s.feedName)}</span>
-        ${statusBadge}
-        <span class="rss-status-time">${fmtTimeAgo(s.lastFetchAt)} 拉取 · ${seenLine}</span>
-        <button class="btn small" data-rss-reset="${s.feedId}" data-feed-name="${escapeHTML(s.feedName)}" ${s.fetching ? "disabled" : ""} title="清空已见过条目，对所有历史条目重新跑匹配规则">🔄 重新匹配</button>
+        ${renderFeedStatusBadge(s)}
+        <span class="rss-status-time">${fmtTimeAgo(s.lastFetchAt)}拉取 · ${seenLine}</span>
+        <button class="btn small" data-rss-reset="${s.feedId}" data-feed-name="${escapeHTML(s.feedName)}" ${s.fetching ? "disabled" : ""} title="清空已见过条目，对所有历史条目重新跑匹配规则">重新匹配</button>
       </div>
       <div class="rss-status-detail">${detailLine}</div>
-      <div class="rss-status-url" title="${urlShort}">${urlShort}</div>
+      <div class="rss-status-url mono" title="${escapeHTML(s.url || "")}">${escapeHTML(s.url || "（未填）")}</div>
       ${recentBlock}
     </div>`;
   }).join("");
 }
 
 function renderFeedStatusBadge(s) {
-  if (!s.enabled) return '<span class="badge" style="background:var(--text-dim);color:#fff">已禁用</span>';
-  if (s.fetching) return '<span class="badge" style="background:var(--accent);color:#fff">拉取中…</span>';
-  if (s.lastOk == null) return '<span class="badge" style="background:var(--text-dim);color:#fff">等待首次</span>';
-  if (s.lastOk) return '<span class="badge" style="background:var(--success);color:#fff">✓ 正常</span>';
-  return '<span class="badge" style="background:var(--danger);color:#fff">✗ 异常</span>';
+  if (!s.enabled) return '<span class="tag dim">已禁用</span>';
+  if (s.fetching) return '<span class="tag busy">拉取中</span>';
+  if (s.lastOk == null) return '<span class="tag dim">等待首次</span>';
+  if (s.lastOk) return '<span class="tag ok">正常</span>';
+  return '<span class="tag err">异常</span>';
 }
 
 function renderRecentItem(r) {
   const actionMap = {
-    downloaded: { icon: "✅", label: "已提交 qB", cls: "ok" },
-    skipped_snapshot: { icon: "⚪", label: "快照跳过", cls: "dim" },
-    skipped_no_rule: { icon: "⚪", label: "无规则命中", cls: "dim" },
-    failed: { icon: "❌", label: r.error || "失败", cls: "err" },
-    seen_duplicate: { icon: "🔁", label: "已见过", cls: "dim" },
+    downloaded:       { label: "已提交", cls: "ok" },
+    skipped_snapshot: { label: "快照跳过", cls: "dim" },
+    skipped_no_rule:  { label: "未命中", cls: "dim" },
+    failed:           { label: r.error || "失败", cls: "err" },
+    seen_duplicate:   { label: "重复", cls: "dim" },
   };
-  const a = actionMap[r.action] || { icon: "•", label: r.action || "", cls: "dim" };
+  const a = actionMap[r.action] || { label: r.action || "", cls: "dim" };
   return `<div class="rss-recent-item">
-    <span class="rss-recent-icon">${a.icon}</span>
     <span class="rss-recent-title">${escapeHTML(r.title)}</span>
-    ${r.ruleName ? `<span class="rss-recent-rule">· ${escapeHTML(r.ruleName)}</span>` : ""}
-    <span class="rss-recent-time">· ${fmtTimeAgo(r.processedAt)}</span>
-    <span class="rss-recent-msg ${a.cls}">— ${a.label}</span>
+    ${r.ruleName ? `<span class="rss-recent-rule">${escapeHTML(r.ruleName)}</span>` : ""}
+    <span class="rss-recent-time">${fmtTimeAgo(r.processedAt)}</span>
+    <span class="tag ${a.cls}">${escapeHTML(a.label)}</span>
   </div>`;
 }
 
@@ -992,17 +1113,24 @@ function renderLimiterRules() {
   const box = $("#limiter-rules");
   if (!box) return;
   const rules = _settingsCfg.limiter.rules || [];
+  const count = $("#lim-count");
+  if (count) count.textContent = `共 ${rules.length} 条`;
   box.innerHTML = rules.length === 0
-    ? `<div class="empty">暂无规则</div>`
+    ? `<div class="item"><div class="empty">还没有规则，点上方「+ 添加规则」。</div></div>`
     : rules.map((r, i) => `
-      <div class="rule-block">
-        <div class="rule-header">
-          <input type="checkbox" data-lm-enabled="${i}" ${r.enabled !== false ? "checked" : ""}>
-          <input type="text" data-lm-name="${i}" value="${escapeHTML(r.name || "")}" style="flex:1;margin:0 12px" />
-          <button class="btn danger small" data-lm-del="${i}">删除</button>
+      <div class="item">
+        <div class="item-head">
+          <span class="idx">${i + 1}</span>
+          <input type="text" class="name" data-lm-name="${i}" value="${escapeHTML(r.name || "")}" placeholder="规则名称" />
+          ${toggle(r.enabled !== false, { data: `data-lm-enabled="${i}"`, sm: true })}
+          <button class="btn small danger" data-lm-del="${i}">删除</button>
         </div>
-        <div class="form-row"><label>匹配正则</label><input type="text" data-lm-match="${i}" value="${escapeHTML(r.match || "")}" placeholder="如 \\.mkv$ 或 4k" /></div>
-        <div class="form-row"><label>上传限速 (KB/s)</label><input type="number" data-lm-limit="${i}" value="${r.uploadLimit}" min="0" style="width:150px"/> <div class="hint">0 = 无限制</div></div>
+        ${field("匹配正则",
+          `<input type="text" class="ctrl mono" data-lm-match="${i}" value="${escapeHTML(r.match || "")}" placeholder="如 \\.mkv$ 或 4k" />`,
+          "Go/RE2 语法，对任务名做部分匹配。")}
+        ${field("上传限速",
+          `<div class="controls"><input type="number" class="w-xs" data-lm-limit="${i}" value="${r.uploadLimit}" min="0"><span class="unit">KB/s</span></div>`,
+          "0 表示不限制。")}
       </div>`).join("");
   // 重新绑定删除按钮（checkbox/input 的 change 不丢值，不需要重绑）
   $$("[data-lm-del]", box).forEach(b => b.addEventListener("click", onLimDel));
@@ -1014,23 +1142,27 @@ function renderAIChannels() {
   const box = $("#ai-channels");
   if (!box) return;
   const chans = _settingsCfg.fileManager.aiChannels || [];
+  const count = $("#ai-count");
+  if (count) count.textContent = `共 ${chans.length} 个`;
   box.innerHTML = chans.length === 0
-    ? `<div class="empty">暂无 AI 通道。可添加本地（如 Ollama）或云端（OpenAI 兼容）通道。</div>`
+    ? `<div class="item"><div class="empty">还没有通道，点上方「+ 添加通道」。可添加本地（Ollama 等）或云端（OpenAI 兼容）通道。</div></div>`
     : chans.map((ch, i) => `
-      <div class="rule-block">
-        <div class="rule-header">
-          <input type="checkbox" data-ai-enabled="${i}" ${ch.enabled ? "checked" : ""}>
-          <input type="text" data-ai-name="${i}" value="${escapeHTML(ch.name || "")}" placeholder="通道名，如 本地 Ollama" style="flex:1;margin:0 12px" />
-          <button class="btn danger small" data-ai-del="${i}">删除</button>
+      <div class="item">
+        <div class="item-head">
+          <span class="idx">${i + 1}</span>
+          <input type="text" class="name" data-ai-name="${i}" value="${escapeHTML(ch.name || "")}" placeholder="通道名称，如 本地 Ollama" />
+          ${toggle(ch.enabled, { data: `data-ai-enabled="${i}"`, sm: true })}
+          <button class="btn small danger" data-ai-del="${i}">删除</button>
         </div>
-        <div class="form-row"><label>BaseURL</label><input type="text" data-ai-url="${i}" value="${escapeHTML(ch.baseURL || "")}" placeholder="http://localhost:11434/v1 或 https://api.deepseek.com/v1" /></div>
-        <div class="form-row"><label>API Key</label><input type="password" data-ai-key="${i}" value="${escapeHTML(ch.apiKey || "")}" placeholder="本地模型可留空" /></div>
-        <div class="form-row"><label>模型</label><input type="text" data-ai-model="${i}" value="${escapeHTML(ch.model || "")}" placeholder="qwen2.5:7b / deepseek-chat / gpt-4o-mini" /></div>
-        <div class="form-row"><label>提示词</label>
-          <div style="flex:1">
-            <textarea data-ai-prompt="${i}" placeholder="留空使用内置默认提示词。支持变量 {files}（文件名 JSON 数组）与 {torrent}（任务名），要求模型只输出 JSON 映射。">${escapeHTML(ch.prompt || "")}</textarea>
-          </div>
-        </div>
+        ${field("BaseURL",
+          `<input type="text" class="ctrl mono" data-ai-url="${i}" value="${escapeHTML(ch.baseURL || "")}" placeholder="http://localhost:11434/v1" />`,
+          "任何 OpenAI 兼容接口均可，如本地 Ollama、DeepSeek、OpenAI。")}
+        ${field("API Key",
+          `<input type="password" class="ctrl mono" data-ai-key="${i}" value="${escapeHTML(ch.apiKey || "")}" placeholder="本地模型可留空" />`)}
+        ${field("模型",
+          `<input type="text" class="ctrl mono" data-ai-model="${i}" value="${escapeHTML(ch.model || "")}" placeholder="qwen2.5:7b / deepseek-chat / gpt-4o-mini" />`)}
+        ${field("提示词",
+          `<textarea class="ctrl" data-ai-prompt="${i}" placeholder="留空使用内置默认提示词。支持变量 {files}（文件名 JSON 数组）与 {torrent}（任务名），要求模型只输出 JSON 映射。">${escapeHTML(ch.prompt || "")}</textarea>`)}
       </div>`).join("");
   $$("[data-ai-del]", box).forEach(b => b.addEventListener("click", onAIDel));
   // 当前使用通道下拉
@@ -1066,115 +1198,142 @@ async function renderSettings(root) {
   const sNotifyUrl = escapeHTML((cfg.notifier.appriseUrls || []).join("\n"));
 
   root.innerHTML = `
-    <!-- 主题 -->
-    <div class="card">
-      <h2>外观主题</h2>
-      <div class="theme-switch">
-        <button data-theme-opt="auto" title="跟随系统">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
-          <span>跟随系统</span>
-        </button>
-        <button data-theme-opt="dark" title="深色">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-          <span>深色</span>
-        </button>
-        <button data-theme-opt="light" title="浅色">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-          <span>浅色</span>
-        </button>
+    <div class="page-head">
+      <div class="titles">
+        <h2>设置</h2>
+        <p>所有配置保存在服务端配置文件中，保存后热重载，无需重启。</p>
       </div>
     </div>
 
-    <!-- qBittorrent -->
+    <!-- 外观 -->
     <div class="card">
-      <h2>qBittorrent 连接</h2>
-      <div class="form-row"><label>WebUI 地址</label><input type="url" id="qb-url" value="${sQbUrl}" placeholder="http://192.168.1.10:8080" /></div>
-      <div class="form-row"><label>用户名</label><input type="text" id="qb-user" value="${sQbUser}" /></div>
-      <div class="form-row"><label>密码</label><input type="password" id="qb-pass" value="${sQbPass}" placeholder="已隐藏（留空则不修改）" /></div>
-      <div class="form-row"><label>API key</label>
-        <div style="flex:1">
-          <input type="password" id="qb-apikey" value="${sQbKey}" placeholder="qBittorrent v5.2.0+ 可用；填写则优先使用，跳过用户名密码" />
-          <div class="hint">在 qBittorrent WebUI → 设置 → WebUI 里生成，形如 <code>qbt_xxxxxxxxxxxxxxxx</code>。填写后直接走 <code>Authorization: Bearer</code>，无额外 round-trip。</div>
+      <div class="card-head">
+        <h3>外观主题</h3>
+        <span class="desc">只对当前浏览器生效，保存在本地，不影响其他设备</span>
+      </div>
+      ${field("主题模式", `
+        <div class="theme-switch">
+          <button data-theme-opt="auto" title="跟随系统">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+            <span>跟随系统</span>
+          </button>
+          <button data-theme-opt="dark" title="深色">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            <span>深色</span>
+          </button>
+          <button data-theme-opt="light" title="浅色">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            <span>浅色</span>
+          </button>
+        </div>`,
+        "「跟随系统」按操作系统的深/浅色设置自动切换。")}
+    </div>
+
+    <!-- 连接 -->
+    <div class="card">
+      <div class="card-head">
+        <h3>连接</h3>
+        <span class="desc">QBHive 通过 qBittorrent WebUI API 读取与控制任务</span>
+        <span class="spacer"></span>
+        <div class="head-actions">
+          <button class="btn small" id="qb-test">测试连接</button>
         </div>
       </div>
-      <div class="actions-bar" style="margin-left:160px">
-        <button class="btn" id="qb-test">测试连接</button>
+      ${field("WebUI 地址", `<input type="url" id="qb-url" class="ctrl mono" value="${sQbUrl}" placeholder="http://192.168.1.10:8080" />`)}
+      ${field("用户名", `<input type="text" id="qb-user" class="w-md" value="${sQbUser}" autocomplete="username" />`)}
+      ${field("密码", `<input type="password" id="qb-pass" class="w-md" value="${sQbPass}" placeholder="已隐藏，留空则不修改" autocomplete="current-password" />`)}
+      ${field("API Key",
+        `<input type="password" id="qb-apikey" class="ctrl mono" value="${sQbKey}" placeholder="已隐藏，留空则不修改" />`,
+        "qBittorrent v5.2.0+ 可在 WebUI → 设置 → WebUI 里生成，形如 <code>qbt_xxx</code>。填写后优先使用，直接走 <code>Authorization: Bearer</code>，跳过用户名密码登录。")}
+
+      <div class="section">
+        <div class="section-title">QBHive 服务</div>
+        ${field("监听地址", `<input type="text" id="srv-listen" class="w-md mono" value="${sListen}" placeholder=":8088" />`,
+          "修改后需重启进程才会生效。")}
       </div>
     </div>
 
-    <!-- 服务器 -->
+    <!-- 限速 -->
     <div class="card">
-      <h2>服务监听</h2>
-      <div class="form-row"><label>监听地址</label><input type="text" id="srv-listen" value="${sListen}" placeholder=":8088" /></div>
-    </div>
+      <div class="card-head">
+        <h3>限速规则</h3>
+        <span class="desc">按任务名正则匹配，批量下发上传限速</span>
+      </div>
+      ${field("启用", toggle(cfg.limiter.enabled, { id: "lim-enabled" }),
+        "只对限速值发生变化的任务调用 qB 接口，不会反复下发。")}
+      ${field("刷新间隔",
+        `<div class="controls"><input type="number" id="lim-interval" class="w-xs" value="${cfg.limiter.interval || 10}" min="1"><span class="unit">秒</span></div>`)}
 
-    <!-- 限速全局 -->
-    <div class="card">
-      <h2>限速规则（按名称批量匹配）</h2>
-      <div class="form-row"><label class="inline-check"><input type="checkbox" id="lim-enabled" ${cfg.limiter.enabled ? "checked" : ""}> 启用</label>
-        <div class="actions-bar">
-          <div class="form-row" style="margin:0"><label>刷新间隔 (秒)</label><input type="number" id="lim-interval" value="${cfg.limiter.interval || 10}" min="1" style="width:100px"/></div>
-          <div class="spacer"></div>
-          <button class="btn" id="lim-add">+ 添加规则</button>
+      <div class="section">
+        <div class="section-title">规则<span class="text-dim" id="lim-count"></span><span class="spacer"></span>
+          <button class="btn small" id="lim-add">+ 添加规则</button>
         </div>
+        <div id="limiter-rules"></div>
       </div>
-      <div id="limiter-rules"></div>
     </div>
 
     <!-- 通知 -->
     <div class="card">
-      <h2>完成通知 <span class="badge">Apprise-Go</span></h2>
-      <div class="form-row"><label class="inline-check"><input type="checkbox" id="nt-enabled" ${cfg.notifier.enabled ? "checked" : ""}> 启用</label>
-        <div style="margin-left:160px"><button class="btn small" id="nt-test">发送测试通知</button></div>
-      </div>
-      <div class="form-row"><label>通知 URL</label>
-        <div style="flex:1">
-          <textarea id="nt-urls" placeholder="每行一个 Apprise URL，例如：\ntelegram://BOT_TOKEN/CHAT_ID\ndiscord://WEBHOOK_ID/WEBHOOK_TOKEN\ngotify://TOKEN@HOST:PORT\nhttps://hooks.slack.com/services/...">${sNotifyUrl}</textarea>
-          <div class="hint">使用 <a href="https://github.com/unraid/apprise-go" target="_blank">Apprise-Go</a>，原生支持上百种渠道（Telegram / Discord / Slack / 企业微信 / 邮件 / Gotify / Bark ...）。每行填一个 URL，格式参见 <a href="https://github.com/caronc/apprise/wiki" target="_blank">Apprise Wiki</a>。</div>
+      <div class="card-head">
+        <h3>完成通知</h3>
+        <span class="desc">基于 Apprise-Go，原生支持 Telegram / Discord / Slack / 邮件 / Bark 等上百种渠道</span>
+        <span class="spacer"></span>
+        <div class="head-actions">
+          <button class="btn small" id="nt-test">发送测试通知</button>
         </div>
       </div>
-      <div class="form-row"><label>通知字段</label>
-        <div style="flex:1;display:flex;flex-wrap:wrap;gap:6px 16px">
-          ${renderNotifyFieldChecks(cfg.notifier.fields)}
-        </div>
-      </div>
-      <div class="hint" style="margin-left:160px">勾选完成通知正文要包含的字段，至少一项（标题始终包含任务名）。</div>
+      ${field("启用", toggle(cfg.notifier.enabled, { id: "nt-enabled" }),
+        "每 10 秒扫描一次完成事件，已通知记录持久化，重启不重发。")}
+      ${field("通知渠道",
+        `<textarea id="nt-urls" class="ctrl mono" placeholder="每行一个 Apprise URL，例如：&#10;telegram://BOT_TOKEN/CHAT_ID&#10;discord://WEBHOOK_ID/WEBHOOK_TOKEN&#10;gotify://TOKEN@HOST:PORT">${sNotifyUrl}</textarea>`,
+        "格式参见 <a href=\"https://github.com/caronc/apprise/wiki\" target=\"_blank\">Apprise Wiki</a>，渠道用法见 <a href=\"https://github.com/unraid/apprise-go\" target=\"_blank\">Apprise-Go</a>。")}
+      ${field("通知字段",
+        `<div class="check-group">${renderNotifyFieldChecks(cfg.notifier.fields)}</div>`,
+        "勾选通知正文包含的字段，至少一项；标题始终包含任务名。")}
     </div>
 
     <!-- 文件管理 -->
     <div class="card">
-      <h2>文件管理（自动归档 & 文件名清理）</h2>
-      <div class="form-row"><label class="inline-check"><input type="checkbox" id="fm-enabled" ${cfg.fileManager.enabled ? "checked" : ""}> 启用</label>
-        <div class="form-row" style="margin:0"><label>扫描间隔 (秒)</label><input type="number" id="fm-interval" value="${cfg.fileManager.scanInterval || 15}" min="1" style="width:100px"/></div>
-      </div>
-      <div class="hint" style="margin-left:160px">完成的下载如果 savePath/torrentName/ 下只有一个文件，会自动上移并清理空目录。</div>
-
-      <div class="form-row" style="margin-top:16px"><label class="inline-check"><input type="checkbox" id="fm-clean-enabled" ${cfg.fileManager.cleanEnabled ? "checked" : ""}> 文件名自动清理</label></div>
-      <div class="form-row"><label>自定义清理正则</label>
-        <div style="flex:1">
-          <textarea id="fm-clean-rules" placeholder="每行一个正则（Go/RE2 语法），匹配内容会被移除，例如：
-^【[^】]*】\s*
-\s*-\s*4KHDR.*$">${escapeHTML((cfg.fileManager.cleanRules || []).join("\n"))}</textarea>
-          <div class="hint">内置规则已覆盖常见站点水印（<code>www.xxx.com - </code> 前缀、<code>[xxx.com]</code>/<code>【xxx.com】</code> 括号、<code>@xxx.com</code> 后缀等），自定义规则在内置规则之后执行。清洗保证：保留扩展名、结果非空、不含非法字符；通过 qBittorrent 重命名接口执行，不影响做种；所有改动记录在「文件」页，可回退。</div>
-        </div>
+      <div class="card-head">
+        <h3>文件管理</h3>
+        <span class="desc">归档、文件名清洗与 AI 美化</span>
       </div>
 
-      <div class="form-row" style="margin-top:16px"><label class="inline-check"><input type="checkbox" id="fm-ai-enabled" ${cfg.fileManager.aiEnabled ? "checked" : ""}> AI 格式化文件名</label>
-        <div class="form-row" style="margin:0">
-          <label>当前使用通道</label>
-          <select id="fm-ai-active" style="width:220px"></select>
-          <button class="btn" id="ai-add">+ 添加通道</button>
-        </div>
+      <div class="section">
+        <div class="section-title">单文件自动归档</div>
+        ${field("启用", toggle(cfg.fileManager.enabled, { id: "fm-enabled" }),
+          "下载完成后，若 <code>savePath/torrentName/</code> 下只有一个文件，自动上移并清理空目录。")}
+        ${field("扫描间隔",
+          `<div class="controls"><input type="number" id="fm-interval" class="w-xs" value="${cfg.fileManager.scanInterval || 15}" min="1"><span class="unit">秒</span></div>`)}
       </div>
-      <div id="ai-channels"></div>
-      <div class="hint" style="margin-left:160px">AI 格式化在正则清洗之后执行，对每个任务只调用一次（批量传入文件名），失败自动重试最多 3 轮后降级为仅正则清洗。任何 OpenAI 兼容接口均可（本地 Ollama / 云端服务）。</div>
+
+      <div class="section">
+        <div class="section-title">文件名自动清理</div>
+        ${field("启用", toggle(cfg.fileManager.cleanEnabled, { id: "fm-clean-enabled" }),
+          "自动移除站点域名水印与 emoji 装饰，通过 qB 重命名接口执行，不影响做种。")}
+        ${field("自定义正则",
+          `<textarea id="fm-clean-rules" class="ctrl mono" placeholder="每行一个正则（Go/RE2 语法），匹配内容会被移除，例如：&#10;^【[^】]*】\\s*&#10;\\s*-\\s*4KHDR.*$">${escapeHTML((cfg.fileManager.cleanRules || []).join("\n"))}</textarea>`,
+          "内置规则已覆盖 <code>www.xxx.com - </code> 前缀、<code>[xxx.com]</code> / <code>【xxx.com】</code> 括号、<code>@xxx.com</code> 后缀等常见水印；自定义规则在内置规则之后执行。清洗保证保留扩展名、结果非空、不含非法字符，所有改动记录在「文件」页并可回退。")}
+      </div>
+
+      <div class="section">
+        <div class="section-title">AI 格式化文件名</div>
+        ${field("启用", toggle(cfg.fileManager.aiEnabled, { id: "fm-ai-enabled" }),
+          "在正则清洗之后执行，每个任务只调用一次（批量传入文件名）；失败自动重试 3 轮，仍失败则降级为仅正则清洗。")}
+        ${field("使用通道", `<select id="fm-ai-active" class="ctrl"></select>`)}
+
+        <div class="section-title">通道<span class="text-dim" id="ai-count"></span><span class="spacer"></span>
+          <button class="btn small" id="ai-add">+ 添加通道</button>
+        </div>
+        <div id="ai-channels"></div>
+      </div>
     </div>
 
     <!-- 保存 -->
-    <div class="card">
-      <div class="actions-bar" style="justify-content:flex-end">
-        <button class="btn primary" id="save-all">保存全部设置</button>
-      </div>
+    <div class="card save-bar">
+      <span class="hint">保存前会先做一次本地校验（URL 协议、正则、间隔下限等）。</span>
+      <span class="spacer"></span>
+      <button class="btn primary" id="save-all">保存全部设置</button>
     </div>
   `;
 
@@ -1250,10 +1409,10 @@ function onLimDel() {
 const _filesState = { page: 1, pageSize: 20 };
 
 const AUDIT_STATUS = {
-  committed:  { t: "已提交", c: "var(--warn)" },
-  confirmed:  { t: "已生效", c: "var(--success)" },
-  failed:     { t: "失败", c: "var(--err, #e05555)" },
-  rolledback: { t: "已回退", c: "var(--text-dim)" },
+  committed:  { t: "已提交", c: "warn" },
+  confirmed:  { t: "已生效", c: "ok" },
+  failed:     { t: "失败",   c: "err" },
+  rolledback: { t: "已回退", c: "dim" },
 };
 
 function fmtTime(ts) {
@@ -1266,34 +1425,38 @@ function fmtTime(ts) {
 async function renderFiles(root, background = false) {
   root.innerHTML = `
     ${batchCard()}
-    <div id="audit-card"><div style="color:var(--text-dim);font-size:12px">加载审计日志…</div></div>`;
+    <div id="audit-card"><div class="empty">加载审计日志…</div></div>`;
   bindBatchCard(root);
   await renderAudit($("#audit-card", root));
 }
 
 // ---------- 批量重命名（模板）----------
 
-const BR_VAR_HINT = "{date} 完成日期 · {type} 类型（video/audio/image/archive/doc/other） · {index} 任务内序号 · {orig} 原文件名 · {title} 任务名";
+const BR_VAR_HINT = "<code>{date}</code> 完成日期 · <code>{type}</code> 类型（video / audio / image / archive / doc / other） · <code>{index}</code> 任务内序号 · <code>{orig}</code> 原文件名 · <code>{title}</code> 任务名";
 
 function batchCard() {
   return `
-    <div class="card" style="margin-bottom:16px">
-      <div class="actions-bar">
-        <h2 style="margin:0">批量重命名</h2>
-        <span style="color:var(--text-dim);font-size:12px">先预览再执行；目标已存在时自动加后缀兜底，绝不覆盖</span>
+    <div class="page-head">
+      <div class="titles">
+        <h2>文件</h2>
+        <p>按模板批量重命名，并查看、回退自动改名记录。</p>
       </div>
-      <div class="actions-bar" style="gap:12px;flex-wrap:wrap;margin:12px 0 4px 0">
-        <div class="form-row" style="margin:0;flex:1;min-width:280px"><label>任务</label>
-          <select id="br-torrent" style="flex:1;min-width:200px"><option value="">加载中…</option></select>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h3>批量重命名</h3>
+        <span class="desc">先预览再执行；目标同名时自动加后缀兜底，绝不覆盖</span>
+        <span class="spacer"></span>
+        <div class="head-actions">
+          <button class="btn small" id="br-preview">预览</button>
+          <button class="btn small primary" id="br-apply" disabled>执行重命名</button>
         </div>
-        <div class="form-row" style="margin:0;flex:2;min-width:320px"><label>模板</label>
-          <input type="text" id="br-template" placeholder="例：{date}_{type}_{index}_{orig}" style="flex:1;min-width:240px" />
-        </div>
-        <button class="btn small" id="br-preview">预览</button>
-        <button class="btn small" id="br-apply" disabled>执行重命名</button>
       </div>
-      <div style="color:var(--text-dim);font-size:12px">变量：${BR_VAR_HINT}。仅重命名文件名（扩展名保留），目录名不变；{index} 按任务文件列表从 1 起编；执行时按当前文件列表重新计算。</div>
-      <div id="br-result" style="margin-top:10px"></div>
+      ${field("任务", `<select id="br-torrent" class="ctrl"><option value="">加载中…</option></select>`)}
+      ${field("模板",
+        `<input type="text" id="br-template" class="ctrl mono" placeholder="{date}_{type}_{index}_{orig}" />`,
+        `变量：${BR_VAR_HINT}。仅重命名文件名（扩展名保留），目录名不变；<code>{index}</code> 按任务文件列表从 1 起编，执行时按当前列表重新计算。`)}
+      <div id="br-result"></div>
     </div>`;
 }
 
@@ -1320,11 +1483,11 @@ async function bindBatchCard(root) {
     if (!hash) return toast("请先选择任务", "err");
     if (!tpl) return toast("请输入模板", "err");
     localStorage.setItem("qbhive_batch_tpl", tpl);
-    resultBox.innerHTML = `<div style="color:var(--text-dim);font-size:12px">生成预览中…</div>`;
+    resultBox.innerHTML = `<div class="empty">生成预览中…</div>`;
     const r = await api("POST", "/filemgr/batch/preview", { hash, template: tpl });
     if (!r.success) {
       lastPlan = null; applyBtn.disabled = true;
-      resultBox.innerHTML = `<div style="color:var(--danger);font-size:12px">预览失败：${escapeHTML(r.message || "未知错误")}</div>`;
+      resultBox.innerHTML = notice(`预览失败：${escapeHTML(r.message || "未知错误")}`, "danger");
       return;
     }
     lastPlan = r.data.plan || [];
@@ -1334,14 +1497,17 @@ async function bindBatchCard(root) {
       return;
     }
     const rows = lastPlan.map(p => `
-      <div class="torrent-row no-actions" style="grid-template-columns:1fr 1fr;font-size:12px">
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(p.old)}">${escapeHTML(p.old)}</span>
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(p.new)}"><span style="color:var(--text-dim)">→</span> <b>${escapeHTML(p.new)}</b></span>
-      </div>`).join("");
+      <div class="cell" title="${escapeHTML(p.old)}">${escapeHTML(p.old)}</div>
+      <div class="cell" title="${escapeHTML(p.new)}"><span class="arrow">→</span> <b>${escapeHTML(p.new)}</b></div>`).join("");
     resultBox.innerHTML = `
-      <div class="torrent-row no-actions" style="grid-template-columns:1fr 1fr;font-weight:600">
-        <span>当前文件名（共 ${lastPlan.length} 条）</span><span>新文件名</span>
-      </div>${rows}`;
+      <div class="section">
+        <div class="section-title">预览结果<span class="text-dim">共 ${lastPlan.length} 条</span></div>
+        <div class="rename-preview">
+          <div class="rp-head">当前文件名</div>
+          <div class="rp-head">新文件名</div>
+          ${rows}
+        </div>
+      </div>`;
     applyBtn.disabled = false;
   };
 
@@ -1349,7 +1515,10 @@ async function bindBatchCard(root) {
     const hash = sel.value, tpl = tplInput.value.trim();
     if (!hash || !tpl) return;
     if (!lastPlan || lastPlan.length === 0) return toast("请先预览", "err");
-    if (!confirm(`确认按模板重命名 ${lastPlan.length} 个文件？\n执行时将按任务当前文件列表重新计算；改动会写入审计日志，可回退。`)) return;
+    const ok = await confirmDialog("执行重命名",
+      `确认按模板重命名 ${lastPlan.length} 个文件？\n执行时将按任务当前文件列表重新计算；改动会写入审计日志，可回退。`,
+      { danger: false, okText: "执行" });
+    if (!ok) return;
     applyBtn.disabled = true;
     const r = await api("POST", "/filemgr/batch/apply", { hash, template: tpl });
     toast(r.message || (r.success ? "已提交 ✓" : "执行失败"), r.success ? "ok" : "err");
@@ -1367,7 +1536,7 @@ async function renderAudit(root) {
   const offset = (_filesState.page - 1) * _filesState.pageSize;
   const r = await api("GET", `/filemgr/audit?limit=${_filesState.pageSize}&offset=${offset}`);
   if (!r.success) {
-    root.innerHTML = `<div class="empty">加载审计日志失败：${escapeHTML(r.message || "")}</div>`;
+    root.innerHTML = notice(`加载审计日志失败：${escapeHTML(r.message || "")}`, "danger");
     return;
   }
   // 解构默认值只对 undefined 生效：后端无审计记录时 entries 会是 null（Go nil slice → JSON null），
@@ -1376,42 +1545,46 @@ async function renderAudit(root) {
   const entries = Array.isArray(data.entries) ? data.entries : [];
   const total = Number.isFinite(data.total) ? data.total : 0;
 
-  const rows = entries.length === 0
-    ? `<div class="empty">暂无重命名记录。启用「设置 → 文件管理 → 文件名自动清理」后，改动会记录在这里。</div>`
-    : entries.map(e => {
-        const st = AUDIT_STATUS[e.status] || { t: e.status, c: "var(--text-dim)" };
-        const canRollback = e.status === "committed" || e.status === "confirmed";
-        return `
-        <div class="torrent-row" style="grid-template-columns:140px 1fr 2.2fr 70px 76px 86px">
-          <span style="color:var(--text-dim);font-size:12px">${fmtTime(e.ts)}</span>
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(e.torrent)}">${escapeHTML(e.torrent)}</span>
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">
-            ${escapeHTML(e.old)} <span style="color:var(--text-dim)">→</span> <b>${escapeHTML(e.new)}</b>
-          </span>
-          <span style="color:var(--text-dim);font-size:12px">${e.via === "ai" ? "AI" : "正则"}</span>
-          <span class="state-tag" style="color:${st.c}">${st.t}</span>
-          <span>${canRollback
-            ? `<button class="btn small" data-audit-rollback="${escapeHTML(e.id)}">回退</button>`
-            : ""}</span>
-        </div>`;
-      }).join("");
-
-  const head = `
-    <div class="torrent-row no-actions" style="grid-template-columns:140px 1fr 2.2fr 70px 76px 86px;font-weight:600">
-      <span>时间</span><span>任务</span><span>文件名变更</span><span>方式</span><span>状态</span><span></span>
-    </div>`;
+  const rows = entries.map(e => {
+    const st = AUDIT_STATUS[e.status] || { t: e.status, c: "dim" };
+    const canRollback = e.status === "committed" || e.status === "confirmed";
+    return `
+      <div class="audit-row">
+        <span class="cell time">${fmtTime(e.ts)}</span>
+        <span class="cell" title="${escapeHTML(e.torrent)}">${escapeHTML(e.torrent)}</span>
+        <span class="cell change" title="${escapeHTML(e.old)} → ${escapeHTML(e.new)}">
+          ${escapeHTML(e.old)} <span class="arrow">→</span> <b>${escapeHTML(e.new)}</b>
+        </span>
+        <span class="cell via text-dim">${e.via === "ai" ? "AI" : "正则"}</span>
+        <span class="status"><span class="tag ${st.c}">${st.t}</span></span>
+        <span class="act">${canRollback
+          ? `<button class="btn small" data-audit-rollback="${escapeHTML(e.id)}">回退</button>`
+          : ""}</span>
+      </div>`;
+  }).join("");
 
   root.innerHTML = `
     <div class="card">
-      <div class="actions-bar">
-        <h2 style="margin:0">文件名审计日志</h2>
-        <div class="spacer"></div>
-        <span style="color:var(--text-dim);font-size:12px">共 ${total} 条 · 保留最近 2000 条</span>
-        <button class="btn small" id="audit-reload">刷新</button>
+      <div class="card-head">
+        <h3>文件名审计日志</h3>
+        <span class="desc">自动与批量改名记录，保留最近 2000 条</span>
+        <span class="spacer"></span>
+        <div class="head-actions">
+          <span class="desc">共 ${total} 条</span>
+          <button class="btn small" id="audit-reload">刷新</button>
+        </div>
       </div>
-      ${head}
-      ${rows}
-      ${pageNav(total, _filesState.page, _filesState.pageSize)}
+      ${entries.length === 0
+        ? `<div class="empty">暂无重命名记录。启用「设置 → 文件管理 → 文件名自动清理」后，改动会记录在这里。</div>`
+        : `<div class="audit-wrap">
+             <div class="audit-list">
+               <div class="audit-row head">
+                 <span>时间</span><span>任务</span><span>文件名变更</span><span>方式</span><span>状态</span><span></span>
+               </div>
+               ${rows}
+             </div>
+           </div>
+           ${pageNav(total, _filesState.page, _filesState.pageSize)}`}
     </div>`;
 
   bindPageNav(p => { _filesState.page = p; renderAudit(root); });
@@ -1419,7 +1592,8 @@ async function renderAudit(root) {
   $$("[data-audit-rollback]", root).forEach(b => {
     b.onclick = async () => {
       const id = b.dataset.auditRollback;
-      if (!confirm("确认回退这条重命名？文件名将恢复为修改前的名称。")) return;
+      const ok = await confirmDialog("回退重命名", "文件名将恢复为修改前的名称。", { okText: "回退" });
+      if (!ok) return;
       b.disabled = true;
       const res = await api("POST", "/filemgr/audit/rollback", { id });
       toast(res.message || (res.success ? "回退已提交 ✓" : "回退失败"), res.success ? "ok" : "err");
