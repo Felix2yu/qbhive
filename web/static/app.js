@@ -1351,7 +1351,11 @@ async function renderAudit(root) {
     root.innerHTML = `<div class="empty">加载审计日志失败：${escapeHTML(r.message || "")}</div>`;
     return;
   }
-  const { entries = [], total = 0 } = r.data || {};
+  // 解构默认值只对 undefined 生效：后端无审计记录时 entries 会是 null（Go nil slice → JSON null），
+  // 必须显式兜底，否则 null.length 在 Safari 报 "null is not an object"
+  const data = r.data || {};
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const total = Number.isFinite(data.total) ? data.total : 0;
 
   const rows = entries.length === 0
     ? `<div class="empty">暂无重命名记录。启用「设置 → 文件管理 → 文件名自动清理」后，改动会记录在这里。</div>`

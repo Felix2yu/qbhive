@@ -214,8 +214,9 @@ func (a *auditLog) List(offset, limit int) ([]auditEntry, int) {
 	if limit <= 0 {
 		limit = 50
 	}
-	// entries 是旧→新；倒序取
-	var out []auditEntry
+	// entries 是旧→新；倒序取。
+	// 用 make 初始化空切片：无记录时也序列化为 [] 而不是 null，避免前端 null.length 报错
+	out := make([]auditEntry, 0, limit)
 	for i := total - 1 - offset; i >= 0 && len(out) < limit; i-- {
 		out = append(out, a.entries[i])
 	}
