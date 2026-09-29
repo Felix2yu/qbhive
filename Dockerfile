@@ -1,17 +1,5 @@
-# ---- build stage ----
-FROM golang:1.27-alpine AS builder
-
-WORKDIR /src
-RUN apk add --no-cache git ca-certificates
-
-# 利用 Docker layer 缓存：只有依赖变更才重新跑 go mod download
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/qbhive ./cmd/server
-
-# ---- runtime ----
+# 运行时镜像：二进制由 CI 预编译并下载到 bin/ 后拼装，
+# 镜像内不再拉 Go 工具链（构建从 ~10min 降到 ~1min）。
 FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata \
@@ -19,7 +7,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 WORKDIR /app
 
-COPY --from=builder /out/qbhive /app/qbhive
+COPY --chmod=755 bin/qbhive /app/qbhive
 COPY web/static /app/web/static
 
 RUN mkdir -p /app/data && chown -R qbhive:qbhive /app
