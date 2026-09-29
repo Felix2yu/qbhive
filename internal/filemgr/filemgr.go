@@ -565,6 +565,13 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	}
 	m.mu.Unlock()
 
+	// 存储已脱钩的任务（qB 找不到实体文件）绝不清洗：renameFile 只会改内部元数据，
+	// 磁盘上的脏文件名永远洗不掉，还会让日后「找回文件/重新校验」对不上路径。
+	switch t.State {
+	case "missingFiles", "error":
+		return
+	}
+
 	files, err := m.client.GetTorrentFiles(t.Hash)
 	if err != nil {
 		logger.Warn.Printf("文件清理 [%s] 获取文件列表失败：%v，下轮重试", t.Name, err)
@@ -572,16 +579,17 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	}
 	changed := false
 
-	// 1) 核销 pending：qB renameFile 异步，按 base 名消失判定落地（防父目录改名误判）
+	// 1) 核销 pending：qB renameFile 异步，按「旧完整路径从文件列表消失」判定落地。
+	//    重命名以文件为粒度（newPath 可改目录段），仅比 base 名会把换目录误判为未落地。
 	m.mu.Lock()
 	if len(rec.Pending) > 0 {
-		baseSet := make(map[string]bool, len(files))
+		pathSet := make(map[string]bool, len(files))
 		for _, f := range files {
-			baseSet[path.Base(f.Name)] = true
+			pathSet[f.Name] = true
 		}
 		var remaining []cleanRename
 		for _, p := range rec.Pending {
-			if !baseSet[path.Base(p.Old)] {
+			if !pathSet[p.Old] {
 				logger.Info.Printf("文件清理 [%s] 已确认重命名落地 %s → %s", t.Name, p.Old, p.New)
 				if p.AuditID != "" {
 					m.audit.UpdateStatus(p.AuditID, AuditConfirmed)

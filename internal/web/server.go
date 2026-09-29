@@ -455,7 +455,7 @@ func (s *Server) debugQBRaw(c *gin.Context) {
 	reqURL := qbURL + path
 	req, _ := http.NewRequest("GET", reqURL, nil)
 	if key := s.cfg.Get().Qbittorrent.APIKey; key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("X-Webapi-Key", key)
 	} else if ck := s.qbClient.GetCookie(); ck != "" {
 		req.Header.Set("Cookie", ck)
 	}

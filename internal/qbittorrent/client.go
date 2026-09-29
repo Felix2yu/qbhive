@@ -117,7 +117,8 @@ func (c *Client) _doRaw(method, path string, body io.Reader, contentType string)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		// qBittorrent WebAPI 密钥只认 X-Webapi-Key 头（Authorization: Bearer 会 403）
+		req.Header.Set("X-Webapi-Key", c.apiKey)
 	} else {
 		if c.cookie == "" {
 			if err := c.login(); err != nil {

@@ -719,7 +719,7 @@ func TestDebugQBRaw_NoURLConfigured(t *testing.T) {
 	}
 }
 
-// TestDebugQBRaw_UsesAPIKeyHeader 覆盖"配置了 APIKey → 路径 A 带 Authorization 头"分支
+// TestDebugQBRaw_UsesAPIKeyHeader 覆盖"配置了 APIKey → 路径 A 带 X-Webapi-Key 头"分支
 func TestDebugQBRaw_UsesAPIKeyHeader(t *testing.T) {
 	mock := newMockQB(t)
 	s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
@@ -745,8 +745,8 @@ func TestDebugQBRaw_UsesAPIKeyHeader(t *testing.T) {
 	if len(hdrs) == 0 {
 		t.Fatal("mock 未收到 torrents/info 请求")
 	}
-	if got := hdrs[0].Get("Authorization"); got != "Bearer k-123" {
-		t.Errorf("路径 A 应带 Authorization: Bearer k-123，got %q", got)
+	if got := hdrs[0].Get("X-Webapi-Key"); got != "k-123" {
+		t.Errorf("路径 A 应带 X-Webapi-Key: k-123，got %q", got)
 	}
 }
 

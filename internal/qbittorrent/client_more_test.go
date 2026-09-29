@@ -591,14 +591,14 @@ func TestClient_AddTorrent_WithCategoryAndTags(t *testing.T) {
 
 // ============ applyLatestUploadLimit ============
 
-// API key 模式：请求应带上 Authorization 头（401 也不触发 cookie 重登）
+// API key 模式：请求应带 X-Webapi-Key 头（qB 只认这个，401 也不触发 cookie 重登）
 func TestClient_doRaw_APIKeyAuthorizationHeader(t *testing.T) {
 	var mu sync.Mutex
-	var gotAuth string
+	var gotKey string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		gotAuth = r.Header.Get("Authorization")
+		gotKey = r.Header.Get("X-Webapi-Key")
 		mu.Unlock()
 		_, _ = w.Write([]byte(`"5.2.0"`))
 	})
@@ -610,10 +610,10 @@ func TestClient_doRaw_APIKeyAuthorizationHeader(t *testing.T) {
 		t.Fatalf("API key 模式请求应成功: %v", err)
 	}
 	mu.Lock()
-	got := gotAuth
+	got := gotKey
 	mu.Unlock()
-	if got != "Bearer qbt_key123" {
-		t.Errorf("Authorization 头错误: got %q want %q", got, "Bearer qbt_key123")
+	if got != "qbt_key123" {
+		t.Errorf("X-Webapi-Key 头错误: got %q want %q", got, "qbt_key123")
 	}
 	if cli.GetCookie() != "" {
 		t.Errorf("API key 模式不应产生 cookie，got %q", cli.GetCookie())

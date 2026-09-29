@@ -100,6 +100,19 @@ func TestLooksLikeDomain(t *testing.T) {
 	}
 }
 
+// touchCleanSource 在 savePath 下创建清洗计划的「源文件」实体：
+// buildCleanPlan 有实体存在性护栏（僵尸任务磁盘无文件时跳过），测试须先落盘。
+func touchCleanSource(t *testing.T, savePath, rel string) {
+	t.Helper()
+	p := filepath.Join(savePath, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBuildCleanPlan(t *testing.T) {
 	savePath := t.TempDir()
 	files := []models.QBFile{
@@ -107,14 +120,36 @@ func TestBuildCleanPlan(t *testing.T) {
 		{Name: "[site.com] Movie/sub/file two.mkv"},
 		{Name: "[site.com] Movie/readme.txt"},
 	}
-	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
-	// 期望：父目录 [site.com] Movie → Movie（1 条），深度 1 先于深度 0；
-	// 文件 base 无变化不产生条目
-	if len(plan) != 1 {
-		t.Fatalf("plan length = %d, want 1: %+v", len(plan), plan)
+	for _, f := range files {
+		touchCleanSource(t, savePath, f.Name)
 	}
-	if plan[0].Old != "[site.com] Movie" || plan[0].New != "Movie" {
-		t.Errorf("plan[0] = %v, want [site.com] Movie -> Movie", plan[0])
+	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	// qB renameFile 不认目录段（409），目录改名必须落成「每个文件一条」的全路径移动
+	if len(plan) != 3 {
+		t.Fatalf("plan length = %d, want 3: %+v", len(plan), plan)
+	}
+	want := [][2]string{
+		{"[site.com] Movie/sub/file one.mkv", "Movie/sub/file one.mkv"},
+		{"[site.com] Movie/sub/file two.mkv", "Movie/sub/file two.mkv"},
+		{"[site.com] Movie/readme.txt", "Movie/readme.txt"},
+	}
+	for i, w := range want {
+		if plan[i].Old != w[0] || plan[i].New != w[1] {
+			t.Errorf("plan[%d] = %v, want %v → %v", i, plan[i], w[0], w[1])
+		}
+	}
+}
+
+// 清洗结果若会把路径逃出保存根（. / .. 段），必须整条跳过
+func TestBuildCleanPlanEscapeGuard(t *testing.T) {
+	savePath := t.TempDir()
+	files := []models.QBFile{{Name: "正常名/../../evil.mkv"}}
+	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	// "../../evil" 里的 ".." 段：cleanBase 不改动 → newFull 含 ".." → 护栏拒绝
+	for _, r := range plan {
+		if r.New == "../../evil.mkv" {
+			t.Errorf("越界目标不应进入计划: %+v", plan)
+		}
 	}
 }
 
@@ -123,6 +158,9 @@ func TestBuildCleanPlanDedupAndConflict(t *testing.T) {
 	files := []models.QBFile{
 		{Name: "www.a.com Movie.mkv"},
 		{Name: "www.b.com Movie.mkv"}, // 两个文件清洗后同名 → 第二条加 _hash8
+	}
+	for _, f := range files {
+		touchCleanSource(t, savePath, f.Name)
 	}
 	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	if len(plan) != 2 {
@@ -143,6 +181,7 @@ func TestBuildCleanPlanDiskConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	files := []models.QBFile{{Name: "www.a.com Movie.mkv"}}
+	touchCleanSource(t, savePath, "www.a.com Movie.mkv")
 	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	if len(plan) != 1 {
 		t.Fatalf("plan length = %d, want 1: %+v", len(plan), plan)
@@ -155,9 +194,21 @@ func TestBuildCleanPlanDiskConflict(t *testing.T) {
 func TestBuildCleanPlanAISkip(t *testing.T) {
 	savePath := t.TempDir()
 	files := []models.QBFile{{Name: "www.a.com Movie.mkv"}}
+	touchCleanSource(t, savePath, "www.a.com Movie.mkv")
 	aiNames := map[string]string{"Movie": "The Movie (Clean)"} // 以 post-regex base 为键
 	plan := buildCleanPlan(files, nil, aiNames, savePath, "abcdef1234567890")
 	if len(plan) != 1 || plan[0].New != "The Movie (Clean).mkv" || plan[0].Via != "ai" {
 		t.Errorf("plan = %+v, want The Movie (Clean).mkv via ai", plan)
+	}
+}
+
+// 僵尸任务护栏：qB 文件列表里的路径在磁盘上不存在（存储已脱钩）时，
+// renameFile 只会改内部元数据、文件永远洗不到，必须整条跳过
+func TestBuildCleanPlanSourceMissingSkip(t *testing.T) {
+	savePath := t.TempDir()
+	files := []models.QBFile{{Name: "www.a.com Movie.mkv"}} // 不落盘
+	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	if len(plan) != 0 {
+		t.Fatalf("plan = %+v, want 空（源文件不在磁盘上必须跳过）", plan)
 	}
 }

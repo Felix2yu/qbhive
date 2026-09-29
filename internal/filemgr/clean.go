@@ -2,9 +2,9 @@ package filemgr
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/Felix2yu/qbhive/internal/logger"
@@ -368,42 +368,38 @@ type cleanRename struct {
 	AuditID  string `json:"auditId,omitempty"` // 关联的审计记录 ID
 }
 
-// buildCleanPlan 逐段清洗种子内所有路径（含顶层目录段），生成重命名计划。
+// buildCleanPlan 逐文件清洗种子的完整路径（含全部目录段），生成重命名计划。
+//
+// 必须按「文件」而非「目录段」提交：qB 的 /torrents/renameFile 只接受文件路径，
+// 对目录段直接 409（没有这个文件）；目录改名只能通过把其中每个文件
+// rename 到新完整路径来实现，空目录由 qB 侧随之消失。
 //
 // 算法：
-//  1. 每个 file.Name 按 "/" 拆段；文件末段（base）走 cleanBase →（可选）AI 格式化 →
-//     sanitize；目录段只走 cleanBase → sanitize；扩展名永不参与清洗
-//  2. 任一段有变化 → 以完整旧路径生成一条 cleanRename（按旧路径去重，多文件共享
-//     父目录只生成一条）
-//  3. 计划内目标去重：两个条目清洗到同一目标名时，后者加 "_hash8" 后缀兜底
+//  1. 每个 file.Name 按 "/" 拆段逐段清洗：文件末段（base）走 cleanBase →（可选）
+//     AI 格式化 → sanitize；目录段走 cleanBase → sanitize；扩展名永不参与清洗
+//  2. 新完整路径 ≠ 旧完整路径 → 生成一条 cleanRename
+//  3. 计划内目标去重：两条清洗到同一目标路径时，后者文件段加 "_hash8" 后缀兜底
 //  4. 磁盘冲突预检：目标在 savePath 下已存在（绝不覆盖已有文件）→ 加 _hash8 后缀，
 //     仍冲突则跳过该条并 Warn
-//  5. 按路径深度降序（bottom-up）排序——先改文件/深层段，最后改祖先目录，
-//     保证每条 oldPath 提交时仍然有效
 //
 // aiNames：AI 返回的 base 名映射（post-regex base → AI 新名）；nil 表示 AI 未启用/失败
 func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[string]string, savePath, hash string) []cleanRename {
-	type entry struct {
-		old, new, via string
-		depth         int
-	}
-	seen := make(map[string]bool) // 以「父前缀+段名」去重（多文件共享父目录场景）
-	var entries []entry
-
 	suffix := hash
 	if len(suffix) > 8 {
 		suffix = suffix[:8]
 	}
+	usedTargets := make(map[string]bool)
+	var plan []cleanRename
 
 	for _, f := range files {
 		if f.Name == "" {
 			continue
 		}
 		segs := strings.Split(strings.Trim(f.Name, "/"), "/")
+		newSegs := make([]string, 0, len(segs))
+		changed := false
+		viaAI := false
 		for i, seg := range segs {
-			if seg == "" {
-				continue
-			}
 			isFileSeg := i == len(segs)-1
 			// 文件段拆出扩展名：扩展名永不参与清洗，清洗后原样拼回
 			ext := ""
@@ -416,84 +412,58 @@ func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[
 			}
 			cleaned := cleanBase(workSeg, custom)
 			// AI 映射以正则清洗后的 base 名为键（AI 对清洗结果做二次格式化）
-			viaAI := false
 			if isFileSeg && aiNames != nil {
 				if v, ok := aiNames[cleaned]; ok && strings.TrimSpace(v) != "" {
 					cleaned = strings.TrimSpace(v)
 					viaAI = true
 				}
 			}
-			cleaned = sanitizeCleaned(workSeg, cleaned)
-			cleaned += ext
-			if cleaned == seg {
-				continue
+			cleaned = sanitizeCleaned(workSeg, cleaned) + ext
+			if cleaned != seg {
+				changed = true
 			}
-			// 同一父路径下的同名段去重：以「父前缀+段名」为键
-			parent := strings.Join(segs[:i], "/")
-			key := parent + "\x00" + seg
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			via := "regex"
-			if viaAI {
-				via = "ai"
-			}
-			oldFull := strings.Join(segs[:i+1], "/")
-			// qB renameFile 的 newPath 是重命名对象自身的完整路径（不含子树）
-			newSegs := make([]string, 0, i+1)
-			newSegs = append(newSegs, segs[:i]...)
 			newSegs = append(newSegs, cleaned)
-			entries = append(entries, entry{
-				old:   oldFull,
-				new:   strings.Join(newSegs, "/"),
-				via:   via,
-				depth: i,
-			})
 		}
-	}
-	// 目录段的 rename 会连带其子树，父目录条目按其自身旧路径去重已覆盖多文件共享场景
-	seenOld := make(map[string]bool)
-	var plan []cleanRename
-	usedTargets := make(map[string]bool)
-	// 深度降序（bottom-up），同深度按旧路径稳定排序
-	sort.SliceStable(entries, func(a, b int) bool {
-		if entries[a].depth != entries[b].depth {
-			return entries[a].depth > entries[b].depth
-		}
-		return entries[a].old < entries[b].old
-	})
-	for _, e := range entries {
-		if seenOld[e.old] {
+		oldFull := strings.Join(segs, "/")
+		newFull := strings.Join(newSegs, "/")
+		if !changed || newFull == oldFull {
 			continue
 		}
-		seenOld[e.old] = true
-		newName := e.new
-		// 计划内目标去重：同目标第二条加 _hash8 后缀
-		if usedTargets[newName] {
-			ext := filepath.Ext(newName)
-			base := newName[:len(newName)-len(ext)]
-			newName = base + "_" + suffix + ext
+		// 越界护栏：清洗后的目标必须仍严格落在 savePath 内（拒绝 . / .. / 逃逸段）
+		if relDst, err := filepath.Rel(savePath, filepath.Join(savePath, filepath.FromSlash(newFull))); err != nil || relDst == "." || strings.HasPrefix(relDst, "..") {
+			logger.Warn.Printf("文件清洗：目标 %s 越出保存根，跳过 %s", newFull, oldFull)
+			continue
 		}
-		// 磁盘冲突预检：绝不覆盖已存在的文件/目录
-		dst := filepath.Join(savePath, filepath.FromSlash(newName))
-		if _, err := os.Stat(dst); err == nil {
-			ext := filepath.Ext(newName)
-			base := newName[:len(newName)-len(ext)]
-			alt := base + "_" + suffix + ext
-			altDst := filepath.Join(savePath, filepath.FromSlash(alt))
-			if _, err2 := os.Stat(altDst); err2 == nil {
-				logger.Warn.Printf("文件清洗：目标 %s 与 %s 均已存在，跳过 %s（绝不覆盖）", newName, alt, e.old)
+		// 实体存在性护栏：qB 记录的文件在磁盘上并不存在（与存储脱钩的僵尸任务）时，
+		// renameFile 只会改内部元数据——文件永远洗不掉，还会阻碍日后重新校验找回，必须跳过。
+		if _, err := os.Lstat(filepath.Join(savePath, filepath.FromSlash(oldFull))); err != nil {
+			continue
+		}
+		// 计划内目标去重：同目标第二条起在文件段加 _hash8
+		if usedTargets[newFull] {
+			ext := path.Ext(newFull)
+			newFull = newFull[:len(newFull)-len(ext)] + "_" + suffix + ext
+		}
+		// 磁盘冲突预检：绝不覆盖已存在的文件
+		if _, err := os.Lstat(filepath.Join(savePath, filepath.FromSlash(newFull))); err == nil {
+			ext := path.Ext(newFull)
+			alt := newFull[:len(newFull)-len(ext)] + "_" + suffix + ext
+			if _, err2 := os.Lstat(filepath.Join(savePath, filepath.FromSlash(alt))); err2 == nil {
+				logger.Warn.Printf("文件清洗：目标 %s 与 %s 均已存在，跳过 %s（绝不覆盖）", newFull, alt, oldFull)
 				continue
 			}
-			logger.Info.Printf("文件清洗：目标 %s 已存在，改用兜底名 %s", newName, alt)
-			newName = alt
+			logger.Info.Printf("文件清洗：目标 %s 已存在，改用兜底名 %s", newFull, alt)
+			newFull = alt
 		}
-		if newName == e.old {
+		if newFull == oldFull {
 			continue
 		}
-		usedTargets[newName] = true
-		plan = append(plan, cleanRename{Old: e.old, New: newName, Via: e.via})
+		usedTargets[newFull] = true
+		via := "regex"
+		if viaAI {
+			via = "ai"
+		}
+		plan = append(plan, cleanRename{Old: oldFull, New: newFull, Via: via})
 	}
 	return plan
 }

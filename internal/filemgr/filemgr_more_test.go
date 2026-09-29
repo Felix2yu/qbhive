@@ -883,3 +883,36 @@ func TestManager_scan_FreshHashHandledOnce(t *testing.T) {
 		t.Errorf("重复 scan 不应重复处理: %v", env.m.done)
 	}
 }
+
+// TestManager_handleClean_MissingFilesSkips 存储已脱钩（missingFiles/error）的任务
+// 绝不能进入清洗：renameFile 只会改 qB 内部元数据，磁盘文件洗不到，
+// 还会让日后重新校验对不上路径。
+func TestManager_handleClean_MissingFilesSkips(t *testing.T) {
+	env := newFilemgrEnv(t, true, 15, "")
+	save := env.saveDir
+	// 磁盘放一个带水印名的文件：若无护栏，计划必产生一条 renameFile
+	touchCleanSource(t, save, "www.a.com Movie.mkv")
+	env.setFiles(`[{"name":"www.a.com Movie.mkv","size":1,"progress":1.0}]`)
+
+	for _, st := range []string{"missingFiles", "error"} {
+		env.m.handleClean(models.QBTorrent{Hash: testHash, Name: "Zombie", State: st, SavePath: save, Progress: 1.0})
+		for _, c := range env.calls() {
+			if strings.HasPrefix(c, "stop:") || strings.HasPrefix(c, "renameFile:") || strings.HasPrefix(c, "start:") {
+				t.Fatalf("%s 任务不应产生任何改名调用: %v", st, env.calls())
+			}
+		}
+	}
+
+	// 对照：健康状态同名文件任务应正常提交改名
+	env.m.cleanState[testHash].Done = false
+	env.m.handleClean(models.QBTorrent{Hash: testHash, Name: "Zombie", State: "stoppedUP", SavePath: save, Progress: 1.0})
+	var renamed bool
+	for _, c := range env.calls() {
+		if c == "renameFile:"+testHash+":www.a.com Movie.mkv->Movie.mkv" {
+			renamed = true
+		}
+	}
+	if !renamed {
+		t.Fatalf("健康任务应提交清洗改名: %v", env.calls())
+	}
+}
