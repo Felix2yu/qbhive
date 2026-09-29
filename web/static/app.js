@@ -386,6 +386,12 @@ window.addEventListener("hashchange", () => {
   if (v !== currentView) switchView(v);
 });
 
+// 自适应高度文本域（.auto-h）：内容变化即时撑高，超过 CSS max-height 后内部滚动。
+// 用 document 级事件委托，动态重渲染出的文本域无需重新绑定。
+document.addEventListener("input", (e) => {
+  if (e.target && e.target.classList && e.target.classList.contains("auto-h")) autosize(e.target);
+});
+
 // ---------- 主题 ----------
 // 三种模式：auto（跟随系统）、dark、light；持久化到 localStorage
 const THEME_KEY = "qbhive-theme";
@@ -740,6 +746,20 @@ function renderPage() {
 // 新增/删除/改规则后传本地已修改的 rss，避免覆盖内存中的改动。
 let _rssStatusTimer = null;
 
+// autosize：把 .auto-h 文本域高度撑到内容高度，封顶到 CSS 的 max-height（超出内部滚动）。
+// <textarea> 是替换元素，纯 CSS 无法按内容增高，必须 JS 设 height。
+function autosize(t) {
+  t.style.height = "auto";
+  const cs = getComputedStyle(t);
+  const min = parseFloat(cs.minHeight) || 0;
+  const max = parseFloat(cs.maxHeight) || 320;
+  // +1：scrollHeight 向下取整，补足舍入误差，避免最后一行差 1px 触发内滚动
+  t.style.height = Math.min(Math.max(t.scrollHeight + 1, min), max) + "px";
+}
+function autosizeAll(root) {
+  (root || document).querySelectorAll("textarea.auto-h").forEach(autosize);
+}
+
 async function renderRSS(root, rss) {
   // 第二个参数可能是 switchView 传入的 background 布尔，也可能是内部重渲传入的 rss 配置对象；
   // 只有真正的对象才复用，其余一律从 /config 重新拉取（并兜底请求失败）
@@ -830,6 +850,7 @@ async function renderRSS(root, rss) {
     refreshRSSStatus(true);
   });
   bindFeedEvents(rss);
+  autosizeAll(root); // 初始渲染：按已填内容撑高 include/exclude，长规则不再被截断
 
   // 启动状态自动刷新（先停掉旧的，避免多个 RSS 页并发）
   if (_rssStatusTimer) clearInterval(_rssStatusTimer);

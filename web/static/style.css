@@ -197,10 +197,10 @@ select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='none' stroke='%238a90a0' stroke-width='1.6' stroke-linecap='round' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 10px center;
 }
-/* 自适应高度文本域：按内容撑高，超过上限内部滚动 */
+/* 自适应高度文本域：按内容撑高（JS autosize），超过上限内部滚动 */
 textarea.auto-h {
   resize: none; white-space: pre-wrap; overflow-y: auto;
-  min-height: var(--ctrl-h); max-height: 168px;
+  min-height: var(--ctrl-h); max-height: 320px;
 }
 /* URL / 正则 / 密钥等等宽内容 */
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
