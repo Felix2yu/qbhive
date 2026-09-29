@@ -263,6 +263,26 @@ func validateConfig(in *models.AppConfig) string {
 			return "qBittorrent URL 必须以 http:// 或 https:// 开头"
 		}
 	}
+	// 代理配置：mode 限定枚举；manual 或「填了 URL」时须是受支持的代理地址
+	switch in.Proxy.Mode {
+	case "", "system", "off", "manual":
+	default:
+		return "代理模式只能是 跟随系统 / 关闭 / 手动"
+	}
+	if proxyURL := strings.TrimSpace(in.Proxy.URL); proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return "代理地址无法解析：" + proxyURL
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return "代理地址协议仅支持 http/https/socks5/socks5h：" + proxyURL
+		}
+		if u.Host == "" {
+			return "代理地址缺少主机/端口：" + proxyURL
+		}
+	}
 	// 间隔字段 >= 1
 	if in.RSS.Interval < 1 && in.RSS.Enabled {
 		return "RSS 刷新间隔必须 ≥ 1 分钟"

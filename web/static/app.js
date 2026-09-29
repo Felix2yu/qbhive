@@ -259,6 +259,15 @@ function validateConfigJS(cfg) {
   if (c.fileManager && c.fileManager.enabled) {
     if ((c.fileManager.scanInterval || 0) < 1) return "文件管理扫描间隔必须 ≥ 1 秒";
   }
+  // 代理配置
+  if (c.proxy) {
+    const pmodes = ["system", "manual", "off", ""];
+    if (!pmodes.includes(c.proxy.mode)) return "代理模式非法";
+    const purl = (c.proxy.url || "").trim();
+    if (purl && !["http://", "https://", "socks5://", "socks5h://"].some(s => purl.startsWith(s))) {
+      return "代理地址需以 http:// https:// socks5:// 或 socks5h:// 开头";
+    }
+  }
   // Apprise URL 协议
   if (c.notifier) {
     const urls = (c.notifier.appriseUrls || []).map(s => (s || "").trim()).filter(Boolean);
@@ -1063,6 +1072,9 @@ function syncFormToCfg() {
   const key = $("#qb-apikey").value;
   if (key && key !== "********") c.qbittorrent.apiKey = key;
   c.server.listen = $("#srv-listen").value;
+  if (!c.proxy) c.proxy = { mode: "system", url: "" };
+  c.proxy.mode = $("#proxy-mode").value;
+  c.proxy.url = $("#proxy-url").value.trim();
   c.limiter.enabled = $("#lim-enabled").checked;
   c.limiter.interval = parseInt($("#lim-interval").value || "10", 10);
   c.limiter.rules = $$("[data-lm-name]").map(n => {
@@ -1253,6 +1265,24 @@ async function renderSettings(root) {
       </div>
     </div>
 
+    <!-- 网络代理 -->
+    <div class="card">
+      <div class="card-head">
+        <h3>网络代理</h3>
+        <span class="desc">RSS 拉取、通知、AI 美化等所有出站请求统一走代理；qBittorrent 与 Ollama 等本机回环地址始终直连</span>
+      </div>
+      ${field("模式", `
+        <select id="proxy-mode" class="ctrl">
+          <option value="system"${(cfg.proxy && cfg.proxy.mode ? cfg.proxy.mode : "system") === "system" ? " selected" : ""}>跟随 macOS 系统代理</option>
+          <option value="manual"${cfg.proxy && cfg.proxy.mode === "manual" ? " selected" : ""}>手动指定</option>
+          <option value="off"${cfg.proxy && cfg.proxy.mode === "off" ? " selected" : ""}>直连（忽略系统代理与环境变量）</option>
+        </select>`,
+        "「跟随系统」自动读取 macOS「系统设置 → 网络 → 代理」，无显式代理（仅 PAC）时回退环境变量。<code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>/<code>NO_PROXY</code> 亦生效。")}
+      ${field("代理地址", `<input type="text" id="proxy-url" class="ctrl mono" value="${escapeHTML((cfg.proxy && cfg.proxy.url) || "")}" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />`,
+        "仅「手动指定」模式生效。支持 <code>http://</code> <code>https://</code> <code>socks5://</code> <code>socks5h://</code>；留空则直连。")}
+      <div class="hint" id="proxy-status">${escapeHTML((cfg.proxy && cfg.proxy.mode === "off") ? "当前模式：直连，代理已关闭。" : "保存后立即对后续请求生效，无需重启。")}</div>
+    </div>
+
     <!-- 限速 -->
     <div class="card">
       <div class="card-head">
@@ -1356,6 +1386,20 @@ async function renderSettings(root) {
     toast(r.success ? "连接成功 ✓" : (r.message || "连接失败"), r.success ? "ok" : "err");
     if (r.success) updateStatus("ok", "qb 已连接");
   };
+
+  // 代理：仅手动模式启用地址输入，实时提示生效范围
+  const proxyMode = $("#proxy-mode"), proxyUrl = $("#proxy-url"), proxyStatus = $("#proxy-status");
+  const syncProxyUI = () => {
+    const m = proxyMode.value;
+    proxyUrl.disabled = m !== "manual";
+    proxyStatus.textContent = m === "off"
+      ? "直连：忽略系统代理与环境变量。"
+      : m === "system"
+        ? "跟随 macOS 系统代理，保存后立即对后续请求生效（本机回环地址始终直连）。"
+        : "手动代理，保存后立即对后续请求生效（本机回环地址始终直连）。";
+  };
+  proxyMode.addEventListener("change", syncProxyUI);
+  syncProxyUI();
 
   $("#lim-add").onclick = () => {
     syncFormToCfg();

@@ -12,6 +12,7 @@ import (
 	"github.com/Felix2yu/qbhive/internal/logger"
 	"github.com/Felix2yu/qbhive/internal/notifier"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
+	"github.com/Felix2yu/qbhive/internal/proxy"
 	"github.com/Felix2yu/qbhive/internal/rss"
 	"github.com/Felix2yu/qbhive/internal/scheduler"
 	"github.com/Felix2yu/qbhive/internal/web"
@@ -26,6 +27,11 @@ func main() {
 
 	cfgMgr := config.New(*cfgFile)
 	cfg := cfgMgr.Get()
+
+	// 装配全局出网代理：必须早于任何 client（qB / apprise / RSS / AI）构造，
+	// 因它们共享 http.DefaultTransport。localhost 目标恒定直连。
+	proxy.Install(cfgMgr)
+	logger.Info.Printf("代理：%s", proxy.Snapshot(cfgMgr))
 
 	qbCli := qb.New(cfg.Qbittorrent.URL, cfg.Qbittorrent.Username, cfg.Qbittorrent.Password, cfg.Qbittorrent.APIKey)
 	if err := qbCli.TestConnection(); err != nil {

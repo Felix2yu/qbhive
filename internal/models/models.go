@@ -8,6 +8,19 @@ type AppConfig struct {
 	RSS          RSSConfig        `json:"rss"`
 	Limiter      LimiterConfig    `json:"limiter"`
 	FileManager  FileManagerConfig `json:"fileManager"`
+	Proxy        ProxyConfig      `json:"proxy"`
+}
+
+// ProxyConfig 控制 qbhive 所有出网请求（RSS 抓取、通知、远程 qB/AI）走哪个代理。
+// qB/Ollama 等 localhost 目标恒定直连，不受影响。
+//
+// 零值（旧 config.json 缺省）Mode="" 等价 "system"：自动跟随 macOS 系统代理。
+type ProxyConfig struct {
+	// Mode: "" / "system"（跟随 macOS 系统代理，失败回退 HTTP_PROXY 环境变量）、
+	// "manual"（固定用 URL）、"off"（强制直连，忽略系统代理与环境变量）
+	Mode string `json:"mode"`
+	// URL 手动代理地址，Mode=manual 时生效；支持 http:// host:port 与 socks5:// host:port
+	URL string `json:"url"`
 }
 
 type QBConfig struct {

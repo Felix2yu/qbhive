@@ -32,7 +32,7 @@
   --ctrl-h-sm: 28px;
   --label-w: 168px;
   --field-gap: 20px;
-  --ctrl-max: 560px;
+  --ctrl-max: 800px;
 }
 
 /* —— 亮色主题 —— */
@@ -298,7 +298,7 @@ textarea.auto-h {
 /* ========== 条目块（限速规则 / AI 通道 / RSS 订阅源） ==========
    宽度与卡片字段列右边缘对齐，避免整宽面板里右侧大片空白 */
 .item {
-  max-width: 748px;
+  max-width: 988px;
   border: 1px solid var(--border); border-radius: var(--radius-card);
   background: var(--panel-2); padding: 16px; margin-bottom: 12px;
 }
@@ -311,16 +311,20 @@ textarea.auto-h {
   color: var(--text-dim); font-size: 12px; font-weight: 600;
   display: inline-flex; align-items: center; justify-content: center;
 }
-/* 条目内标签列 136 + 间距 20 + 控件 560 + 左右内边距 32 = 748，与外层字段列同宽 */
+/* 条目内标签列 136 + 间距 20 + 控件 800 + 左右内边距 32 = 988，与外层字段列同宽 */
 .item .field { --label-w: 136px; margin-bottom: 12px; }
 .item .field > label, .item .field .lbl { line-height: var(--ctrl-h); }
 /* 条目块底色是 --panel-2，控件默认同色会在亮色主题下糊成一片 → 控件回到 --panel */
 .item input, .item select, .item textarea { background: var(--panel); }
 
-/* RSS 订阅源卡片：头部行与下方规则块同宽；
-   标签列 152 = 卡片内边距差 16 + 规则内标签列 136，使订阅地址输入框与规则输入框左右对齐 */
-.card.feed { --label-w: 152px; }
-.card.feed > .item-head { max-width: 748px; }
+/* RSS 订阅源卡片：整块铺满卡片宽度（跟随 main 1280 上限），不再受 988 约束。
+   控件列 --ctrl-max: none → 订阅地址 / 规则内输入框填满所在列；
+   卡片标签列 216 = 规则内标签列 196 + 卡片与规则的内边距差 20，
+   使「订阅地址」输入框与下方规则的输入框左右边缘对齐。 */
+.card.feed { --label-w: 216px; --ctrl-max: none; }
+.card.feed > .item-head { max-width: none; }
+.card.feed .item { max-width: none; }
+.card.feed .item .field { --label-w: 196px; --ctrl-max: none; }
 
 /* ========== 工具栏（列表页筛选条） ========== */
 .toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
