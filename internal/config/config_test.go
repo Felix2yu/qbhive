@@ -79,6 +79,36 @@ func TestManager_SaveAndLoad_RoundTrip(t *testing.T) {
 	}
 }
 
+// 老配置文件里没有 verify 字段时必须补成「开启」：这是删原片前的防误删闸门，
+// 缺省关闭等于升级后静默退回到「只看大小」的风险行为。
+func TestManager_Load_PostProcessVerifyDefaultsTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"server":{"listen":":8088"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{path: path}
+	if err := m.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	pp := m.Get().FileManager.PostProcess
+	if pp.Verify == nil || !*pp.Verify {
+		t.Fatalf("缺失的 verify 应补成 true，got %v", pp.Verify)
+	}
+
+	// 显式写成 false 必须保留（用户主动关掉校验时不能被强行打开）
+	if err := os.WriteFile(path, []byte(`{"fileManager":{"postProcess":{"enabled":true,"verify":false}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m2 := &Manager{path: path}
+	if err := m2.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if v := m2.Get().FileManager.PostProcess.Verify; v == nil || *v {
+		t.Error("显式 false 不该被默认值覆盖")
+	}
+}
+
 func TestManager_Save_CreatesParentDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a", "b", "c", "config.json")
