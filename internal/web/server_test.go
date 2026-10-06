@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Felix2yu/qbhive/internal/config"
+	"github.com/Felix2yu/qbhive/internal/logger"
 	"github.com/Felix2yu/qbhive/internal/models"
 	"github.com/Felix2yu/qbhive/internal/notifier"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
@@ -526,5 +528,91 @@ func TestLoginLogout_WithToken(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Errorf("logout expected 200, got %d", w.Code)
+	}
+}
+
+// =============== /api/logs（应用内看日志） ===============
+
+type logsPayload struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Entries []struct {
+			Seq   uint64 `json:"seq"`
+			TS    int64  `json:"ts"`
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		} `json:"entries"`
+		Cursor uint64 `json:"cursor"`
+		Boot   string `json:"boot"`
+	} `json:"data"`
+}
+
+func TestLogsEndpoint(t *testing.T) {
+	s := setupTestServer(t, "", "")
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/logs", s.logs)
+
+	logger.Warn.Print("日志接口哨兵")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/logs?since=0&limit=100", nil))
+	if w.Code != 200 {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp logsPayload
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Success || len(resp.Data.Entries) == 0 {
+		t.Fatalf("body=%s", w.Body.String())
+	}
+	last := resp.Data.Entries[len(resp.Data.Entries)-1]
+	// 剥剩正文：不该再看到 [WARN] 或 log 包的时间头
+	if last.Msg != "日志接口哨兵" || last.Level != "warn" {
+		t.Errorf("最后一条 = %q/%q, want 日志接口哨兵/warn", last.Level, last.Msg)
+	}
+	if resp.Data.Cursor != last.Seq {
+		t.Errorf("cursor=%d, want 末条 seq=%d", resp.Data.Cursor, last.Seq)
+	}
+	if resp.Data.Boot != logger.BootID {
+		t.Errorf("boot=%q, want %q（前端靠它识别服务重启）", resp.Data.Boot, logger.BootID)
+	}
+
+	// 拉完再拉：没有新日志时增量为空，cursor 原地不动
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/logs?since="+strconv.FormatUint(resp.Data.Cursor, 10), nil))
+	var again logsPayload
+	if err := json.Unmarshal(w.Body.Bytes(), &again); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(again.Data.Entries) != 0 {
+		t.Errorf("无新日志时返回 %d 条, want 0", len(again.Data.Entries))
+	}
+	if again.Data.Cursor != resp.Data.Cursor {
+		t.Errorf("cursor 变成 %d, want 仍是 %d", again.Data.Cursor, resp.Data.Cursor)
+	}
+
+	// 参数缺失或非法都不能 500：since 非数字退化成 0，limit 走默认值
+	for _, q := range []string{"", "?since=abc&limit=xyz", "?limit=-1"} {
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/api/logs"+q, nil))
+		if w.Code != 200 {
+			t.Errorf("query %q -> %d body=%s", q, w.Code, w.Body.String())
+		}
+	}
+}
+
+// 日志里会出现订阅地址、通知渠道等敏感串，鉴权开着时必须挡住未登录的请求
+func TestLogsEndpoint_RequiresAuth(t *testing.T) {
+	s := setupTestServer(t, "", "secret123")
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(s.authMiddleware())
+	r.GET("/api/logs", s.logs)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/api/logs", nil))
+	if w.Code != 401 {
+		t.Errorf("未登录访问日志 expected 401, got %d body=%s", w.Code, w.Body.String())
 	}
 }
