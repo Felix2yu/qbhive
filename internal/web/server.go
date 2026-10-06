@@ -18,6 +18,7 @@ import (
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
 	"github.com/Felix2yu/qbhive/internal/limiter"
+	"github.com/Felix2yu/qbhive/internal/logger"
 	"github.com/Felix2yu/qbhive/internal/models"
 	"github.com/Felix2yu/qbhive/internal/notifier"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
@@ -186,6 +187,9 @@ func (s *Server) Start(webRoot string) error {
 		api.POST("/notify/test", s.testNotify)
 
 		// 文件管理：重命名审计日志与回退、批量重命名（模板）
+		// 运行日志：读 logger 内存环形缓冲，不落盘、不重启即失效
+		api.GET("/logs", s.logs)
+
 		api.GET("/filemgr/audit", s.filemgrAudit)
 		api.POST("/filemgr/audit/rollback", s.filemgrRollback)
 		api.POST("/filemgr/batch/preview", s.filemgrBatchPreview)
@@ -812,6 +816,19 @@ func (s *Server) testNotify(c *gin.Context) {
 		return
 	}
 	c.JSON(200, models.APIResponse{Success: true, Message: "测试通知已发送"})
+}
+
+// logs 返回内存环形缓冲中的运行日志，旧→新。前端首屏 since=0 全量拉取，
+// 之后带 cursor 增量拉取；boot 变了就是服务重启过，前端整份重拉。
+func (s *Server) logs(c *gin.Context) {
+	since, _ := strconv.ParseUint(c.Query("since"), 10, 64)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
+	entries, cursor := logger.Query(since, limit)
+	c.JSON(200, models.APIResponse{Success: true, Data: map[string]interface{}{
+		"entries": entries,
+		"cursor":  cursor,
+		"boot":    logger.BootID,
+	}})
 }
 
 // RandomID 已由前端 genID() 取代（前端直接生成），保留后端版本供可能的未来扩展。

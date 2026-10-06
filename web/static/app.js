@@ -118,6 +118,15 @@ function inputDialog(title, message, { value = "", unit = "", type = "number", m
 function debounce(fn, wait = 300) {
   let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
 }
+// downloadText：把内存里的文本存成文件（日志导出用），用完立刻释放 blob URL
+function downloadText(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 function chunkRender(items, perFrame, renderItem, container, done) {
   let i = 0; container.innerHTML = "";
   function step() {
@@ -345,6 +354,7 @@ const views = {
   torrents: renderTorrents,
   files: renderFiles,
   rss: renderRSS,
+  logs: renderLogs,
   settings: renderSettings,
 };
 
@@ -1665,6 +1675,151 @@ async function renderAudit(root) {
       renderAudit(root);
     };
   });
+}
+
+// ---------- 日志 ----------
+// 后端只有一份内存环形缓冲（logger.RingSize），级别与关键字筛选在这里做，
+// 免得切换筛选时漏掉别的级别。
+const LOG_CAP = 2000;
+const LOG_LEVELS = [
+  { v: "", t: "全部" },
+  { v: "debug", t: "调试" },
+  { v: "info", t: "信息" },
+  { v: "warn", t: "警告" },
+  { v: "error", t: "错误" },
+];
+const LOG_LEVEL_NAME = { debug: "DEBUG", info: "INFO", warn: "WARN", error: "ERROR" };
+
+const _logsState = { lines: [], cursor: 0, boot: "", level: "", q: "", follow: true, busy: false, timer: null };
+
+function logMatches(e) {
+  return (!_logsState.level || e.level === _logsState.level) &&
+    (!_logsState.q || (e.msg || "").toLowerCase().includes(_logsState.q));
+}
+
+// fmtLogTime：日志行里的时间戳。列表按秒对齐已经够用（行序由 cursor 保证），
+// 只到「日」是为了长列表里每行宽度一致，不用反复读年份。
+function fmtLogTime(ts) {
+  const d = new Date(ts * 1000);
+  if (isNaN(d.getTime())) return "-";
+  const p = n => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function logRow(e) {
+  const name = LOG_LEVEL_NAME[e.level] || String(e.level || "").toUpperCase();
+  return `<div class="log-row lv-${escapeHTML(e.level)}">
+    <span class="t">${fmtLogTime(e.ts)}</span>
+    <span class="lv">${escapeHTML(name)}</span>
+    <span class="m">${escapeHTML(e.msg)}</span>
+  </div>`;
+}
+
+function paintLogs() {
+  const box = $("#lg-body");
+  if (!box) return;
+  const rows = _logsState.lines.filter(logMatches);
+  const keep = box.scrollTop;
+  box.innerHTML = rows.length === 0
+    ? `<div class="empty">${_logsState.lines.length ? "没有匹配的日志" : "暂无日志"}</div>`
+    : rows.map(logRow).join("");
+  box.scrollTop = _logsState.follow ? box.scrollHeight : keep;
+  const count = $("#lg-count");
+  if (count) count.textContent = `显示 ${rows.length} / 共 ${_logsState.lines.length} 条`;
+}
+
+// pullLogs：full=true 重新拉整个缓冲，否则从上次 cursor 往后增量拉。
+// 服务重启后 Seq 从头计数，增量拉会拿回空列表，所以 BootID 一变就整份重拉。
+async function pullLogs(full) {
+  if (_logsState.busy) return;
+  _logsState.busy = true;
+  let redo = false;
+  try {
+    const r = await api("GET", `/logs?since=${full ? 0 : _logsState.cursor}&limit=${LOG_CAP}`);
+    const slot = $("#lg-notice");
+    if (!r.success) {
+      if (slot) slot.innerHTML = notice(`日志加载失败：${escapeHTML(r.message || "未知错误")}`, "danger");
+      return;
+    }
+    if (slot) slot.innerHTML = "";
+    const d = r.data || {};
+    const entries = Array.isArray(d.entries) ? d.entries : [];
+    const cursor = Number(d.cursor) || 0;
+    const boot = d.boot || "";
+    if (full) {
+      _logsState.lines = entries;
+    } else if (boot !== _logsState.boot) {
+      redo = true;
+    } else {
+      _logsState.lines = _logsState.lines.concat(entries);
+    }
+    _logsState.boot = boot;
+    _logsState.cursor = cursor;
+    // 本地列表不会超过服务端缓冲，除了增量拉之间缓冲已溢出淘汰的头部几条
+    if (_logsState.lines.length > LOG_CAP) {
+      _logsState.lines.splice(0, _logsState.lines.length - LOG_CAP);
+    }
+    if ((full || entries.length) && !redo) paintLogs();
+  } finally {
+    _logsState.busy = false;
+  }
+  if (redo) await pullLogs(true);
+}
+
+async function renderLogs(root) {
+  if (_logsState.timer) { clearInterval(_logsState.timer); _logsState.timer = null; }
+  root.innerHTML = `
+    <div class="page-head">
+      <div class="titles">
+        <h2>日志</h2>
+        <p>服务进程内存中的运行日志，最多留最近 ${LOG_CAP} 条；重启服务后从头开始。</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="toolbar">
+        <label class="tfield"><span>级别</span>
+          <select id="lg-level" class="w-sm">
+            ${LOG_LEVELS.map(o =>
+              `<option value="${o.v}" ${o.v === _logsState.level ? "selected" : ""}>${o.t}</option>`
+            ).join("")}
+          </select>
+        </label>
+        <label class="tfield grow"><span>搜索</span>
+          <input type="text" id="lg-q" value="${escapeHTML(_logsState.q)}" placeholder="日志内容关键字" />
+        </label>
+        ${toggle(_logsState.follow, { id: "lg-follow", label: "滚到底部", sm: true })}
+        <button class="btn small" id="lg-reload">刷新</button>
+        <button class="btn small" id="lg-export">导出</button>
+      </div>
+      <div class="notice-slot" id="lg-notice"></div>
+      <div class="log-list" id="lg-body"><div class="empty">加载中…</div></div>
+      <div class="hint" id="lg-count"></div>
+    </div>`;
+
+  $("#lg-level", root).onchange = e => { _logsState.level = e.target.value; paintLogs(); };
+  $("#lg-q", root).oninput = debounce(e => {
+    _logsState.q = e.target.value.trim().toLowerCase();
+    paintLogs();
+  }, 200);
+  $("#lg-follow", root).onchange = e => {
+    _logsState.follow = e.target.checked;
+    if (_logsState.follow) paintLogs();
+  };
+  $("#lg-reload", root).onclick = () => pullLogs(true);
+  $("#lg-export", root).onclick = () => {
+    const rows = _logsState.lines.filter(logMatches);
+    if (rows.length === 0) return toast("没有可导出的日志", "err");
+    const text = rows.map(e =>
+      `${fmtTime(e.ts)} ${(LOG_LEVEL_NAME[e.level] || (e.level || "").toUpperCase()).padEnd(5)} ${e.msg}`
+    ).join("\n");
+    downloadText(`qbhive-日志-${new Date().toISOString().slice(0, 10)}.txt`, text);
+  };
+
+  await pullLogs(true);
+  _logsState.timer = setInterval(() => {
+    if (currentView !== "logs") { clearInterval(_logsState.timer); _logsState.timer = null; return; }
+    pullLogs(false);
+  }, 2000);
 }
 
 // ---------- 状态 ----------

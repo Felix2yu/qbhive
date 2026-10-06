@@ -524,6 +524,35 @@ tr:hover td { background: var(--row-hover); }
 .audit-row .via, .audit-row .status { text-align: center; }
 .audit-row .act   { text-align: center; }
 
+/* ========== 运行日志 ==========
+   等宽、行密、只在 hover 上给底色：2000 行日志里逐行描边会糊成一片 */
+.log-list {
+  min-height: 200px;
+  max-height: calc(100vh - 320px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctrl);
+  background: var(--panel-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 104px 46px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  padding: 3px 10px;
+}
+.log-row:hover { background: var(--row-hover); }
+.log-row .t  { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.log-row .lv { text-align: center; font-weight: 600; }
+.log-row .m  { min-width: 0; white-space: pre-wrap; word-break: break-word; }
+.log-row.lv-debug .lv { color: var(--text-dim); }
+.log-row.lv-info  .lv { color: var(--accent); }
+.log-row.lv-warn  .lv { color: var(--warn); }
+.log-row.lv-error .lv,
+.log-row.lv-error .m  { color: var(--danger); }
+
 /* ========== 窄屏 ========== */
 @media (max-width: 860px) {
   /* 字段行退化为上下堆叠，标签左对齐 */
