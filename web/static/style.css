@@ -205,6 +205,24 @@ textarea.auto-h {
 /* URL / 正则 / 密钥等等宽内容 */
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+/* 后处理「测试运行」的输出回显 */
+.pp-out {
+  margin: 8px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-3);
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.pp-out:empty { display: none; }
+
 /* 宽度档位：模板里只允许用这些，不再写内联 width */
 .w-xs  { max-width: 96px; }
 .w-sm  { max-width: 140px; }

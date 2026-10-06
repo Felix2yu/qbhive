@@ -186,14 +186,15 @@ func (s *Server) Start(webRoot string) error {
 
 		api.POST("/notify/test", s.testNotify)
 
-		// 文件管理：重命名审计日志与回退、批量重命名（模板）
 		// 运行日志：读 logger 内存环形缓冲，不落盘、不重启即失效
 		api.GET("/logs", s.logs)
 
+		// 文件管理：重命名审计日志与回退、批量重命名（模板）、下载完成后处理
 		api.GET("/filemgr/audit", s.filemgrAudit)
 		api.POST("/filemgr/audit/rollback", s.filemgrRollback)
 		api.POST("/filemgr/batch/preview", s.filemgrBatchPreview)
 		api.POST("/filemgr/batch/apply", s.filemgrBatchApply)
+		api.POST("/filemgr/postprocess/test", s.postProcessTest)
 	}
 
 	if webRoot != "" {
@@ -299,7 +300,9 @@ func validateConfig(in *models.AppConfig) string {
 	}
 	// Apprise URL 协议前缀
 	for _, u := range in.Notifier.AppriseURLs {
-		if strings.TrimSpace(u) == "" { continue }
+		if strings.TrimSpace(u) == "" {
+			continue
+		}
 		if !strings.Contains(u, "://") {
 			return fmt.Sprintf("Apprise URL 缺少协议前缀: %s", u)
 		}
@@ -471,11 +474,19 @@ func (s *Server) debugQBRaw(c *gin.Context) {
 		return
 	}
 	v := url.Values{}
-	if filter != "" { v.Set("filter", filter) }
-	if sort != "" { v.Set("sort", sort) }
-	if reverse != "" { v.Set("reverse", reverse) }
+	if filter != "" {
+		v.Set("filter", filter)
+	}
+	if sort != "" {
+		v.Set("sort", sort)
+	}
+	if reverse != "" {
+		v.Set("reverse", reverse)
+	}
 	path := "/api/v2/torrents/info"
-	if len(v) > 0 { path += "?" + v.Encode() }
+	if len(v) > 0 {
+		path += "?" + v.Encode()
+	}
 	reqURL := qbURL + path
 	req, _ := http.NewRequest("GET", reqURL, nil)
 	if key := s.cfg.Get().Qbittorrent.APIKey; key != "" {
@@ -498,7 +509,7 @@ func (s *Server) debugQBRaw(c *gin.Context) {
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.String(200,
 		"=== 路径 A: 直接 HTTP ===\nURL: %s\nStatus: %d\nLen: %d\nBody[:300]: %q\n\n"+
-		"=== 路径 B: client.GetTorrents(%q, %q, %q) ===\nlistLen=%d err=%v\n",
+			"=== 路径 B: client.GetTorrents(%q, %q, %q) ===\nlistLen=%d err=%v\n",
 		reqURL, statusA, len(bodyA), string(bodyA[:min(len(bodyA), 300)]),
 		filter, sort, reverse, len(listB), errB,
 	)
@@ -667,12 +678,12 @@ func (s *Server) torrentsStats(c *gin.Context) {
 	}
 
 	var (
-		stoppedUpCount int
-		stoppedDlCount int
+		stoppedUpCount   int
+		stoppedDlCount   int
 		downloadingCount int
-		seedingCount  int
-		stalledCount  int
-		erroredCount  int
+		seedingCount     int
+		stalledCount     int
+		erroredCount     int
 	)
 	for _, t := range stoppedList {
 		switch t.State {
@@ -733,7 +744,6 @@ func (s *Server) torrentsStats(c *gin.Context) {
 type limitPayload struct {
 	UploadLimit int `json:"uploadLimit"`
 }
-
 
 func (s *Server) setTorrentLimit(c *gin.Context) {
 	hash := c.Param("hash")
@@ -939,4 +949,39 @@ func (s *Server) filemgrBatchApply(c *gin.Context) {
 		return
 	}
 	c.JSON(200, models.APIResponse{Success: true, Message: fmt.Sprintf("已提交 %d 条重命名，稍后可在下方审计日志确认或回退", n), Data: map[string]interface{}{"applied": n}})
+}
+
+// postProcessTest 手动跑一次后处理命令（设置页「测试运行」），同步执行并返回退出码与输出尾部。
+// 只验证命令本身能不能跑通：不做任何大小清理，避免测试顺手删掉文件。
+func (s *Server) postProcessTest(c *gin.Context) {
+	if s.fileMgr == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "文件管理模块未加载"})
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: "参数错误"})
+		return
+	}
+	code, output, err := s.fileMgr.RunPostProcessTest(strings.TrimSpace(body.Path))
+	if code != 0 || err != nil {
+		msg := fmt.Sprintf("退出码 %d", code)
+		// 启动失败时 output 是空的，把真实原因带回去，否则页面上只有一个 -1
+		if err != nil {
+			msg += "：" + err.Error()
+		}
+		c.JSON(200, models.APIResponse{
+			Success: false,
+			Message: msg,
+			Data:    map[string]string{"exitCode": fmt.Sprint(code), "output": output},
+		})
+		return
+	}
+	c.JSON(200, models.APIResponse{
+		Success: true,
+		Message: "命令执行成功",
+		Data:    map[string]string{"exitCode": "0", "output": output},
+	})
 }

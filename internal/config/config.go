@@ -46,6 +46,7 @@ func New(path string) *Manager {
 	m := &Manager{path: path}
 	if err := m.Load(); err != nil {
 		m.cfg = defaultConfig
+		applyConfigDefaults(&m.cfg)
 		_ = m.Save()
 	}
 	return m
@@ -60,9 +61,27 @@ func (m *Manager) Load() error {
 	}
 	if len(data) == 0 {
 		m.cfg = defaultConfig
+		applyConfigDefaults(&m.cfg)
 		return nil
 	}
-	return json.Unmarshal(data, &m.cfg)
+	if err := json.Unmarshal(data, &m.cfg); err != nil {
+		return err
+	}
+	applyConfigDefaults(&m.cfg)
+	return nil
+}
+
+// applyConfigDefaults 补齐「老配置文件里没有、但语义上必须有默认值」的字段。
+// 目前只有后处理的 Verify：它是删除源文件前的防误删闸门，缺省open 必须视为开启，
+// 不能因为 JSON 里缺这个键就退化成关闭。
+func applyConfigDefaults(cfg *models.AppConfig) {
+	// 必须取指针：FileManagerConfig.PostProcess 是值字段，
+	// 拷贝一份再改 Verify 只会改到副本，调用方看到的仍是 nil
+	pp := &cfg.FileManager.PostProcess
+	if pp.Verify == nil {
+		on := true
+		pp.Verify = &on
+	}
 }
 
 func (m *Manager) Save() error {

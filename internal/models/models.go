@@ -2,13 +2,13 @@ package models
 
 // 全局配置文件结构体
 type AppConfig struct {
-	Qbittorrent  QBConfig         `json:"qbittorrent"`
-	Server       ServerConfig     `json:"server"`
-	Notifier     NotifierConfig   `json:"notifier"`
-	RSS          RSSConfig        `json:"rss"`
-	Limiter      LimiterConfig    `json:"limiter"`
-	FileManager  FileManagerConfig `json:"fileManager"`
-	Proxy        ProxyConfig      `json:"proxy"`
+	Qbittorrent QBConfig          `json:"qbittorrent"`
+	Server      ServerConfig      `json:"server"`
+	Notifier    NotifierConfig    `json:"notifier"`
+	RSS         RSSConfig         `json:"rss"`
+	Limiter     LimiterConfig     `json:"limiter"`
+	FileManager FileManagerConfig `json:"fileManager"`
+	Proxy       ProxyConfig       `json:"proxy"`
 }
 
 // ProxyConfig 控制 qbhive 所有出网请求（RSS 抓取、通知、远程 qB/AI）走哪个代理。
@@ -110,9 +110,52 @@ type FileManagerConfig struct {
 	CleanEnabled bool     `json:"cleanEnabled"`
 	CleanRules   []string `json:"cleanRules,omitempty"` // 自定义清理正则，每条一条，匹配内容被移除
 	// AIEnabled AI 格式化文件名开关：正则清洗后调用 OpenAI 兼容接口二次美化文件名
-	AIEnabled  bool        `json:"aiEnabled"`
-	AIChannels []AIChannel `json:"aiChannels,omitempty"` // AI 通道列表（本地 / 云端皆可）
-	AIActive   string      `json:"aiActive"`             // 当前使用的通道 ID
+	AIEnabled   bool              `json:"aiEnabled"`
+	AIChannels  []AIChannel       `json:"aiChannels,omitempty"` // AI 通道列表（本地 / 云端皆可）
+	AIActive    string            `json:"aiActive"`             // 当前使用的通道 ID
+	PostProcess PostProcessConfig `json:"postProcess"`          // 下载完成后的外部命令后处理
+}
+
+// PostProcessConfig 下载完成后的外部命令后处理（例如调用 macOS 快捷指令启动
+// Permute 转码）。触发时机在「单文件自动归档落地之后」，保证命令拿到的是最终路径，
+// 而不是归档前的 content_path 子目录。
+//
+// Command 是单行 shell 命令，走 /bin/sh -c 执行，因此可以自己写引号、管道、
+// 环境变量展开。同时提供两套取值方式：
+//
+//   - 占位符：{file} {dir} {name} {category} {savepath}，会被替换成**加了单引号的
+//     字面量**（含空格与中文的路径也安全），适合直接拼命令
+//   - 环境变量：$FILE $DIR $NAME $CATEGORY $SAVEPATH，值原样传入不做任何处理，
+//     适合用户自己用双引号包裹（如 "$FILE"）的场景
+type PostProcessConfig struct {
+	Enabled bool `json:"enabled"`
+	// Command 单行 shell 命令模板，如
+	// /usr/bin/shortcuts run "Permute HEVC 50% 缩放" -i "$FILE"
+	Command string `json:"command"`
+	// Extensions 扩展名白名单（逗号分隔，不写点），只有命中才执行；留空表示不按扩展名过滤
+	Extensions string `json:"extensions,omitempty"`
+	// Timeout 单次命令超时秒数，0 表示不限
+	Timeout int `json:"timeout"`
+	// SizePrune 命令成功后按大小二选一清理：产物比源文件小则删源文件保留产物，
+	// 产物比源文件大则保留源文件并删掉产物。删除动作会写审计日志（不可回退）
+	SizePrune bool `json:"sizePrune"`
+	// Verify 删除源文件之前先用 ffprobe 校验产物是不是真能解出视频流。
+	//
+	// 这是防误删的硬闸门：转码「退出码 0」并不代表产物可用（转码中途被快捷键
+	// 打断、封装损坏都会留下一个小体积文件），此时若只按大小判定就删原片，
+	// 用户丢的是完整的源片。开启后以下三种情况一律**不动任何文件**：
+	//
+	//   - 本机找不到 ffprobe（校验器不可用）
+	//   - 产物解不出视频流（转码失败留下的坏文件）
+	//   - 产物体积小于源文件 postMinOutputRatio（疑似半成品）
+	//
+	// 指针语义：老配置文件里没有这个字段时反序列化为 nil，由 config 层补成 true，
+	// 避免升级后校验静默关闭、退回到「只看大小」的旧风险行为。
+	Verify *bool `json:"verify,omitempty"`
+	// ProbePath 指定 ffprobe 的绝对路径（留空则按 PATH → /opt/homebrew/bin →
+	// /usr/local/bin → /usr/bin 的顺序自动探测）。Homebrew 装的 ffmpeg 若不在
+	// 当前登录 shell 的 PATH 里，就可以在这里填死路径。
+	ProbePath string `json:"probePath,omitempty"`
 }
 
 // AIChannel OpenAI 兼容的 AI 通道配置（一个通道 = 一个 baseURL + model 组合，
@@ -142,9 +185,9 @@ type QBTorrent struct {
 	Category      string  `json:"category"`
 	Tags          string  `json:"tags"`
 	SavePath      string  `json:"save_path"`
-	ContentPath   string  `json:"content_path"` // 5.x：单文件种子=文件完整路径，多文件种子=内容根目录完整路径
-	AddedOn       int64   `json:"added_on"`       // Unix 秒，任务被添加到 qBittorrent 的时间（可视为开始时间）
-	CompletedOn   int64   `json:"completion_on"`  // Unix 秒，完成时间；未完成时为 0（5.x 字段名，4.x 为 completed_on）
+	ContentPath   string  `json:"content_path"`  // 5.x：单文件种子=文件完整路径，多文件种子=内容根目录完整路径
+	AddedOn       int64   `json:"added_on"`      // Unix 秒，任务被添加到 qBittorrent 的时间（可视为开始时间）
+	CompletedOn   int64   `json:"completion_on"` // Unix 秒，完成时间；未完成时为 0（5.x 字段名，4.x 为 completed_on）
 	LastActivity  int64   `json:"last_activity"`
 	Ratio         float64 `json:"ratio"`
 	Seeds         int     `json:"num_seeds"`

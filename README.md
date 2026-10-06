@@ -47,10 +47,77 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 - **AI 格式化**（可选）：正则清洗后调用 OpenAI 兼容接口二次美化文件名，支持本地（Ollama 等）与云端多通道切换、自定义提示词；每任务只调用一次，失败自动降级为仅正则清洗
 - **安全护栏**：保留扩展名、结果非空、不含非法字符；目标已存在时自动加 `_hash8` 兜底名，仍冲突则跳过——**任何情况下绝不覆盖、不删除已有文件**
 - **审计与回退**：每次自动重命名记录在 `data/filemgr_audit.jsonl`，网页「文件」页可查看（时间 / 任务 / 变更 / 方式 / 状态）并一键回退
+- **转码后处理**（下载完成即跑一次外部命令）：归档落地后执行一条 shell 命令，典型是调用 macOS 快捷指令转码；
+  命令在后台异步执行、不阻塞扫描，失败退避重试 2 次后放弃，重启不会重复跑同一任务；设置页可填测试路径「运行一次」验证命令本身
 - **批量重命名（模板）**：「文件」页选任务 → 输入模板 → 预览 → 执行。变量：`{date}` 完成日期、
   `{type}` 类型分类（video/audio/image/archive/doc/other）、`{index}` 任务内序号、
   `{orig}` 原文件名、`{title}` 任务名；仅重命名文件名（扩展名保留），目录名不变；
   执行时按当前文件列表重新计算，同样写入审计日志、可回退
+
+### 转码后处理（示例：Permute）
+
+下载完成、且单文件自动归档落地之后，对最终文件跑一条 shell 命令。设置页
+「文件管理 → 转码后处理」里填：
+
+```
+命令：/usr/bin/shortcuts run "Permute HEVC 50%缩放" -i "$FILE"
+```
+
+⚠️ 快捷指令名必须与 `shortcuts list` 输出**逐字符一致**（空格、半全角都算），
+差一个空格就会报「找不到快捷指令」。拿不准就先在终端跑 `shortcuts list` 对照。
+
+- 触发顺序：qB 的 `renameFile` 磁盘移动是异步的，只有归档收尾（原目录已清空，
+  或确认本就是单文件种子）之后才触发，所以命令拿到的**一定是最终路径**，
+  不会出现「先转码后移动」这种拿错路径的情况
+- 单文件种子、以及文件本就散在保存根的任务同样会触发；目录里不只有唯一文件时不处理
+- 命令走 `sh -c`，可以自己写引号、管道；`$FILE` 是文件的绝对路径（务必带双引号，
+  路径含空格/中文才安全），也可以用 `{file}` 占位符（自动加单引号，同样安全）
+- 后台异步执行，不阻塞扫描；`timeout` 是**总预算**（含重试），`0` 表示不限
+- 「扩展名白名单」建议填 `mov,m4v,mkv,mp4`，只有视频才转码
+- 首次接入先填测试路径点「运行一次」，只验证命令本身，不做任何清理
+
+**按标签分派不同快捷指令**：需要按视频元数据决定用哪个快捷指令时，别把判断塞进
+单行命令里，写成脚本更可维护（qbhive 的命令栏填 `~/bin/xxx.sh "$FILE"` 即可）。
+例如按 `videoai` 标签二选一：
+
+```sh
+#!/bin/sh
+# 有 videoai 标签 → 缩放到 50%；没有 → 保持原分辨率
+tag=$(/opt/homebrew/bin/ffprobe -v error -show_format -select_streams v:0 -show_streams \
+        -of default=nw=1 "$1" 2>/dev/null | grep -i -m1 -E '^(TAG:)?videoai=' | sed 's/^[^=]*=//')
+if [ -n "$tag" ]; then exec /usr/bin/shortcuts run "Permute HEVC 50%缩放" -i "$1"; fi
+exec /usr/bin/shortcuts run "Permute HEVC" -i "$1"
+```
+
+两个容易踩的点：
+
+- **键名形态因容器而异**，匹配要兼容：mkv 的标签会被规范化成大写（ffprobe 输出
+  `TAG:VIDEOAI=1`），mov/mp4 的 udta 里则保持原样小写（`TAG:videoai=Enhanced using ...`，
+  值里常含空格与分号）。正则要大小写不敏感、`TAG:` 前缀可有可无。
+  另外 **ffmpeg 自己写不进 udta 自定义标签**（`-metadata videoai=1` 对 mp4/mov 无效），
+  但 AI 增强类工具写进去的能被 ffprobe 正常读到——所以「mp4/mov 读不到标签」不能一概而论，
+  要以文件实际元数据为准（`ffprobe -show_format 文件名 | grep -i videoai`）。
+- macOS 的 `/bin/sh`（bash 3.2）在 `set -u` 下会把 `"$NAME"「` 这种**紧跟全角标点**的
+  变量引用当成 `NAME「` 报 `unbound variable`，变量后接中文标点一律写 `${NAME}`。
+
+**按大小清理（可选，默认关闭）**：命令成功后比较「产物 vs 原片」——产物更小就删原片
+保留产物，产物更大就保留原片并删产物。产物通过「同目录下命令开始后新出现的视频文件」
+识别，找不到产物就不动任何文件；产物小于原片 5%（疑似半成品）时两边都不删。
+删除会写进「文件」页审计日志（状态 `已删除`，不可回退）。⚠️ 删掉原片会让 qB 认为种子缺文件。
+
+**删除前校验（默认开启，硬闸门）**：单看体积判断「转码成功」是不够的——转码被中断、
+封装损坏时命令照样返回 0，只留一个同样更小的坏文件，按大小判定就会拿坏文件顶掉完好的
+原片。开启后删原片**必须**同时满足：
+
+- 本机能找到 `ffprobe`（`probePath` 指定，否则按 `PATH → /opt/homebrew/bin →
+  /usr/local/bin → /usr/bin` 自动探测；Homebrew 装的 ffmpeg 不在启动程序的 shell 的
+  PATH 里时，把绝对路径填进 `probePath`）
+- 产物能被 ffprobe 解出视频流（校验日志会打出编码与分辨率）
+- 产物体积在「原片 5% ~ 原片大小」之间
+
+校验器缺失或产物校验不通过时，**一个文件都不删**（原片完整保留，日志里写明原因）。
+未通过校验的产物也保留，不做二次删除——「删不掉的视频」比「多一个占空间的文件」安全。
+关闭该选项（设置页「删除前校验产物」）会退回到纯按大小判定。
 
 ### 其它
 - 亮色 / 暗色 / 跟随系统 三主题
@@ -202,6 +269,13 @@ go build -o qbhive ./cmd/server
 | `fileManager.aiEnabled` | AI 格式化文件名开关（默认关闭） |
 | `fileManager.aiActive` | 当前使用的 AI 通道 ID；未指定时用第一个启用的通道 |
 | `fileManager.aiChannels[]` | OpenAI 兼容通道（`baseURL`/`apiKey`/`model`/`prompt`），本地与云端皆可；`prompt` 为空用内置默认，支持 `{files}`/`{torrent}` 变量，≤4000 字符 |
+| `fileManager.postProcess.enabled` | 下载完成后处理开关（默认关闭，可与自动归档并存） |
+| `fileManager.postProcess.command` | 单行 shell 命令，走 `sh -c`；支持 `{file}`/`{dir}`/`{name}`/`{category}`/`{savepath}` 占位符与 `$FILE` 等环境变量 |
+| `fileManager.postProcess.extensions` | 扩展名白名单（逗号分隔、不写点），留空表示不过滤 |
+| `fileManager.postProcess.timeout` | 命令总超时秒数，`0` 表示不限 |
+| `fileManager.postProcess.sizePrune` | 命令成功后按大小二选一清理（产物更小则删原片，否则保留原片删产物） |
+| `fileManager.postProcess.verify` | 删原片前用 ffprobe 校验产物是否真能解出视频流（`true`/`false`，缺省按 `true`）。校验不通过或找不到 ffprobe 则不删任何文件 |
+| `fileManager.postProcess.probePath` | ffprobe 绝对路径，留空自动探测（默认按 `PATH → /opt/homebrew/bin → /usr/local/bin → /usr/bin` 找） |
 
 ### 环境变量
 

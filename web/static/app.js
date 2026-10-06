@@ -330,6 +330,15 @@ function validateConfigJS(cfg) {
         }
       }
     }
+    const pp = fm.postProcess || {};
+    if (pp.enabled) {
+      if (!((pp.command || "").trim())) return "后处理已启用，请填写要执行的命令";
+      if (pp.timeout < 0) return "后处理超时不能为负数";
+      for (const e of (pp.extensions || "").split(",")) {
+        const t = e.trim();
+        if (t && !/^[A-Za-z0-9]+$/.test(t)) return `后处理扩展名白名单含非法项：${t}`;
+      }
+    }
     const chans = fm.aiChannels || [];
     if (chans.length > 8) return "AI 通道不能超过 8 个";
     for (const ch of chans) {
@@ -1148,6 +1157,18 @@ function syncFormToCfg() {
       };
     });
   }
+  if ($("#fm-pp-enabled")) {
+    const pp = c.fileManager.postProcess || (c.fileManager.postProcess = {});
+    pp.enabled = $("#fm-pp-enabled").checked;
+    pp.command = $("#fm-pp-cmd").value;
+    pp.extensions = ($("#fm-pp-exts").value || "").trim();
+    pp.timeout = parseInt($("#fm-pp-timeout").value || "0", 10) || 0;
+    pp.sizePrune = $("#fm-pp-prune").checked;
+    pp.verify = $("#fm-pp-verify").checked;
+    // 留空存成 null：语义是「自动探测」，存成空串会被当成显式指定一个坏路径
+    const probe = ($("#fm-pp-probe").value || "").trim();
+    pp.probePath = probe === "" ? null : probe;
+  }
 }
 
 // 只重渲 limiter 规则那一块（加/删规则时调用，不碰整页）
@@ -1239,6 +1260,8 @@ async function renderSettings(root) {
   const sQbKey    = escapeHTML(cfg.qbittorrent.apiKey || "");
   const sListen   = escapeHTML(cfg.server.listen || "");
   const sNotifyUrl = escapeHTML((cfg.notifier.appriseUrls || []).join("\n"));
+  // 转码后处理：后端恒定返回该对象（无 omitempty），这里兜底成空对象免得取属性报错
+  const pp = (cfg.fileManager && cfg.fileManager.postProcess) || {};
 
   root.innerHTML = `
     <div class="page-head">
@@ -1388,6 +1411,32 @@ async function renderSettings(root) {
         </div>
         <div id="ai-channels"></div>
       </div>
+
+      <div class="section">
+        <div class="section-title">转码后处理</div>
+        ${field("启用", toggle(!!(pp.enabled), { id: "fm-pp-enabled" }),
+          `下载完成、且单文件自动归档落地之后执行一条 shell 命令。归档关掉也照常触发——只要本项开着就会扫描。命令在<b>后台</b>执行，不阻塞扫描；重启不会重复跑同一个任务。`)}
+        ${field("命令",
+          `<textarea id="fm-pp-cmd" class="ctrl mono" placeholder="/usr/bin/shortcuts run &#34;Permute HEVC 50%缩放&#34; -i &#34;$FILE&#34;">${escapeHTML(pp.command || "")}</textarea>`,
+          `单行 shell 命令（走 <code>sh -c</code>），可以自己写引号、管道。占位符 <code>{file}</code> <code>{dir}</code> <code>{name}</code> <code>{category}</code> <code>{savepath}</code> 会被替换成自动加好单引号的字面量；也可以直接用环境变量 <code>$FILE</code> <code>$DIR</code> <code>$NAME</code> <code>$CATEGORY</code> <code>$SAVEPATH</code>。示例中的 <code>$FILE</code> 一定要带双引号，路径含空格时才能拆开。<b>快捷指令名必须与 <code>shortcuts list</code> 输出逐字符一致</b>，差一个空格就会「找不到快捷指令」。首次接入建议先用下面的「测试运行」验证快捷指令名与参数能不能跑通。`)}
+        ${field("扩展名白名单",
+          `<input type="text" id="fm-pp-exts" class="ctrl w-sm" value="${escapeHTML(pp.extensions || "")}" placeholder="mov,m4v,mkv,mp4">`,
+          "逗号分隔、不写点；只有命中这些扩展名的文件才执行，留空表示不过滤（非视频也会跑命令）。")}
+        ${field("超时",
+          `<div class="controls"><input type="number" id="fm-pp-timeout" class="w-xs" value="${pp.timeout || 0}" min="0"><span class="unit">秒</span></div>`,
+          "0 表示不限。转码动辄几十分钟，默认不限即可；命令失败会退避重试 2 次后放弃。")}
+        ${field("按大小清理产物", toggle(!!(pp.sizePrune), { id: "fm-pp-prune" }),
+          "命令成功后：产物比原片<b>小</b>就删掉原片保留产物，产物比原片<b>大</b>就保留原片、删掉产物。产物通过「同目录下命令开始后新出现的视频文件」识别，找不到产物就不动任何文件。删除会写进「文件」页审计日志，<b>不可回退</b>；删掉原片会让 qB 认为种子缺文件。")}
+        ${field("删除前校验产物", toggle(pp.verify !== false, { id: "fm-pp-verify" }),
+          "开启后（默认），删原片之前先用 <code>ffprobe</code> 确认产物真能解出视频流：<b>命令返回 0 不等于产物可用</b>——转码被中断、封装损坏留下的小文件照样会被当成成功。校验不通过、或本机找不到 ffprobe，就一个文件都不删。关掉则退回纯按大小判定。")}
+        ${field("ffprobe 路径",
+          `<input type="text" id="fm-pp-probe" class="ctrl mono" value="${escapeHTML(pp.probePath || "")}" placeholder="/opt/homebrew/bin/ffprobe">`,
+          "留空则按 <code>PATH → /opt/homebrew/bin → /usr/local/bin → /usr/bin</code> 的顺序自动探测。Homebrew 装的 ffmpeg 若不在你启动本程序的 shell 的 PATH 里，就把绝对路径填在这里。")}
+        ${field("测试运行",
+          `<div class="controls"><input type="text" id="fm-pp-test-path" class="ctrl" placeholder="待转码文件的绝对路径，含中文/空格也要能跑"><button class="btn" id="fm-pp-test">运行一次</button></div>`,
+          "用当前命令对指定文件跑一次，展示退出码与输出尾部。<b>不会</b>触发上面的大小清理，纯粹验证命令本身。")}
+        <pre class="pp-out" id="fm-pp-out"></pre>
+      </div>
     </div>
 
     <!-- 保存 -->
@@ -1440,6 +1489,17 @@ async function renderSettings(root) {
 
   $$("[data-lm-del]").forEach(b => b.addEventListener("click", onLimDel));
 
+  $("#fm-pp-test").onclick = async () => {
+    const path = ($("#fm-pp-test-path").value || "").trim();
+    if (!path) { toast("请先填写测试文件的绝对路径", "err"); return; }
+    const out = $("#fm-pp-out");
+    out.textContent = "执行中…";
+    const r = await api("POST", "/filemgr/postprocess/test", { path });
+    const d = r.data || {};
+    out.textContent = `退出码：${d.exitCode || "-"}\n${d.output || r.message || ""}`;
+    toast(r.success ? "测试执行成功" : (r.message || "测试执行失败"), r.success ? "ok" : "err");
+  };
+
   $("#ai-add").onclick = () => {
     syncFormToCfg();
     const chans = _settingsCfg.fileManager.aiChannels;
@@ -1488,6 +1548,7 @@ const AUDIT_STATUS = {
   confirmed:  { t: "已生效", c: "ok" },
   failed:     { t: "失败",   c: "err" },
   rolledback: { t: "已回退", c: "dim" },
+  pruned:    { t: "已删除", c: "err" },
 };
 
 function fmtTime(ts) {
@@ -1630,7 +1691,7 @@ async function renderAudit(root) {
         <span class="cell change" title="${escapeHTML(e.old)} → ${escapeHTML(e.new)}">
           ${escapeHTML(e.old)} <span class="arrow">→</span> <b>${escapeHTML(e.new)}</b>
         </span>
-        <span class="cell via text-dim">${e.via === "ai" ? "AI" : "正则"}</span>
+        <span class="cell via text-dim">${e.via === "ai" ? "AI" : e.via === "prune" ? "后处理清理" : "正则"}</span>
         <span class="status"><span class="tag ${st.c}">${st.t}</span></span>
         <span class="act">${canRollback
           ? `<button class="btn small" data-audit-rollback="${escapeHTML(e.id)}">回退</button>`

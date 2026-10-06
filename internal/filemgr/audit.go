@@ -21,8 +21,8 @@ import (
 // 原始行数超过压缩阈值时整体重写为解析后的最新状态（原子写）。
 
 const auditFile = "filemgr_audit.jsonl"
-const auditMaxEntries = 2000        // 内存与文件中保留的最大条目数
-const auditCompactThreshold = 4000  // 原始行数超过此值触发压缩重写
+const auditMaxEntries = 2000       // 内存与文件中保留的最大条目数
+const auditCompactThreshold = 4000 // 原始行数超过此值触发压缩重写
 
 // 审计状态
 const (
@@ -30,7 +30,11 @@ const (
 	AuditConfirmed  = "confirmed"  // 已确认落地
 	AuditFailed     = "failed"     // 提交失败或连续多轮未确认后放弃
 	AuditRolledback = "rolledback" // 已回退到旧名
+	AuditPruned     = "pruned"     // 后处理按大小二选一删除了文件（不可回退）
 )
+
+// auditViaPrune 审计记录 via 字段取值：后处理按大小清理（区别于正则 / AI 改名）
+const auditViaPrune = "prune"
 
 type auditEntry struct {
 	ID      string `json:"id"`
@@ -39,7 +43,7 @@ type auditEntry struct {
 	Torrent string `json:"torrent"`
 	Old     string `json:"old"`
 	New     string `json:"new"`
-	Via     string `json:"via"`   // regex / ai
+	Via     string `json:"via"` // regex / ai
 	Status  string `json:"status"`
 }
 

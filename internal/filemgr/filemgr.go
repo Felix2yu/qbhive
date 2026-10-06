@@ -40,8 +40,8 @@ type Manager struct {
 
 // cleanRecord 单个任务的清理进度
 type cleanRecord struct {
-	Pending    []cleanRename `json:"pending,omitempty"`  // 已提交待确认落地的重命名
-	Done       bool          `json:"done,omitempty"`     // 已无待办且全部落地
+	Pending    []cleanRename `json:"pending,omitempty"` // 已提交待确认落地的重命名
+	Done       bool          `json:"done,omitempty"`    // 已无待办且全部落地
 	AiAttempts int           `json:"aiAttempts,omitempty"`
 	AISettled  bool          `json:"aiSettled,omitempty"` // AI 已成功调用过 / 无可用通道 / 重试耗尽
 
@@ -51,6 +51,15 @@ type cleanRecord struct {
 	FlattenDir string `json:"flattenDir,omitempty"`
 	// FlattenAttempts 归档清理连续等待/失败的轮数，超过上限则放弃（绝不删非空目录）
 	FlattenAttempts int `json:"flattenAttempts,omitempty"`
+
+	// ---- 下载完成后处理（外部命令，如调用 macOS 快捷指令转码）----
+	// PostDone 命令已派发（含因无目标文件/扩展名不匹配而主动放弃的情形），
+	// 持久化避免重启后重复执行同一任务的后处理
+	PostDone bool `json:"postDone,omitempty"`
+	// PostAttempts 命令失败重试计数（单次启动内退避重试，重启不重来）
+	PostAttempts int `json:"postAttempts,omitempty"`
+	// PostFile 本次后处理命令作用的目标文件绝对路径，仅供排查
+	PostFile string `json:"postFile,omitempty"`
 }
 
 const cleanStateFile = "filemgr_clean.json"
@@ -97,7 +106,7 @@ func (m *Manager) Reload(c *qb.Client) {
 		m.tickerStop = nil
 	}
 	cfg := m.cfg.Get().FileManager
-	if !cfg.Enabled {
+	if !m.scanEnabled() {
 		logger.Info.Println("文件管理已停用（重载）")
 		return
 	}
@@ -109,10 +118,21 @@ func (m *Manager) Reload(c *qb.Client) {
 	m.runTicker(interval)
 }
 
+// scanEnabled 是否需要跑扫描循环：自动归档或后处理任一开启即可（后处理单独开启时
+// 也要扫描，否则归挡关掉后转码命令永远不会触发）
+func (m *Manager) scanEnabled() bool {
+	c := m.cfg.Get().FileManager
+	return c.Enabled || c.PostProcess.Enabled
+}
+
 func (m *Manager) Start() {
 	c := m.cfg.Get().FileManager
-	if !c.Enabled {
-		logger.Info.Println("文件管理已停用")
+	if !m.scanEnabled() {
+		if c.PostProcess.Enabled {
+			logger.Info.Println("文件管理停用，但后处理已开启，扫描循环保持运行")
+		} else {
+			logger.Info.Println("文件管理已停用")
+		}
 		return
 	}
 	interval := time.Duration(c.ScanInterval) * time.Second
@@ -174,12 +194,18 @@ func (m *Manager) scan() {
 		default:
 			continue
 		}
-		// done 标记在 handleCompleted 确认后设置，避免早返回导致永久跳过
+		// done 标记在 handleCompleted 确认后设置，避免早返回导致永久跳过。
+		// 后处理必须排在归档之后：归档走 qB renameFile 时磁盘移动是异步的、
+		// 且会把文件挪到落点，只有归档落地（didWork/already）才说明目标路径稳定，
+		// 此时交给后处理的才是最终文件。
 		already, didWork := m.handleCompleted(t)
-		if didWork {
-			m.done[t.Hash] = true
-		} else if already {
-			// torrent 已被确认不是目标场景（如 single file 模式），不再重试
+		done := already || didWork
+		if m.postEnabled() && done {
+			ppDone, _ := m.handlePostProcess(t)
+			done = done && ppDone
+		}
+		if done {
+			// 连同「已确认不是目标场景」（single file 模式等）一并标 done，不再重试
 			m.done[t.Hash] = true
 		}
 	}
