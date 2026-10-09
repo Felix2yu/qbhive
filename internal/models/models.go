@@ -117,8 +117,9 @@ type FileManagerConfig struct {
 }
 
 // PostProcessConfig 下载完成后的外部命令后处理（例如调用 macOS 快捷指令启动
-// Permute 转码）。触发时机在「单文件自动归档落地之后」，保证命令拿到的是最终路径，
-// 而不是归档前的 content_path 子目录。
+// Permute 转码）。目标文件取自 qB 的任务文件列表（/torrents/files），命中白名单的
+// 每个视频各派发一次、全局一次只跑一条命令；归档还在异步移动时先让路，
+// 保证命令拿到的是最终路径。
 //
 // Command 是单行 shell 命令，走 /bin/sh -c 执行，因此可以自己写引号、管道、
 // 环境变量展开。同时提供两套取值方式：

@@ -1415,7 +1415,7 @@ async function renderSettings(root) {
       <div class="section">
         <div class="section-title">转码后处理</div>
         ${field("启用", toggle(!!(pp.enabled), { id: "fm-pp-enabled" }),
-          `下载完成、且单文件自动归档落地之后执行一条 shell 命令。归档关掉也照常触发——只要本项开着就会扫描。命令在<b>后台</b>执行，不阻塞扫描；重启不会重复跑同一个任务。`)}
+          `下载完成后按 qB 报告的任务文件列表逐个转码：命中扩展名白名单的<b>每个</b>视频文件都会跑一次命令（多文件种子、文件散在共享分类根也一样）。全服务同时<b>只跑一条</b>命令，其余文件等下一轮扫描排队；已派发过的文件不会重复跑，重启也不会。归档关掉也照常触发——只要本项开着就会扫描。`)}
         ${field("命令",
           `<textarea id="fm-pp-cmd" class="ctrl mono" placeholder="/usr/bin/shortcuts run &#34;Permute HEVC 50%缩放&#34; -i &#34;$FILE&#34;">${escapeHTML(pp.command || "")}</textarea>`,
           `单行 shell 命令（走 <code>sh -c</code>），可以自己写引号、管道。占位符 <code>{file}</code> <code>{dir}</code> <code>{name}</code> <code>{category}</code> <code>{savepath}</code> 会被替换成自动加好单引号的字面量；也可以直接用环境变量 <code>$FILE</code> <code>$DIR</code> <code>$NAME</code> <code>$CATEGORY</code> <code>$SAVEPATH</code>。示例中的 <code>$FILE</code> 一定要带双引号，路径含空格时才能拆开。<b>快捷指令名必须与 <code>shortcuts list</code> 输出逐字符一致</b>，差一个空格就会「找不到快捷指令」。首次接入建议先用下面的「测试运行」验证快捷指令名与参数能不能跑通。`)}
@@ -1426,7 +1426,7 @@ async function renderSettings(root) {
           `<div class="controls"><input type="number" id="fm-pp-timeout" class="w-xs" value="${pp.timeout || 0}" min="0"><span class="unit">秒</span></div>`,
           "0 表示不限。转码动辄几十分钟，默认不限即可；命令失败会退避重试 2 次后放弃。")}
         ${field("按大小清理产物", toggle(!!(pp.sizePrune), { id: "fm-pp-prune" }),
-          "命令成功后：产物比原片<b>小</b>就删掉原片保留产物，产物比原片<b>大</b>就保留原片、删掉产物。产物通过「同目录下命令开始后新出现的视频文件」识别，找不到产物就不动任何文件。删除会写进「文件」页审计日志，<b>不可回退</b>；删掉原片会让 qB 认为种子缺文件。")}
+          "命令成功后：产物比原片<b>小</b>就删掉原片保留产物，产物比原片<b>大</b>就保留原片、删掉产物。产物必须同时满足「同目录、与原片<b>同名</b>（只换扩展名）、且不早于命令开始时刻」才算数——文件散在共享分类根时，只按「同目录新文件」认产物会把别的任务刚下完的片子当成产物删掉。找不到产物就不动任何文件。删除会写进「文件」页审计日志，<b>不可回退</b>；删掉原片会让 qB 认为种子缺文件。")}
         ${field("删除前校验产物", toggle(pp.verify !== false, { id: "fm-pp-verify" }),
           "开启后（默认），删原片之前先用 <code>ffprobe</code> 确认产物真能解出视频流：<b>命令返回 0 不等于产物可用</b>——转码被中断、封装损坏留下的小文件照样会被当成成功。校验不通过、或本机找不到 ffprobe，就一个文件都不删。关掉则退回纯按大小判定。")}
         ${field("ffprobe 路径",

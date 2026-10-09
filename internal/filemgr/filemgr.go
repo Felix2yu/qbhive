@@ -36,6 +36,12 @@ type Manager struct {
 	rulesCache []*regexp.Regexp        // 自定义规则编译缓存
 	rulesKey   string                  // rulesCache 对应的规则指纹
 	audit      *auditLog               // 重命名审计日志
+
+	// ---- 转码后处理 ----
+	// postRunMu 保护 postBusy：全局串行闸门，一次只允许一条后处理命令在跑
+	// （转码吃满 CPU 与磁盘带宽，并发跑只会互相拖慢）
+	postRunMu sync.Mutex
+	postBusy  bool
 }
 
 // cleanRecord 单个任务的清理进度
@@ -53,13 +59,15 @@ type cleanRecord struct {
 	FlattenAttempts int `json:"flattenAttempts,omitempty"`
 
 	// ---- 下载完成后处理（外部命令，如调用 macOS 快捷指令转码）----
-	// PostDone 命令已派发（含因无目标文件/扩展名不匹配而主动放弃的情形），
-	// 持久化避免重启后重复执行同一任务的后处理
+	// PostDone 该任务已无待转文件（含未开启之外的所有终结情形），
+	// 持久化避免重启后重复解析、重复派发
 	PostDone bool `json:"postDone,omitempty"`
-	// PostAttempts 命令失败重试计数（单次启动内退避重试，重启不重来）
-	PostAttempts int `json:"postAttempts,omitempty"`
-	// PostFile 本次后处理命令作用的目标文件绝对路径，仅供排查
-	PostFile string `json:"postFile,omitempty"`
+	// PostDispatched 已交给 shell 的目标文件绝对路径（含失败的），文件级去重用：
+	// 一个种子里多个视频逐个派发，重启也不会把跑到一半的那个再转一遍
+	PostDispatched []string `json:"postDispatched,omitempty"`
+	// PostWaits 命中白名单的文件连续几轮都取不到（qB 临时名 / 磁盘上还没有），
+	// 超过 postMaxWaits 才认定这个任务确实没有可转的文件
+	PostWaits int `json:"postWaits,omitempty"`
 }
 
 const cleanStateFile = "filemgr_clean.json"

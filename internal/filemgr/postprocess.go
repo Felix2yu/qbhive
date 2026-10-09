@@ -23,13 +23,18 @@ import (
 //
 //	/usr/bin/shortcuts run "Permute HEVC 50% 缩放" -i "$FILE"
 //
-// 触发点固定为「单文件自动归档落地之后」——归档走 qB renameFile 时磁盘移动是
-// 异步的，只有当 finishFlatten 确认原目录已清空、或确认本就是单文件种子时，
-// 目标文件的最终路径才确定，此时才允许执行外部命令。
+// 触发点是「该任务没有归档在途」+「qB 报出的文件列表里命中白名单的视频文件」。
+// 目标一律以 /torrents/files 为准：文件散在共享分类根时（几百个任务的文件挤在同一
+// 个目录），只有 qB 知道哪些文件属于本任务，翻目录既猜不准也极易认错别人的文件。
 
 const (
 	// postMaxAttempts 单次启动内，一条命令失败后的最大尝试次数（退避重试，重启不重来）
 	postMaxAttempts = 3
+	// postMaxWaits 白名单文件持续取不到时的最大等待轮数，超过就终结任务：
+	// qB 报出的路径长期不在磁盘上说明它不会再变好，留着只会每轮空转一次 API 调用
+	postMaxWaits = 20
+	// partialFileSuffix libtorrent 给未下完的文件加的尾缀，去掉它才是最终文件名
+	partialFileSuffix = ".!qB"
 	// postLogTailLines 命令输出写入日志的最大行数（避免转码工具刷屏）
 	postLogTailLines = 15
 	// postTestTimeout 设置页「测试运行」的兜底超时（配置里留 0 或超长时用它收紧，
@@ -65,17 +70,27 @@ func (m *Manager) postEnabled() bool {
 	return m.cfg.Get().FileManager.PostProcess.Enabled
 }
 
-// handlePostProcess 在归档落地之后触发一次后处理。
+// handlePostProcess 推进一个任务的后处理队列：每轮最多派发一个文件，全局串行。
 //
 // 返回 (done, retry)：
 //
-//	done  — 本任务已无待办（未开启、已执行过、无匹配目标、命令正常启动），
-//	        调用方据此把任务标 done，之后不再进入处理
-//	retry — 暂缓（典型场景：归档还在等 qB 异步移动落地），调用方先不标 done 以便下轮再试。
+//	done  — 本任务已无待办（未开启、已终结、文件列表里没有命中白名单且没派发过的
+//	        文件），调用方据此把任务标 done，之后不再进入处理
+//	retry — 暂缓（归档还在等 qB 异步移动落地、文件列表取不到、已有转码在跑、
+//	        或本任务仍有文件排在队里），调用方先不标 done 以便下轮再试。
 //	        命令本身失败时的重试在后台 goroutine 内退避完成，不走这条路径
 func (m *Manager) handlePostProcess(t models.QBTorrent) (done bool, retry bool) {
 	pc := m.cfg.Get().FileManager.PostProcess
 	if !pc.Enabled {
+		return true, false
+	}
+	if m.postSettled(t.Hash) {
+		return true, false
+	}
+	// 命令都没配就别占着任务反复重试：终结掉并把原因写清楚
+	if strings.TrimSpace(pc.Command) == "" {
+		logger.Warn.Printf("后处理 [%s] 已启用但未配置命令，跳过", t.Name)
+		m.markPostSettled(t.Hash)
 		return true, false
 	}
 	// 归档还在等待 qB 异步移动落地（原目录未清空）时必须让路：
@@ -85,99 +100,175 @@ func (m *Manager) handlePostProcess(t models.QBTorrent) (done bool, retry bool) 
 		return false, true
 	}
 
-	m.mu.Lock()
-	rec := m.cleanState[t.Hash]
-	if rec == nil {
-		rec = &cleanRecord{}
-		m.cleanState[t.Hash] = rec
+	targets, waiting, err := m.pendingPostTargets(t, pc)
+	if err != nil {
+		logger.Warn.Printf("后处理 [%s] 取任务文件列表失败：%v，下轮重试", t.Name, err)
+		return false, true
 	}
-	if rec.PostDone {
-		m.mu.Unlock()
+	if len(targets) == 0 {
+		// 命中白名单的文件还在 qB 的临时名里（尾缀 !qB）或磁盘上取不到：
+		// 这是暂时状态，先让路；连续多轮取不到才终结，否则等文件落齐了也再没人来转码
+		if waiting && !m.postWaitExhausted(t.Hash) {
+			logger.Debug.Printf("后处理 [%s] 待转文件尚未落齐，下轮再看", t.Name)
+			return false, true
+		}
+		m.markPostSettled(t.Hash)
 		return true, false
 	}
-	m.mu.Unlock()
-
-	// 目标文件：归档已完成，content_path 此时要么是文件本身（单文件种子），
-	// 要么是只含唯一文件的目录（qB 异步移动落地后的落点）
-	file, ok := m.resolveTarget(t)
-	if !ok {
-		// 没有唯一目标文件（多文件种子、目录里还有别的东西）：不重试，记日志
-		logger.Debug.Printf("后处理 [%s] 未解析到唯一目标文件（content=%s），跳过", t.Name, t.ContentPath)
-		m.markPostDone(t.Hash, "")
-		return true, false
+	// 全局串行闸门：转码吃满 CPU 与磁盘带宽，两条命令一起跑只会都变慢，
+	// 在 macOS 上还会互相抢同一个转码工具
+	if !m.tryAcquirePost() {
+		logger.Debug.Printf("后处理 [%s] 已有转码在跑，%d 个文件待派发，下轮再看", t.Name, len(targets))
+		return false, true
 	}
-	if !matchExt(file, pc.Extensions) {
-		logger.Debug.Printf("后处理 [%s] %s 的扩展名不在白名单（%q），跳过", t.Name, file, pc.Extensions)
-		m.markPostDone(t.Hash, file)
-		return true, false
-	}
-	if strings.TrimSpace(pc.Command) == "" {
-		logger.Warn.Printf("后处理 [%s] 已启用但未配置命令，跳过 %s", t.Name, file)
-		m.markPostDone(t.Hash, file)
-		return true, false
-	}
-
-	// 命令可能跑很久（转码动辄几十分钟），后台执行，绝不阻塞扫描 ticker。
-	// 启动即标记 postDone：重启不重复执行，失败由命令内部的退避重试兜底。
-	m.markPostDone(t.Hash, file)
-	go m.runPostProcess(t, file, pc)
-	return true, false
+	file := targets[0]
+	logger.Info.Printf("后处理 [%s] 派发转码：%s（本任务还有 %d 个文件待处理）", t.Name, file, len(targets)-1)
+	// 派发即落盘：命令可能跑几十分钟，中途重启不该对同一个文件再转一遍。
+	// 命令失败由 runPostCommandWithRetry 的退避重试兜底。
+	m.markPostDispatched(t.Hash, file)
+	go func() {
+		defer m.releasePost()
+		m.runPostProcess(t, file, pc)
+	}()
+	// 本轮不终结：剩下的文件还要排队，等它们全派发完（或确认无需转码）再终结
+	return false, false
 }
 
-// markPostDone 记录某任务的后处理已派发并落盘（file 仅用于日志与排查）
-func (m *Manager) markPostDone(hash, file string) {
+// postSettled 该任务的后处理是否已终结
+func (m *Manager) postSettled(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	return rec != nil && rec.PostDone
+}
+
+// markPostSettled 标记任务后处理终结并落盘（重启后不再重复解析）
+func (m *Manager) markPostSettled(hash string) {
 	m.mu.Lock()
 	if rec := m.cleanState[hash]; rec != nil {
 		rec.PostDone = true
-		rec.PostAttempts = 0
-		rec.PostFile = file
+	} else {
+		m.cleanState[hash] = &cleanRecord{PostDone: true}
 	}
 	m.mu.Unlock()
 	m.saveCleanState()
 }
 
-// resolveTarget 解析本次后处理的目标文件绝对路径。
-// 优先用 5.x 的 content_path：单文件种子它是文件本身，多文件种子是内容目录；
-// 目录内必须恰好一个可见普通文件才认（归档落地后的落点就是这种情况），
-// 否则不做任何猜测——宁可不处理，也不能拿错路径去转码。
-func (m *Manager) resolveTarget(t models.QBTorrent) (string, bool) {
-	dir := ""
-	if t.ContentPath != "" {
-		if fi, err := os.Stat(t.ContentPath); err == nil {
-			if fi.Mode().IsRegular() {
-				return t.ContentPath, true
-			}
-			if fi.IsDir() {
-				dir = t.ContentPath
-			}
-		}
+// markPostDispatched 记录「已交给 shell 的文件」并落盘，作为文件级的派发去重
+func (m *Manager) markPostDispatched(hash, file string) {
+	m.mu.Lock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		rec = &cleanRecord{}
+		m.cleanState[hash] = rec
 	}
-	// content_path 取不到时的回退：保存根（单文件种子的 save_path 即文件所在目录）
-	if dir == "" {
-		dir = t.SavePath
+	rec.PostDispatched = append(rec.PostDispatched, file)
+	rec.PostWaits = 0
+	m.mu.Unlock()
+	m.saveCleanState()
+}
+
+// postWaitExhausted 待转文件连续多少轮都取不到；到上限才允许终结任务。
+// 只计数不落盘（下一轮还会再看），落盘的是最终那次 markPostSettled。
+func (m *Manager) postWaitExhausted(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		rec = &cleanRecord{}
+		m.cleanState[hash] = rec
 	}
-	if dir == "" {
-		return "", false
+	rec.PostWaits++
+	return rec.PostWaits >= postMaxWaits
+}
+
+// tryAcquirePost / releasePost 全局串行闸门（一次只允许一条后处理命令在跑）。
+// 闸门在派发前同步占用、后台命令结束时释放，所以扫描轮询之间也不会出现两条并发。
+func (m *Manager) tryAcquirePost() bool {
+	m.postRunMu.Lock()
+	defer m.postRunMu.Unlock()
+	if m.postBusy {
+		return false
 	}
-	fi, err := os.Stat(dir)
-	if err != nil || !fi.IsDir() {
-		return "", false
-	}
-	entries, err := os.ReadDir(dir)
+	m.postBusy = true
+	return true
+}
+
+func (m *Manager) releasePost() {
+	m.postRunMu.Lock()
+	m.postBusy = false
+	m.postRunMu.Unlock()
+}
+
+// pendingPostTargets 本任务尚未派发过、且命中白名单的目标文件（保持 qB 的文件顺序）。
+// waiting 表示「有该转的文件但这一轮还拿不到」——qB 仍用临时名 !qB 写着、或磁盘上
+// 暂时 stat 不到，调用方据此暂缓而不是把任务终结掉。
+// 取不到文件列表时把错误原样抛给调用方：那是临时错误，绝不能被当成「没有要转的文件」。
+func (m *Manager) pendingPostTargets(t models.QBTorrent, pc models.PostProcessConfig) (targets []string, waiting bool, err error) {
+	files, err := m.client.GetTorrentFiles(t.Hash)
 	if err != nil {
-		return "", false
+		return nil, false, err
 	}
-	var vis []os.DirEntry
-	for _, e := range entries {
-		if e.Name()[0] == '.' || !e.Type().IsRegular() {
+	m.mu.Lock()
+	var dispatched []string
+	if rec := m.cleanState[t.Hash]; rec != nil {
+		dispatched = append(dispatched, rec.PostDispatched...)
+	}
+	m.mu.Unlock()
+	done := make(map[string]bool, len(dispatched))
+	for _, p := range dispatched {
+		done[p] = true
+	}
+
+	out := make([]string, 0, len(files))
+	matched := 0
+	for _, f := range files {
+		name := filepath.ToSlash(f.Name)
+		partial := strings.HasSuffix(name, partialFileSuffix)
+		name = strings.TrimSuffix(name, partialFileSuffix)
+		if !matchExt(name, pc.Extensions) {
 			continue
 		}
-		vis = append(vis, e)
+		matched++
+		p, ok := postTargetPath(t.SavePath, name)
+		if !ok {
+			continue // 文件名越界：永久忽略，不参与等待
+		}
+		if partial {
+			// qB 还在用未完成临时名写着这个文件，转它等于转半个片子
+			waiting = true
+			continue
+		}
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() || fi.Size() <= 0 {
+			waiting = true // 还没落盘或已被移走：留给下轮
+			continue
+		}
+		if done[p] {
+			continue
+		}
+		out = append(out, p)
 	}
-	if len(vis) != 1 {
+	if len(out) == 0 && matched > 0 {
+		logger.Debug.Printf("后处理 [%s] 文件列表 %d 项、命中白名单 %d 项，无待派发文件（%q）",
+			t.Name, len(files), matched, pc.Extensions)
+	}
+	return out, waiting, nil
+}
+
+// postTargetPath 把 qB 报告的文件内部路径（相对 save_path、用正斜杠）换成磁盘绝对路径。
+// 种子可以自带上跳的文件名（"../../x.mp4"），拼完必须仍在 save_path 之内，
+// 否则忽略——命令拿到的是用户自己配的 shell 模板，绝不能让它顺着一个越界路径跑出去。
+func postTargetPath(savePath, name string) (string, bool) {
+	if savePath == "" || name == "" {
 		return "", false
 	}
-	return filepath.Join(dir, vis[0].Name()), true
+	p := filepath.Join(savePath, filepath.FromSlash(name))
+	rel, err := filepath.Rel(savePath, p)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		logger.Warn.Printf("后处理：任务文件 %q 落在保存路径 %s 之外，忽略", name, savePath)
+		return "", false
+	}
+	return p, true
 }
 
 // runPostProcess 后台执行后处理命令（成功后的清理在命令内部调用）
@@ -483,7 +574,8 @@ func pickPruneAction(src string, srcSize int64, outs []probeCandidate) (keep str
 // 解得出视频流。转码命令返回 0 不代表产物可用（转码被中断、封装损坏都会留个小文件），
 // 光按大小判定就会把完好的原片换成一个坏文件——这正是这个校验要挡住的情况。
 //
-// 判定依据是「源文件同目录下、命令开始之后新出现的视频文件」，找不到产物就什么都不动。
+// 判定依据是「源文件同目录下、与原片同名（只换扩展名）、且不早于命令开始时刻的新
+// 视频文件」，三条同时满足才算产物，找不到就什么都不动。
 // 每次删除都会写一条 pruned 审计记录（不可回退），日志里也留完整路径。
 func (m *Manager) postPrune(t models.QBTorrent, src string, started time.Time, pc models.PostProcessConfig) {
 	si, err := os.Stat(src)
@@ -504,6 +596,14 @@ func (m *Manager) postPrune(t models.QBTorrent, src string, started time.Time, p
 		}
 		if e.Name() == filepath.Base(src) {
 			continue // 源文件本身不是产物
+		}
+		// 产物必须与原片同名（只换扩展名）才算数。文件散在共享分类根时，
+		// 「同目录 + mtime 不早于开始」完全不能证明这个视频是本次转码的产物——
+		// 它很可能是另一个任务刚下完的片子，被认错就会拿别人的文件去比大小、
+		// 甚至把别人的文件当产物删掉。
+		if strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())) !=
+			strings.TrimSuffix(filepath.Base(src), filepath.Ext(src)) {
+			continue
 		}
 		// 扩展名比较要去点：filepath.Ext 返回 ".mov"，表里存的是无点的 "mov"
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(e.Name()), "."))
