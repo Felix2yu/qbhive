@@ -959,15 +959,23 @@ func (s *Server) postProcessTest(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Path string `json:"path"`
+		Path     string `json:"path"`
+		Category string `json:"category"`
+		Tags     string `json:"tags"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(400, models.APIResponse{Success: false, Message: "参数错误"})
 		return
 	}
-	code, output, err := s.fileMgr.RunPostProcessTest(strings.TrimSpace(body.Path))
-	if code != 0 || err != nil {
-		msg := fmt.Sprintf("退出码 %d", code)
+	res, err := s.fileMgr.RunPostProcessTest(strings.TrimSpace(body.Path),
+		strings.TrimSpace(body.Category), strings.TrimSpace(body.Tags))
+	// 过滤判定只是回报：测试运行照样把命令跑一遍，好让脚本里的分类/标签分支能被验证
+	filter := "按当前名单：会转码"
+	if res.Filtered {
+		filter = "按当前名单：不转码（" + res.Reason + "）"
+	}
+	if res.Code != 0 || err != nil {
+		msg := fmt.Sprintf("退出码 %d", res.Code)
 		// 启动失败时 output 是空的，把真实原因带回去，否则页面上只有一个 -1
 		if err != nil {
 			msg += "：" + err.Error()
@@ -975,13 +983,13 @@ func (s *Server) postProcessTest(c *gin.Context) {
 		c.JSON(200, models.APIResponse{
 			Success: false,
 			Message: msg,
-			Data:    map[string]string{"exitCode": fmt.Sprint(code), "output": output},
+			Data:    map[string]string{"exitCode": fmt.Sprint(res.Code), "output": res.Output, "filter": filter},
 		})
 		return
 	}
 	c.JSON(200, models.APIResponse{
 		Success: true,
 		Message: "命令执行成功",
-		Data:    map[string]string{"exitCode": "0", "output": output},
+		Data:    map[string]string{"exitCode": "0", "output": res.Output, "filter": filter},
 	})
 }

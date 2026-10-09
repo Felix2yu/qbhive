@@ -42,6 +42,15 @@ type Manager struct {
 	// （转码吃满 CPU 与磁盘带宽，并发跑只会互相拖慢）
 	postRunMu sync.Mutex
 	postBusy  bool
+	// postDirty 本轮扫描里改过过滤状态（挡掉 / 因改名单解除终结），
+	// 攒到扫描结束再一次性落盘：一次配置改动会同时影响几百个历史任务，
+	// 逐条 saveCleanState 就是几百次全量重写 + rename
+	postDirty bool
+	// postSig 上一轮看到的分类/标签名单指纹（仅 scan goroutine 读写，无并发）
+	postSig string
+	// postSkipped 本轮被分类/标签过滤挡掉的任务数（仅 scan goroutine 读写），
+	// 扫描结束时汇成一条 Info 日志，避免一次改动几百个任务时逐条刷屏
+	postSkipped int
 }
 
 // cleanRecord 单个任务的清理进度
@@ -68,6 +77,11 @@ type cleanRecord struct {
 	// PostWaits 命中白名单的文件连续几轮都取不到（qB 临时名 / 磁盘上还没有），
 	// 超过 postMaxWaits 才认定这个任务确实没有可转的文件
 	PostWaits int `json:"postWaits,omitempty"`
+	// PostFilterList 记下「本任务是被分类/标签过滤挡掉的」以及当时生效的名单指纹。
+	// 非空表示终结原因是过滤而非「转完了」：名单一改（指纹变了）就解除终结、重新判定，
+	// 用户先过滤错、之后放宽名单时，历史任务能补转，不用手改状态文件。
+	// 正常转码完成的任务这里为空，改名单不会把它们重新拖回转码。
+	PostFilterList string `json:"postFilterList,omitempty"`
 }
 
 const cleanStateFile = "filemgr_clean.json"
@@ -181,6 +195,7 @@ func (m *Manager) scan() {
 		logger.Warn.Printf("文件管理获取任务列表失败：%v", err)
 		return
 	}
+	m.ensurePostFilterRescan(m.cfg.Get().FileManager.PostProcess)
 	for _, t := range list {
 		// clean pass 先于 flatten：文件名清理独立于单文件归档，
 		// flatten 已 done 的任务照样进入清理（文件躺在 save_path 根也常带域名）
@@ -217,6 +232,7 @@ func (m *Manager) scan() {
 			m.done[t.Hash] = true
 		}
 	}
+	m.flushPostState()
 }
 
 // handleCompleted 检查并扁平化「savePath 子目录下只含单个普通文件」的 torrent，

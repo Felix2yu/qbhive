@@ -48,8 +48,9 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 - **安全护栏**：保留扩展名、结果非空、不含非法字符；目标已存在时自动加 `_hash8` 兜底名，仍冲突则跳过——**任何情况下绝不覆盖、不删除已有文件**
 - **审计与回退**：每次自动重命名记录在 `data/filemgr_audit.jsonl`，网页「文件」页可查看（时间 / 任务 / 变更 / 方式 / 状态）并一键回退
 - **转码后处理**（下载完成即跑一次外部命令）：按 qB 报告的任务文件列表，对每个命中白名单的视频文件各跑一条
-  shell 命令，典型是调用 macOS 快捷指令转码；全服务同时只跑一条命令、其余文件排队，命令在后台异步执行、
-  不阻塞扫描，失败退避重试 2 次后放弃，已派发的文件不会重复跑（重启同样）；设置页可填测试路径「运行一次」验证命令本身
+  shell 命令，典型是调用 macOS 快捷指令转码；可按任务的**分类 / 标签**过滤（包含 + 排除），全服务同时只跑一条命令、
+  其余文件排队，命令在后台异步执行、不阻塞扫描，失败退避重试 2 次后放弃，已派发的文件不会重复跑（重启同样）；
+  设置页可填测试路径「运行一次」验证命令本身
 - **批量重命名（模板）**：「文件」页选任务 → 输入模板 → 预览 → 执行。变量：`{date}` 完成日期、
   `{type}` 类型分类（video/audio/image/archive/doc/other）、`{index}` 任务内序号、
   `{orig}` 原文件名、`{title}` 任务名；仅重命名文件名（扩展名保留），目录名不变；
@@ -81,11 +82,33 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
   路径含空格/中文才安全），也可以用 `{file}` 占位符（自动加单引号，同样安全）
 - 后台异步执行，不阻塞扫描；`timeout` 是**总预算**（含重试），`0` 表示不限
 - 「扩展名白名单」建议填 `mov,m4v,mkv,mp4`，只有视频才转码
-- 首次接入先填测试路径点「运行一次」，只验证命令本身，不做任何清理
+- **分类 / 标签过滤**（`categoryInclude`/`categoryExclude`/`tagInclude`/`tagExclude`、
+  不区分大小写，多条之间用逗号分隔——`, ， 、 ; ； |` 与换行都算分隔符）：对**整个任务**生效，
+  被挡掉的任务连 `/torrents/files` 都不会请求。
+  包含名单留空即不过滤；非空时**未分类 / 无标签的任务不命中任何包含名单**（会被跳过）。
+  标签命中**任意一个**即算，不要求全部。同一个任务同时命中包含与排除时**排除优先**。
+- 过滤结果是持久化的（`filemgr_clean.json` 里记 `postDone` + 当时的名单指纹），但**改了名单就会重扫历史
+  任务**：先前被挡掉、漏转的会补转，已经转过的不会重转（按 `postDispatched` 的文件级去重），
+  无需重启、无需手改状态文件。因此「先按分类过滤、后来想放宽」是可逆的；反过来收紧名单也只影响之后
+  还会被转的文件，已经转出来的产物不会撤回
+- 首次接入先填测试路径点「运行一次」，只验证命令本身，不做任何清理。「测试运行」还可以填
+  **模拟分类 / 标签**：值会原样交给命令的 `$CATEGORY` / `$TAGS`，用来验证脚本里按分类、标签
+  分派的分支；结果里同时回报「按当前名单这一组会不会被转码」（只是回报，命令照样跑）
 
-**按标签分派不同快捷指令**：需要按视频元数据决定用哪个快捷指令时，别把判断塞进
-单行命令里，写成脚本更可维护（qbhive 的命令栏填 `~/bin/xxx.sh "$FILE"` 即可）。
-例如按 `videoai` 标签二选一：
+**按标签分派不同快捷指令**：任务在 qB 里的分类与标签已经直接交给脚本了
+（`$CATEGORY`、`$TAGS`——逗号分隔的标签原值，无标签时为空串），按种子标签二选一就用它们，
+不必去读文件元数据：
+
+```sh
+#!/bin/sh
+case ",$TAGS," in
+  *,videoai*) exec /usr/bin/shortcuts run "Permute HEVC 50%缩放" -i "$1" ;;
+esac
+exec /usr/bin/shortcuts run "Permute HEVC" -i "$1"
+```
+
+需要按**视频元数据**（写进容器里的标签）决定用哪个快捷指令时，别把判断塞进单行命令里，
+写成脚本更可维护（qbhive 的命令栏填 `~/bin/xxx.sh "$FILE"` 即可）。例如按 `videoai` 标签二选一：
 
 ```sh
 #!/bin/sh
@@ -290,8 +313,12 @@ go build -o qbhive ./cmd/server
 | `fileManager.aiActive` | 当前使用的 AI 通道 ID；未指定时用第一个启用的通道 |
 | `fileManager.aiChannels[]` | OpenAI 兼容通道（`baseURL`/`apiKey`/`model`/`prompt`），本地与云端皆可；`prompt` 为空用内置默认，支持 `{files}`/`{torrent}` 变量，≤4000 字符 |
 | `fileManager.postProcess.enabled` | 下载完成后处理开关（默认关闭，可与自动归档并存） |
-| `fileManager.postProcess.command` | 单行 shell 命令，走 `sh -c`；支持 `{file}`/`{dir}`/`{name}`/`{category}`/`{savepath}` 占位符与 `$FILE` 等环境变量 |
-| `fileManager.postProcess.extensions` | 扩展名白名单（逗号分隔、不写点），留空表示不过滤 |
+| `fileManager.postProcess.command` | 单行 shell 命令，走 `sh -c`；支持 `{file}`/`{dir}`/`{name}`/`{category}`/`{tags}`/`{savepath}` 占位符，以及同名大写环境变量 `$FILE`/`$DIR`/`$NAME`/`$CATEGORY`/`$TAGS`/`$SAVEPATH`（`$TAGS` 是 qB 的逗号分隔标签原值） |
+| `fileManager.postProcess.extensions` | 扩展名白名单（多条用逗号分隔、不写点，分隔符兼容 `, ， 、 ; ； |` 与换行），留空表示不过滤 |
+| `fileManager.postProcess.categoryInclude` | 分类白名单（不区分大小写，分隔符兼容 `, ， 、 ; ； |` 与换行），留空表示不按分类过滤；未分类的任务不命中任何白名单 |
+| `fileManager.postProcess.categoryExclude` | 分类黑名单（分隔符兼容 `, ， 、 ; ； |` 与换行），命中的任务整任务跳过转码，优先级高于包含 |
+| `fileManager.postProcess.tagInclude` | 标签白名单（分隔符兼容 `, ， 、 ; ； |` 与换行），任务标签命中任意一个即转；留空表示不按标签过滤 |
+| `fileManager.postProcess.tagExclude` | 标签黑名单（分隔符兼容 `, ， 、 ; ； |` 与换行），任务标签命中任意一个即整任务跳过，优先级高于包含 |
 | `fileManager.postProcess.timeout` | 命令总超时秒数，`0` 表示不限 |
 | `fileManager.postProcess.sizePrune` | 命令成功后按大小二选一清理（产物更小则删原片，否则保留原片删产物） |
 | `fileManager.postProcess.verify` | 删原片前用 ffprobe 校验产物是否真能解出视频流（`true`/`false`，缺省按 `true`）。校验不通过或找不到 ffprobe 则不删任何文件 |

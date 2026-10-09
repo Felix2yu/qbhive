@@ -29,6 +29,10 @@ function notice(text, kind = "") {
   return `<div class="notice ${kind}">${text}</div>`;
 }
 
+// 名单类输入的分隔符：与后端 postListSeparators 同一套（半角/全角逗号、顿号、
+// 分号、竖线、换行都算），前端校验按它拆项，才不会把「动漫，剧集」当成一项拦下来
+const LIST_SEP = /[,，、;；｜|\r\n]+/;
+
 // 完成通知可选字段（与后端 models.NotifyFields 保持一致，顺序即通知正文顺序）
 const NOTIFY_FIELDS = [
   ["name", "任务名"], ["size", "文件大小"], ["category", "分类"],
@@ -334,9 +338,17 @@ function validateConfigJS(cfg) {
     if (pp.enabled) {
       if (!((pp.command || "").trim())) return "后处理已启用，请填写要执行的命令";
       if (pp.timeout < 0) return "后处理超时不能为负数";
-      for (const e of (pp.extensions || "").split(",")) {
+      for (const e of (pp.extensions || "").split(LIST_SEP)) {
         const t = e.trim();
         if (t && !/^[A-Za-z0-9]+$/.test(t)) return `后处理扩展名白名单含非法项：${t}`;
+      }
+      for (const [label, list] of [
+        ["分类包含", pp.categoryInclude], ["分类排除", pp.categoryExclude],
+        ["标签包含", pp.tagInclude], ["标签排除", pp.tagExclude],
+      ]) {
+        const v = list || "";
+        if (v.length > 256) return `后处理${label}名单不能超过 256 字符`;
+        if (v.split(LIST_SEP).filter(t => t.trim()).length > 32) return `后处理${label}名单不能超过 32 项`;
       }
     }
     const chans = fm.aiChannels || [];
@@ -1162,6 +1174,10 @@ function syncFormToCfg() {
     pp.enabled = $("#fm-pp-enabled").checked;
     pp.command = $("#fm-pp-cmd").value;
     pp.extensions = ($("#fm-pp-exts").value || "").trim();
+    pp.categoryInclude = ($("#fm-pp-cat-inc").value || "").trim();
+    pp.categoryExclude = ($("#fm-pp-cat-exc").value || "").trim();
+    pp.tagInclude = ($("#fm-pp-tag-inc").value || "").trim();
+    pp.tagExclude = ($("#fm-pp-tag-exc").value || "").trim();
     pp.timeout = parseInt($("#fm-pp-timeout").value || "0", 10) || 0;
     pp.sizePrune = $("#fm-pp-prune").checked;
     pp.verify = $("#fm-pp-verify").checked;
@@ -1418,10 +1434,22 @@ async function renderSettings(root) {
           `下载完成后按 qB 报告的任务文件列表逐个转码：命中扩展名白名单的<b>每个</b>视频文件都会跑一次命令（多文件种子、文件散在共享分类根也一样）。全服务同时<b>只跑一条</b>命令，其余文件等下一轮扫描排队；已派发过的文件不会重复跑，重启也不会。归档关掉也照常触发——只要本项开着就会扫描。`)}
         ${field("命令",
           `<textarea id="fm-pp-cmd" class="ctrl mono" placeholder="/usr/bin/shortcuts run &#34;Permute HEVC 50%缩放&#34; -i &#34;$FILE&#34;">${escapeHTML(pp.command || "")}</textarea>`,
-          `单行 shell 命令（走 <code>sh -c</code>），可以自己写引号、管道。占位符 <code>{file}</code> <code>{dir}</code> <code>{name}</code> <code>{category}</code> <code>{savepath}</code> 会被替换成自动加好单引号的字面量；也可以直接用环境变量 <code>$FILE</code> <code>$DIR</code> <code>$NAME</code> <code>$CATEGORY</code> <code>$SAVEPATH</code>。示例中的 <code>$FILE</code> 一定要带双引号，路径含空格时才能拆开。<b>快捷指令名必须与 <code>shortcuts list</code> 输出逐字符一致</b>，差一个空格就会「找不到快捷指令」。首次接入建议先用下面的「测试运行」验证快捷指令名与参数能不能跑通。`)}
+          `单行 shell 命令（走 <code>sh -c</code>），可以自己写引号、管道。占位符 <code>{file}</code> <code>{dir}</code> <code>{name}</code> <code>{category}</code> <code>{tags}</code> <code>{savepath}</code> 会被替换成自动加好单引号的字面量；也可以直接用环境变量 <code>$FILE</code> <code>$DIR</code> <code>$NAME</code> <code>$CATEGORY</code> <code>$TAGS</code> <code>$SAVEPATH</code>。<code>$TAGS</code> 是任务在 qB 里的逗号分隔标签原值（无标签时为空串），脚本里可自行按标签挑快捷指令。示例中的 <code>$FILE</code> 一定要带双引号，路径含空格时才能拆开。<b>快捷指令名必须与 <code>shortcuts list</code> 输出逐字符一致</b>，差一个空格就会「找不到快捷指令」。首次接入建议先用下面的「测试运行」验证快捷指令名与参数能不能跑通。`)}
         ${field("扩展名白名单",
           `<input type="text" id="fm-pp-exts" class="ctrl w-sm" value="${escapeHTML(pp.extensions || "")}" placeholder="mov,m4v,mkv,mp4">`,
-          "逗号分隔、不写点；只有命中这些扩展名的文件才执行，留空表示不过滤（非视频也会跑命令）。")}
+          "多条用逗号分隔、不写点（<code>, ， 、 ; ； |</code> 与换行都当分隔符）；只有命中这些扩展名的文件才执行，留空表示不过滤（非视频也会跑命令）。")}
+        ${field("分类过滤",
+          `<div class="split">
+            <input type="text" id="fm-pp-cat-inc" value="${escapeHTML(pp.categoryInclude || "")}" placeholder="只转这些分类，例：动漫, 剧集">
+            <input type="text" id="fm-pp-cat-exc" value="${escapeHTML(pp.categoryExclude || "")}" placeholder="这些分类不转，例：电影">
+          </div>`,
+          "<b>左框只转、右框不转</b>。按<b>整个任务</b>的 qB 分类判定，不区分大小写；多条之间用逗号分隔（<code>, ， 、 ; ； |</code> 与换行都算分隔符）；两边都留空即不过滤。包含名单里<b>分类要逐字符对上</b>（<code>动漫</code> 与 <code>动漫组</code> 是两条不同分类）。<b>未分类的任务永远不命中包含名单</b>——要连没打分类的一起转，就把左框留空、只用右框排除。同时命中左右两框时<b>右框优先</b>（不转）。判定结果会持久化，但<b>改了名单就会重扫历史任务</b>：之前被挡掉、漏转的会补转，已经转过的不会重转（按文件去重），不用重启也不用清状态。")}
+        ${field("标签过滤",
+          `<div class="split">
+            <input type="text" id="fm-pp-tag-inc" value="${escapeHTML(pp.tagInclude || "")}" placeholder="只转带这些标签的，例：转码">
+            <input type="text" id="fm-pp-tag-exc" value="${escapeHTML(pp.tagExclude || "")}" placeholder="带这些标签的不转，例：真人">
+          </div>`,
+          "<b>左框只转、右框不转</b>。任务带多个标签时<b>命中任意一个即算</b>，不要求全部命中；<b>无标签的任务不命中左框</b>。典型用法是反向 opt-in：左框填 <code>转码</code>，只有手动打了 <code>转码</code> 标签的任务才会转。其余语义、优先级与分类过滤一致。")}
         ${field("超时",
           `<div class="controls"><input type="number" id="fm-pp-timeout" class="w-xs" value="${pp.timeout || 0}" min="0"><span class="unit">秒</span></div>`,
           "0 表示不限。转码动辄几十分钟，默认不限即可；命令失败会退避重试 2 次后放弃。")}
@@ -1433,8 +1461,13 @@ async function renderSettings(root) {
           `<input type="text" id="fm-pp-probe" class="ctrl mono" value="${escapeHTML(pp.probePath || "")}" placeholder="/opt/homebrew/bin/ffprobe">`,
           "留空则按 <code>PATH → /opt/homebrew/bin → /usr/local/bin → /usr/bin</code> 的顺序自动探测。Homebrew 装的 ffmpeg 若不在你启动本程序的 shell 的 PATH 里，就把绝对路径填在这里。")}
         ${field("测试运行",
-          `<div class="controls"><input type="text" id="fm-pp-test-path" class="ctrl" placeholder="待转码文件的绝对路径，含中文/空格也要能跑"><button class="btn" id="fm-pp-test">运行一次</button></div>`,
-          "用当前命令对指定文件跑一次，展示退出码与输出尾部。<b>不会</b>触发上面的大小清理，纯粹验证命令本身。")}
+          `<div class="controls">
+            <input type="text" id="fm-pp-test-path" class="ctrl" placeholder="待转码文件的绝对路径，含中文/空格也要能跑">
+            <input type="text" id="fm-pp-test-cat" class="w-sm" placeholder="模拟分类，例：动漫">
+            <input type="text" id="fm-pp-test-tags" class="w-sm" placeholder="模拟标签，例：转码,1080p">
+            <button class="btn" id="fm-pp-test">运行一次</button>
+          </div>`,
+          "用当前命令对指定文件跑一次，展示退出码与输出尾部。<b>不会</b>触发上面的大小清理，纯粹验证命令本身。分类/标签是选填的模拟值：会原样交给命令的 <code>$CATEGORY</code> / <code>$TAGS</code>，方便验证脚本里按分类、标签分派的分支；结果里另外回报<b>按上面的名单这一组会不会被转码</b>（只是回报，本次命令照样跑；名单改动要先保存才参与判定）。")}
         <pre class="pp-out" id="fm-pp-out"></pre>
       </div>
     </div>
@@ -1494,9 +1527,13 @@ async function renderSettings(root) {
     if (!path) { toast("请先填写测试文件的绝对路径", "err"); return; }
     const out = $("#fm-pp-out");
     out.textContent = "执行中…";
-    const r = await api("POST", "/filemgr/postprocess/test", { path });
+    const r = await api("POST", "/filemgr/postprocess/test", {
+      path,
+      category: ($("#fm-pp-test-cat").value || "").trim(),
+      tags: ($("#fm-pp-test-tags").value || "").trim(),
+    });
     const d = r.data || {};
-    out.textContent = `退出码：${d.exitCode || "-"}\n${d.output || r.message || ""}`;
+    out.textContent = `${d.filter || ""}\n退出码：${d.exitCode || "-"}\n${d.output || r.message || ""}`;
     toast(r.success ? "测试执行成功" : (r.message || "测试执行失败"), r.success ? "ok" : "err");
   };
 

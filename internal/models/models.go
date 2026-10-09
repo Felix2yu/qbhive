@@ -124,10 +124,11 @@ type FileManagerConfig struct {
 // Command 是单行 shell 命令，走 /bin/sh -c 执行，因此可以自己写引号、管道、
 // 环境变量展开。同时提供两套取值方式：
 //
-//   - 占位符：{file} {dir} {name} {category} {savepath}，会被替换成**加了单引号的
+//   - 占位符：{file} {dir} {name} {category} {tags} {savepath}，会被替换成**加了单引号的
 //     字面量**（含空格与中文的路径也安全），适合直接拼命令
-//   - 环境变量：$FILE $DIR $NAME $CATEGORY $SAVEPATH，值原样传入不做任何处理，
-//     适合用户自己用双引号包裹（如 "$FILE"）的场景
+//   - 环境变量：$FILE $DIR $NAME $CATEGORY $TAGS $SAVEPATH，值原样传入不做任何处理，
+//     适合用户自己用双引号包裹（如 "$FILE"）的场景。$TAGS 是 qB 的逗号分隔标签原值
+//     （如 "转码,1080p"），无标签时为空串
 type PostProcessConfig struct {
 	Enabled bool `json:"enabled"`
 	// Command 单行 shell 命令模板，如
@@ -135,6 +136,19 @@ type PostProcessConfig struct {
 	Command string `json:"command"`
 	// Extensions 扩展名白名单（逗号分隔，不写点），只有命中才执行；留空表示不按扩展名过滤
 	Extensions string `json:"extensions,omitempty"`
+	// CategoryInclude 分类白名单（逗号分隔，不区分大小写）。留空表示不按分类过滤；
+	// 非空时只有分类命中其中任意一项的任务才转码。未分类（category 为空）的任务
+	// 不命中任何白名单项，因此会被跳过。
+	CategoryInclude string `json:"categoryInclude,omitempty"`
+	// CategoryExclude 分类黑名单（逗号分隔）：任务分类命中其中任意一项就整任务跳过转码。
+	// 优先级高于白名单——同时命中两边时不转。
+	CategoryExclude string `json:"categoryExclude,omitempty"`
+	// TagInclude 标签白名单（逗号分隔）。留空表示不按标签过滤；非空时任务的 qB 标签里
+	// 至少有一个命中才转码（命中任意一个即可，不要求全部）。无标签的任务不命中，会被跳过。
+	TagInclude string `json:"tagInclude,omitempty"`
+	// TagExclude 标签黑名单（逗号分隔）：任务标签里命中任意一项就整任务跳过转码，
+	// 优先级高于白名单。
+	TagExclude string `json:"tagExclude,omitempty"`
 	// Timeout 单次命令超时秒数，0 表示不限
 	Timeout int `json:"timeout"`
 	// SizePrune 命令成功后按大小二选一清理：产物比源文件小则删源文件保留产物，

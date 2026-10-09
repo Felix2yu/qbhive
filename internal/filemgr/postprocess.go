@@ -58,8 +58,9 @@ var postVideoExts = map[string]bool{
 	"webm": true, "mpg": true, "mpeg": true, "ts": true, "wmv": true, "flv": true,
 }
 
-// postEnvNames 语句渲染出的环境变量名 → 占位符映射（值原样交给 shell，由使用者加引号）
-var postEnvNames = []string{"FILE", "DIR", "NAME", "CATEGORY", "SAVEPATH"}
+// postEnvNames execPostCommand 注入的环境变量名，与 renderPostCommand 的 {} 占位符一一对应
+// （值原样交给 shell，由使用者加引号）
+var postEnvNames = []string{"FILE", "DIR", "NAME", "CATEGORY", "TAGS", "SAVEPATH"}
 
 // postRetryDelay 每次失败后的重试退避基数（第 n 次失败后等 n×该值），乘上后按
 // 剩余超时裁短。用 var 而非 const：单测要把它调小才能秒级跑完重试用例。
@@ -68,6 +69,154 @@ var postRetryDelay = 20 * time.Second
 // postEnabled 后处理是否已开启
 func (m *Manager) postEnabled() bool {
 	return m.cfg.Get().FileManager.PostProcess.Enabled
+}
+
+// postTaskFiltered 整任务级的分类/标签过滤：返回是否跳过后处理以及写进日志的原因。
+// 四个名单全留空即不过滤。判定只用 qB 报出的 category/tags，不发任何请求，所以它排在
+// 取文件列表之前——被过滤掉的任务不该为它花掉一次 /torrents/files。
+func postTaskFiltered(t models.QBTorrent, pc models.PostProcessConfig) (bool, string) {
+	// 名单一律先拆项：只写了逗号空格的「空名单」等价于没配，不能当成白名单把所有任务挡掉
+	catInc := splitNameList(pc.CategoryInclude)
+	catExc := splitNameList(pc.CategoryExclude)
+	tagInc := splitNameList(pc.TagInclude)
+	tagExc := splitNameList(pc.TagExclude)
+
+	if nameListHit(t.Category, catExc) {
+		return true, fmt.Sprintf("分类 %q 命中排除名单（%s）", strings.TrimSpace(t.Category), strings.Join(catExc, ","))
+	}
+	if len(catInc) > 0 && !nameListHit(t.Category, catInc) {
+		return true, fmt.Sprintf("分类 %q 不在包含名单（%s）", strings.TrimSpace(t.Category), strings.Join(catInc, ","))
+	}
+	tags := splitNameList(t.Tags)
+	for _, tag := range tags {
+		if nameListHit(tag, tagExc) {
+			return true, fmt.Sprintf("标签 %q 命中排除名单（%s）", tag, strings.Join(tagExc, ","))
+		}
+	}
+	if len(tagInc) > 0 && !anyNameListHit(tags, tagInc) {
+		return true, fmt.Sprintf("标签 %q 不在包含名单（%s）", strings.Join(tags, ","), strings.Join(tagInc, ","))
+	}
+	return false, ""
+}
+
+// ensurePostFilterRescan 过滤名单一改就清空进程内的「已跳过」表（仅 scan goroutine 调用）。
+// m.done 一旦记下某个任务，这一进程里就不会再回头看它；不清空就会出现「放宽了名单、
+// 历史任务却纹丝不动」，只能靠重启解决。要不要真的重转仍由每个任务落盘的
+// PostFilterList 指纹决定：正常转完的任务（指纹为空）不会被动摇，
+// 已派发的文件也仍由 PostDispatched 去重，重扫只会补转过滤期间漏掉的那些。
+func (m *Manager) ensurePostFilterRescan(pc models.PostProcessConfig) {
+	sig := postFilterSignature(pc)
+	if sig == m.postSig {
+		return
+	}
+	m.postSig = sig
+	if !pc.Enabled || len(m.done) == 0 {
+		return
+	}
+	logger.Info.Printf("转码过滤名单已修改（%s），重新评估 %d 个已跳过的任务", sig, len(m.done))
+	m.done = make(map[string]bool)
+}
+
+// postFilterSignature 分类/标签名单的指纹，用于判断「用户改过过滤配置没有」。
+// 存的是拆分后的原文而不是摘要：这个值要写进状态文件供人回看排查，
+// 顺带把「动漫, 电影」和「动漫 ,电影」这类纯空格改动归一成同一个指纹，免得白白重开一批任务。
+func postFilterSignature(pc models.PostProcessConfig) string {
+	return fmt.Sprintf("ci=%s|ce=%s|ti=%s|te=%s",
+		strings.Join(splitNameList(pc.CategoryInclude), ","),
+		strings.Join(splitNameList(pc.CategoryExclude), ","),
+		strings.Join(splitNameList(pc.TagInclude), ","),
+		strings.Join(splitNameList(pc.TagExclude), ","))
+}
+
+// markPostFiltered 记下「本任务被过滤挡掉」：终结 + 当时的名单指纹。
+// 只置内存标记，落盘交给 flushPostState（一轮扫描一次）
+func (m *Manager) markPostFiltered(hash, sig string) {
+	m.mu.Lock()
+	if rec := m.cleanState[hash]; rec != nil {
+		rec.PostDone = true
+		rec.PostFilterList = sig
+	} else {
+		m.cleanState[hash] = &cleanRecord{PostDone: true, PostFilterList: sig}
+	}
+	m.postDirty = true
+	m.mu.Unlock()
+}
+
+// reopenPostFiltered 名单改过就把「因过滤而终结」的任务解除终结，返回是否重开。
+// 已派发的文件（PostDispatched）原样保留，重开只会补转过滤期间漏掉的文件，不会重转。
+func (m *Manager) reopenPostFiltered(hash, sig string) bool {
+	m.mu.Lock()
+	rec := m.cleanState[hash]
+	reopened := rec != nil && rec.PostDone && rec.PostFilterList != "" && rec.PostFilterList != sig
+	if reopened {
+		rec.PostDone = false
+		rec.PostFilterList = ""
+		rec.PostWaits = 0
+		m.postDirty = true
+	}
+	m.mu.Unlock()
+	return reopened
+}
+
+// flushPostState 收尾一轮扫描：把攒下的过滤状态变更一次性落盘，并汇总本轮被过滤挡掉的任务数
+func (m *Manager) flushPostState() {
+	m.mu.Lock()
+	dirty := m.postDirty
+	m.postDirty = false
+	m.mu.Unlock()
+	if dirty {
+		m.saveCleanState()
+	}
+	if m.postSkipped > 0 {
+		logger.Info.Printf("转码过滤本轮挡掉 %d 个任务（名单：%s），原因见调试日志", m.postSkipped, m.postSig)
+		m.postSkipped = 0
+	}
+}
+
+// postListSeparators 名单分隔符：除了半角逗号，全角逗号、顿号、分号（半/全角）、
+// 竖线与换行都按分隔符处理。中文分类名用输入法打出来常常带「，」，只认半角逗号
+// 会让整串被当成一个匹配不上的分类，看起来就像名单没生效。
+// 代价是真的含这些字符的分类/标签名没法列进来——qB 里不会出现这种名字。
+var postListSeparators = strings.NewReplacer(
+	"，", ",", "、", ",", "；", ",", ";", ",", "｜", ",", "|", ",",
+	"\r", ",", "\n", ",", "\t", " ",
+)
+
+// splitNameList 把名单拆成去空白、去空项的列表（分隔符见 postListSeparators），
+// 保留原大小写用于展示与比对。qB 的 tags 与用户配的名单都走这里。
+func splitNameList(list string) []string {
+	out := make([]string, 0, 4)
+	for _, item := range strings.Split(postListSeparators.Replace(list), ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// nameListHit val 是否命中名单（不区分大小写）。空 val 永远不算命中：未分类、无标签的
+// 任务因此不会满足任何包含名单，也不会被排除名单误伤。
+func nameListHit(val string, list []string) bool {
+	v := strings.ToLower(strings.TrimSpace(val))
+	if v == "" {
+		return false
+	}
+	for _, item := range list {
+		if strings.ToLower(item) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// anyNameListHit 任务的一组标签里是否有任意一个命中名单
+func anyNameListHit(vals, list []string) bool {
+	for _, v := range vals {
+		if nameListHit(v, list) {
+			return true
+		}
+	}
+	return false
 }
 
 // handlePostProcess 推进一个任务的后处理队列：每轮最多派发一个文件，全局串行。
@@ -84,13 +233,29 @@ func (m *Manager) handlePostProcess(t models.QBTorrent) (done bool, retry bool) 
 	if !pc.Enabled {
 		return true, false
 	}
+	sig := postFilterSignature(pc)
 	if m.postSettled(t.Hash) {
-		return true, false
+		// 因分类/标签过滤而终结的任务：名单一改就重新判定，让「先过滤错、后放宽名单」
+		// 的历史任务补转（已派发的文件仍由 PostDispatched 去重，不会重转一遍）。
+		// 这里不逐条打日志：一次改动会重开整批任务，汇总见 ensurePostFilterRescan
+		if !m.reopenPostFiltered(t.Hash, sig) {
+			return true, false
+		}
 	}
 	// 命令都没配就别占着任务反复重试：终结掉并把原因写清楚
 	if strings.TrimSpace(pc.Command) == "" {
 		logger.Warn.Printf("后处理 [%s] 已启用但未配置命令，跳过", t.Name)
 		m.markPostSettled(t.Hash)
+		return true, false
+	}
+	// 分类/标签过滤：整个任务不参与转码，一次请求都不发。判定结果连同当时的名单
+	// 一起持久化，重启不用每轮重判；改名单则由 reopenPostFiltered 解除终结。
+	// 逐条只记 Debug（历史库里一次改动可能挡掉几百个任务，全写 Info 会把环形缓冲冲满），
+	// 每轮结束由 flushPostState 补一条汇总。
+	if skip, why := postTaskFiltered(t, pc); skip {
+		logger.Debug.Printf("后处理 [%s] %s，跳过转码", t.Name, why)
+		m.postSkipped++
+		m.markPostFiltered(t.Hash, sig)
 		return true, false
 	}
 	// 归档还在等待 qB 异步移动落地（原目录未清空）时必须让路：
@@ -147,6 +312,8 @@ func (m *Manager) markPostSettled(hash string) {
 	m.mu.Lock()
 	if rec := m.cleanState[hash]; rec != nil {
 		rec.PostDone = true
+		// 清掉过滤指纹：这是「转完了/确实没有可转文件」的正常终结，改名单不该把它重开
+		rec.PostFilterList = ""
 	} else {
 		m.cleanState[hash] = &cleanRecord{PostDone: true}
 	}
@@ -369,6 +536,7 @@ func renderPostCommand(tpl string, t models.QBTorrent, file string) (string, err
 		{"{dir}", dir},
 		{"{name}", t.Name},
 		{"{category}", t.Category},
+		{"{tags}", t.Tags},
 		{"{savepath}", t.SavePath},
 	}
 	for _, r := range repl {
@@ -398,6 +566,7 @@ func execPostCommand(cmdStr string, t models.QBTorrent, file string, timeout int
 		"DIR="+filepath.Dir(file),
 		"NAME="+t.Name,
 		"CATEGORY="+t.Category,
+		"TAGS="+t.Tags,
 		"SAVEPATH="+t.SavePath,
 	)
 	if t.SavePath != "" {
@@ -701,39 +870,49 @@ func (m *Manager) deletePostFile(t models.QBTorrent, p string) {
 	})
 }
 
-// matchExt 判断文件是否命中扩展名白名单（白名单为空即放行）
+// matchExt 判断文件是否命中扩展名白名单（白名单为空即放行）。
+// 分隔符与分类/标签名单同一套（见 postListSeparators），全角逗号也算分隔
 func matchExt(file, list string) bool {
-	list = strings.ToLower(strings.TrimSpace(list))
-	if list == "" {
+	allowed := splitNameList(strings.ToLower(list))
+	if len(allowed) == 0 {
 		return true
 	}
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(file), "."))
-	for _, e := range strings.Split(list, ",") {
-		if e = strings.TrimSpace(e); e != "" && e == ext {
-			return true
-		}
-	}
-	return false
+	return nameListHit(strings.TrimPrefix(filepath.Ext(file), "."), allowed)
+}
+
+// PostTestResult 设置页「测试运行」的结果：命令退出码、输出尾部，
+// 以及按当前名单这一组分类/标签到底会不会真的被转码。
+type PostTestResult struct {
+	Code   int    `json:"exitCode"`
+	Output string `json:"output"`
+	// Filtered 按已保存的分类/标签名单判定为「跳过转码」。注意判定只是回报，
+	// 本次测试命令照样会跑——测试运行是用来验证命令的，不该被名单挡住
+	Filtered bool   `json:"filtered"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // RunPostProcessTest 手动跑一次后处理命令（设置页「测试运行」用），同步执行。
-// 返回退出码与输出尾部（只保留最后 4KB），不执行任何清理动作——
-// 测试的目的是验证命令本身能不能跑通，不该顺手删文件。
-func (m *Manager) RunPostProcessTest(file string) (int, string, error) {
+// category/tags 是模拟的任务上下文：填了就能带着 $CATEGORY / $TAGS（以及 {category}
+// {tags} 占位符）验证脚本按分类/标签分派的分支，不填就是空值。
+// 不执行任何清理动作——测试的目的是验证命令本身能不能跑通，不该顺手删文件。
+func (m *Manager) RunPostProcessTest(file, category, tags string) (*PostTestResult, error) {
 	pc := m.cfg.Get().FileManager.PostProcess
 	if !pc.Enabled {
-		return -1, "", fmt.Errorf("后处理未启用")
+		return &PostTestResult{Code: -1}, fmt.Errorf("后处理未启用")
 	}
 	if strings.TrimSpace(pc.Command) == "" {
-		return -1, "", fmt.Errorf("请先填写后处理命令")
+		return &PostTestResult{Code: -1}, fmt.Errorf("请先填写后处理命令")
 	}
 	if strings.TrimSpace(file) == "" {
-		return -1, "", fmt.Errorf("请填写测试用的文件绝对路径")
+		return &PostTestResult{Code: -1}, fmt.Errorf("请填写测试用的文件绝对路径")
 	}
-	t := models.QBTorrent{Name: "（测试）", Category: "", SavePath: filepath.Dir(file)}
+	t := models.QBTorrent{Name: "（测试）", Category: category, Tags: tags, SavePath: filepath.Dir(file)}
+	skip, why := postTaskFiltered(t, pc)
+	res := &PostTestResult{Filtered: skip, Reason: why}
 	cmdStr, err := renderPostCommand(pc.Command, t, file)
 	if err != nil {
-		return -1, "", err
+		res.Code = -1
+		return res, err
 	}
 	timeout := pc.Timeout
 	if timeout <= 0 {
@@ -744,11 +923,12 @@ func (m *Manager) RunPostProcessTest(file string) (int, string, error) {
 	if len(tail) > 4096 {
 		tail = "...(已截断)\n" + tail[len(tail)-4096:]
 	}
+	res.Code, res.Output = code, tail
 	// 启动失败（不是命令自身失败）时 output 往往为空，光看退出码 -1 完全无从排查，
 	// 这里把真实错误落日志：最常见的是 chdir 失败或进程被沙箱/TCC 拒绝启动
 	if err != nil {
 		logger.Warn.Printf("后处理测试运行失败：%v（退出码 %d，工作目录 %s，命令 %s）",
 			err, code, t.SavePath, cmdStr)
 	}
-	return code, tail, err
+	return res, err
 }
