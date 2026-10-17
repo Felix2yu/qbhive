@@ -364,7 +364,7 @@ type cleanRename struct {
 	Old      string `json:"old"`
 	New      string `json:"new"`
 	Attempts int    `json:"attempts,omitempty"`
-	Via      string `json:"via,omitempty"`    // regex / ai
+	Via      string `json:"via,omitempty"`     // regex / ai
 	AuditID  string `json:"auditId,omitempty"` // 关联的审计记录 ID
 }
 

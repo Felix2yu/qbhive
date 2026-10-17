@@ -23,7 +23,7 @@ func emptyAppCfg() *models.AppConfig {
 	return &models.AppConfig{
 		Qbittorrent: models.QBConfig{URL: "http://127.0.0.1:8080"},
 		RSS: models.RSSConfig{
-			Enabled:  true, Interval: 15,
+			Enabled: true, Interval: 15,
 			Feeds: []models.RSSFeed{
 				{ID: "f1", Name: "feed", URL: "https://example.com/feed.xml", Enabled: true},
 			},
@@ -46,7 +46,8 @@ func TestValidateConfig_HappyPath(t *testing.T) {
 }
 
 func TestValidateConfig_QBUrlMustBeHTTP(t *testing.T) {
-	cfg := emptyAppCfg(); cfg.Qbittorrent.URL = "ftp://x"
+	cfg := emptyAppCfg()
+	cfg.Qbittorrent.URL = "ftp://x"
 	if !strings.Contains(validateConfig(cfg), "http:// 或 https://") {
 		t.Error("expected QB URL error")
 	}
@@ -66,17 +67,20 @@ func TestValidateConfig_IntervalZeroChecks(t *testing.T) {
 	if !strings.Contains(validateConfig(cfg), "RSS 刷新间隔必须 ≥ 1") {
 		t.Error("expected RSS interval error")
 	}
-	cfg.RSS.Enabled = false; cfg.RSS.Interval = 0
+	cfg.RSS.Enabled = false
+	cfg.RSS.Interval = 0
 	if validateConfig(cfg) != "" {
 		t.Error("disabled RSS should skip interval check")
 	}
 
-	cfg = emptyAppCfg(); cfg.Limiter.Interval = 0
+	cfg = emptyAppCfg()
+	cfg.Limiter.Interval = 0
 	if !strings.Contains(validateConfig(cfg), "限速器刷新间隔必须 ≥ 1") {
 		t.Error("expected limiter interval error")
 	}
 
-	cfg = emptyAppCfg(); cfg.FileManager.ScanInterval = 0
+	cfg = emptyAppCfg()
+	cfg.FileManager.ScanInterval = 0
 	if !strings.Contains(validateConfig(cfg), "文件管理扫描间隔必须 ≥ 1") {
 		t.Error("expected filemanager interval error")
 	}
@@ -155,7 +159,6 @@ func setupTestServer(t *testing.T, qbURL string, authToken string) *Server {
 	// 否则会掩盖 "nil map 写 panic -> listTorrents 500" 这类回归
 	return srv
 }
-
 
 func TestAuthMiddleware_NoTokenAllowsAll(t *testing.T) {
 	s := setupTestServer(t, "", "")

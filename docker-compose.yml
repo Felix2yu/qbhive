@@ -10,6 +10,14 @@ services:
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
+    # /api/ping 在鉴权白名单里（见 internal/web/server.go 的 authMiddleware），
+    # 配了 QBHIVE_TOKEN 之后探活仍然通——拿需要鉴权的接口探活会让容器稳定 unhealthy。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8088/api/ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks:
       - torrent-net
 

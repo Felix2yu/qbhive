@@ -21,8 +21,8 @@ import (
 
 const (
 	aiTimeout     = 30 * time.Second
-	aiMaxNames    = 64  // 单次请求最多携带的文件名数
-	aiMaxAttempts = 3   // AI 调用失败最多重试轮数，超过后降级为仅正则清洗
+	aiMaxNames    = 64 // 单次请求最多携带的文件名数
+	aiMaxAttempts = 3  // AI 调用失败最多重试轮数，超过后降级为仅正则清洗
 	aiMaxPrompt   = 4000
 )
 

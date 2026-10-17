@@ -317,7 +317,7 @@ func TestClient_isQBErrorString(t *testing.T) {
 		{`"Fails."`, true},
 		{`"Unauthorized"`, true},
 		{`  "Invalid sort field"  `, true},
-		{`""`, false},     // 引号内为空 → 不是 qB 错误串
+		{`""`, false}, // 引号内为空 → 不是 qB 错误串
 		{`not-json`, false},
 		{`[]`, false},
 		{``, false},

@@ -62,9 +62,15 @@ func TestLimiter_apply_MatchesAndLimits(t *testing.T) {
 	l.apply()
 
 	got := parseCalls(calls)
-	if got["h1"] != "10485760" { t.Errorf("h1 limit=%s want 10485760", got["h1"]) }
-	if got["h3"] != "5242880" { t.Errorf("h3 limit=%s want 5242880", got["h3"]) }
-	if got["h2"] != "" || got["h4"] != "" { t.Errorf("h2/h4 no limit: %v", got) }
+	if got["h1"] != "10485760" {
+		t.Errorf("h1 limit=%s want 10485760", got["h1"])
+	}
+	if got["h3"] != "5242880" {
+		t.Errorf("h3 limit=%s want 5242880", got["h3"])
+	}
+	if got["h2"] != "" || got["h4"] != "" {
+		t.Errorf("h2/h4 no limit: %v", got)
+	}
 }
 
 func TestLimiter_apply_NoDuplicateOnSecondRun(t *testing.T) {
@@ -73,7 +79,9 @@ func TestLimiter_apply_NoDuplicateOnSecondRun(t *testing.T) {
 	l.apply()
 	before := len(*calls)
 	l.apply()
-	if len(*calls) != before { t.Errorf("2nd run no-op: %d -> %d", before, len(*calls)) }
+	if len(*calls) != before {
+		t.Errorf("2nd run no-op: %d -> %d", before, len(*calls))
+	}
 }
 
 func TestLimiter_Reload_ClearsLastLimits(t *testing.T) {
@@ -83,29 +91,38 @@ func TestLimiter_Reload_ClearsLastLimits(t *testing.T) {
 	before := len(*calls)
 	l.Reload(nil)
 	l.apply()
-	if len(*calls) != before+1 { t.Errorf("after reload re-apply: %d -> %d", before, len(*calls)) }
+	if len(*calls) != before+1 {
+		t.Errorf("after reload re-apply: %d -> %d", before, len(*calls))
+	}
 }
 
 func TestLimiter_ReloadDisabled_SetsRunningFalse(t *testing.T) {
 	l, _, srv := setupLimiterWithMockQB(t, `[]`)
 	defer srv.Close()
-	cfg := l.cfg.Get(); cfg.Limiter.Enabled = false; l.cfg.Set(cfg)
+	cfg := l.cfg.Get()
+	cfg.Limiter.Enabled = false
+	l.cfg.Set(cfg)
 	l.Reload(nil)
-	if l.running { t.Error("disabled should not run") }
+	if l.running {
+		t.Error("disabled should not run")
+	}
 }
 
 func TestLimiter_apply_GetTorrentsError(t *testing.T) {
 	l, calls, srv := setupLimiterWithMockQB(t, `[{"hash":"h1"}]`)
 	srv.Close()
 	l.apply()
-	if len(*calls) != 0 { t.Errorf("on error no limits: got %v", *calls) }
+	if len(*calls) != 0 {
+		t.Errorf("on error no limits: got %v", *calls)
+	}
 }
 
 func TestLimiter_SetClient_HotSwap(t *testing.T) {
 	l, _, srv := setupLimiterWithMockQB(t, `[{"hash":"h1","name":"Movie.4k.mkv"}]`)
 	defer srv.Close()
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Set-Cookie", "SID=test"); w.Write([]byte("Ok."))
+		w.Header().Set("Set-Cookie", "SID=test")
+		w.Write([]byte("Ok."))
 	}))
 	defer srv2.Close()
 	l.SetClient(qb.New(srv2.URL, "u", "p", ""))
