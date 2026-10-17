@@ -19,3 +19,17 @@ data/
 
 # WorkBuddy 工作区元数据（本地会话记忆，不入库）
 .workbuddy/
+
+# ---- AI Agent 生成目录（不进版本库，本地保留）----
+.workbuddy/
+.trae/
+.trea/
+.qoder/
+.opencode/
+.cursor/
+.claude/
+.codex/
+.gemini/
+.continue/
+.windsurf/
+.aider*
