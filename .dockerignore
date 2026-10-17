@@ -1,0 +1,23 @@
+# 装配式镜像：Dockerfile 只 COPY 预编译产物（bin/qbhive）与静态前端（web/static）。
+# 下列排除项都不得命中这两者 —— 否则 COPY 报的是「file not found」这种误导性错误。
+
+# VCS / CI
+.git
+.github
+.gitignore
+.dockerignore
+
+# Go 源码：CI 的 build job 已编译成 bin/qbhive，构建上下文不需要源码
+internal
+cmd
+
+# 文档
+docs
+*.md
+LICENSE
+
+# 本地数据与运行时配置（容器内由 QBHIVE_CONFIG 指向数据卷）
+data
+config.json
+.tmp
+*.db
