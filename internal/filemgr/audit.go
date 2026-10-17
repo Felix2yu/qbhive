@@ -38,7 +38,7 @@ const auditViaPrune = "prune"
 
 type auditEntry struct {
 	ID      string `json:"id"`
-	Ts      int64  `json:"ts"`
+	TS      int64  `json:"ts"`
 	Hash    string `json:"hash"`
 	Torrent string `json:"torrent"`
 	Old     string `json:"old"`
@@ -122,8 +122,9 @@ func (a *auditLog) rewrite() {
 	w := bufio.NewWriter(f)
 	for _, e := range a.entries {
 		line, _ := json.Marshal(e)
-		w.Write(line)
-		w.WriteByte('\n')
+		// bufio.Writer 内部会记住第一个写错误，由下面的 Flush 统一返回并处理
+		_, _ = w.Write(line)
+		_ = w.WriteByte('\n')
 	}
 	if err := w.Flush(); err != nil {
 		f.Close()
@@ -145,8 +146,8 @@ func (a *auditLog) Append(e auditEntry) auditEntry {
 	if e.ID == "" {
 		e.ID = fmt.Sprintf("%d-%s", time.Now().UnixMilli(), randomHex(4))
 	}
-	if e.Ts == 0 {
-		e.Ts = time.Now().Unix()
+	if e.TS == 0 {
+		e.TS = time.Now().Unix()
 	}
 	line, err := json.Marshal(e)
 	if err == nil {
@@ -154,10 +155,12 @@ func (a *auditLog) Append(e auditEntry) auditEntry {
 		_ = os.MkdirAll(dir, 0o755)
 		f, err := os.OpenFile(a.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err == nil {
-			f.Write(line)
-			f.Write([]byte{'\n'})
+			if _, werr := f.Write(append(line, '\n')); werr != nil {
+				logger.Warn.Printf("审计日志写入失败：%v", werr)
+			} else {
+				a.rawLines++
+			}
 			f.Close()
-			a.rawLines++
 		} else {
 			logger.Warn.Printf("审计日志写入失败：%v", err)
 		}
