@@ -214,6 +214,7 @@ func (c *Client) TestConnection() error {
 //   - filter: 5.x 合法值 active/downloading/seeding/completed/stopped/running/all 等
 //   - sort:   name/size/progress/upspeed/dlspeed/added_time 等
 //   - reverse: 1 或 true 表示倒序
+//
 // 所有参数都是可选的；filter/sort 为空或 all 时不拼 query。
 // 注意：qBittorrent 原生不支持 limit/offset，分页由上层（server 或前端）负责。
 // GetTorrents 拉 torrent 列表。参数顺序：filter, sort, reverse；都是可选的，
@@ -239,15 +240,29 @@ func isQBErrorString(data []byte) bool {
 
 func (c *Client) GetTorrents(params ...string) ([]models.QBTorrent, error) {
 	var filter, sort, reverse string
-	if len(params) > 0 { filter = params[0] }
-	if len(params) > 1 { sort = params[1] }
-	if len(params) > 2 { reverse = params[2] }
+	if len(params) > 0 {
+		filter = params[0]
+	}
+	if len(params) > 1 {
+		sort = params[1]
+	}
+	if len(params) > 2 {
+		reverse = params[2]
+	}
 	v := url.Values{}
-	if f := strings.TrimSpace(filter); f != "" && f != "all" { v.Set("filter", f) }
-	if s := strings.TrimSpace(sort); s != "" { v.Set("sort", s) }
-	if r := strings.TrimSpace(reverse); r != "" { v.Set("reverse", r) }
+	if f := strings.TrimSpace(filter); f != "" && f != "all" {
+		v.Set("filter", f)
+	}
+	if s := strings.TrimSpace(sort); s != "" {
+		v.Set("sort", s)
+	}
+	if r := strings.TrimSpace(reverse); r != "" {
+		v.Set("reverse", r)
+	}
 	path := "/api/v2/torrents/info"
-	if len(v) > 0 { path += "?" + v.Encode() }
+	if len(v) > 0 {
+		path += "?" + v.Encode()
+	}
 
 	parseOnce := func(data []byte) ([]models.QBTorrent, error) {
 		var list []models.QBTorrent

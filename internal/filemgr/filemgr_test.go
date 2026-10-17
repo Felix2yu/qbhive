@@ -114,7 +114,9 @@ func TestManager_scan_SkipsAlreadyDone(t *testing.T) {
 
 	// 第一次 scan 标记 done
 	m.scan()
-	if !m.done["h1"] { t.Fatal("first scan should mark done") }
+	if !m.done["h1"] {
+		t.Fatal("first scan should mark done")
+	}
 
 	// 第二次 scan 应跳过（已经 done），不会有新调用
 	before := len(m.done)
@@ -130,7 +132,9 @@ func TestManager_Scan_ErrorIsNoOp(t *testing.T) {
 	srv.Close()
 	// scan 不应 panic
 	m.scan()
-	if len(*calls) != 0 { t.Errorf("on error no calls") }
+	if len(*calls) != 0 {
+		t.Errorf("on error no calls")
+	}
 }
 
 func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
@@ -138,8 +142,12 @@ func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
 	defer srv.Close()
 
 	torrentDir := filepath.Join(saveDir, "Movie.mkv")
-	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// 第一轮：stop → renameFile → start，提交移动
 	m.scan()
@@ -188,10 +196,16 @@ func TestManager_handleCompleted_HiddenFiles_StillCleans(t *testing.T) {
 	defer srv.Close()
 
 	torrentDir := filepath.Join(saveDir, "Movie.mkv")
-	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// 模拟 macOS 访问目录自动生成的 .DS_Store
-	if err := os.WriteFile(filepath.Join(torrentDir, ".DS_Store"), []byte("\\x00\\x01"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, ".DS_Store"), []byte("\\x00\\x01"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// 第一轮：隐藏文件不阻塞单文件判定，提交移动、目录保留
 	m.scan()
@@ -221,10 +235,18 @@ func TestManager_handleCompleted_HiddenSubdir_StillCleans(t *testing.T) {
 	defer srv.Close()
 
 	torrentDir := filepath.Join(saveDir, "Movie.mkv")
-	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
-	if err := os.MkdirAll(filepath.Join(torrentDir, ".hidden_cache"), 0o755); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(torrentDir, ".hidden_cache", "tmp"), []byte("x"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(torrentDir, ".hidden_cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, ".hidden_cache", "tmp"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// 第一轮：提交移动，目录保留
 	m.scan()
@@ -254,10 +276,16 @@ func TestManager_handleCompleted_MultipleNonHidden_Noop(t *testing.T) {
 	defer srv.Close()
 
 	torrentDir := filepath.Join(saveDir, "Movie.mkv")
-	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// 残留的 !qB 文件（被取消勾选或未完成的下载片段）
-	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv!qB"), []byte("partial"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv!qB"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	m.scan()
 
@@ -277,8 +305,12 @@ func TestManager_contentPath_DirDiffersFromName(t *testing.T) {
 	defer srv.Close()
 
 	torrentDir := filepath.Join(saveDir, "ActualDir")
-	if err := os.MkdirAll(torrentDir, 0o755); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	m.scan()
 
@@ -296,7 +328,9 @@ func TestManager_contentPath_SingleFileSeed(t *testing.T) {
 	m, calls, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"Movie","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}","content_path":"{SAVE}/Movie.mkv"}]`)
 	defer srv.Close()
 
-	if err := os.WriteFile(filepath.Join(saveDir, "Movie.mkv"), []byte("fake"), 0o644); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(saveDir, "Movie.mkv"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	m.scan()
 
@@ -322,7 +356,8 @@ func TestManager_SetClient_HotSwap(t *testing.T) {
 	m, _, srv, _ := setupFilemgr(t, `[]`)
 	defer srv.Close()
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Set-Cookie", "SID=test"); w.Write([]byte("Ok."))
+		w.Header().Set("Set-Cookie", "SID=test")
+		w.Write([]byte("Ok."))
 	}))
 	defer srv2.Close()
 	m.SetClient(qb.New(srv2.URL, "u", "p", ""))

@@ -110,8 +110,8 @@ func (l *Limiter) apply() {
 	for _, t := range torrents {
 		seen[t.Hash] = true
 		var (
-			limit int64 = -1 // 默认没命中规则 = 无限制
-			matched      = false
+			limit   int64 = -1 // 默认没命中规则 = 无限制
+			matched       = false
 		)
 		for _, r := range rules {
 			if !r.Enabled {

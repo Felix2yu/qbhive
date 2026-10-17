@@ -8,8 +8,8 @@ import (
 
 // Notifier 基于 github.com/unraid/apprise-go 实现统一通知
 type Notifier struct {
-	cfg     models.NotifierConfig
-	client  *apprise.Apprise
+	cfg    models.NotifierConfig
+	client *apprise.Apprise
 }
 
 func New(cfg models.NotifierConfig) *Notifier {

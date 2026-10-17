@@ -24,9 +24,9 @@ type filemgrEnv struct {
 
 	mu           sync.Mutex
 	torrentsJSON string
-	stopStatus  int
+	stopStatus   int
 	renameStatus int
-	startStatus int
+	startStatus  int
 	filesStatus  int    // 非 0 → /torrents/files 返回该状态码（模拟取列表失败）
 	filesJSON    string // 非空 → /torrents/files 返回该 JSON（覆盖磁盘遍历）
 	filesCalls   int
@@ -719,9 +719,9 @@ func TestConflictFreeName(t *testing.T) {
 
 func TestUpOneLevel(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"ABC/video.mkv", "video.mkv"},       // 一层 → 升到顶端
+		{"ABC/video.mkv", "video.mkv"},         // 一层 → 升到顶端
 		{"Cat/ABC/video.mkv", "Cat/video.mkv"}, // 多层 → 恰好升一层，前缀保留
-		{"video.mkv", "video.mkv"},           // 已在顶端：原样返回供调用方比较
+		{"video.mkv", "video.mkv"},             // 已在顶端：原样返回供调用方比较
 		{"", ""},
 		{".", ""},
 		{"/abs/video.mkv", ""}, // 绝对路径不是合法的 qB 内部相对路径

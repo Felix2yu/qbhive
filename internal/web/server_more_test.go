@@ -47,10 +47,10 @@ type mockQB struct {
 	srv *httptest.Server
 
 	mu          sync.Mutex
-	torrentsReq []url.Values // /api/v2/torrents/info 收到的 query
+	torrentsReq []url.Values  // /api/v2/torrents/info 收到的 query
 	torrentsHdr []http.Header // 同上，收到的请求头（断言 Authorization / Cookie）
-	limitReq    []url.Values // /api/v2/torrents/setUploadLimit 收到的 form
-	loginReq    []url.Values // /api/v2/auth/login 收到的 form
+	limitReq    []url.Values  // /api/v2/torrents/setUploadLimit 收到的 form
+	loginReq    []url.Values  // /api/v2/auth/login 收到的 form
 
 	// 可控行为
 	torrentsBody   string
