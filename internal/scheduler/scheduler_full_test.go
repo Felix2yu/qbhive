@@ -38,12 +38,6 @@ func newQBMock(torrentsJSON string) *qbMock {
 	return &qbMock{torrents: torrentsJSON, hits: make(map[string]int)}
 }
 
-func (m *qbMock) setTorrents(js string) {
-	m.mu.Lock()
-	m.torrents = js
-	m.mu.Unlock()
-}
-
 func (m *qbMock) setFail(v bool) {
 	m.mu.Lock()
 	m.fail = v

@@ -61,8 +61,7 @@ type feedState struct {
 	failed      int
 	snapshot    bool
 	recent      *list.List // 值 = RecentItem（按时间从新到旧；最多 100）
-	seenCount   int
-	forceRescan bool // 由 ResetFeed 置 true：下次 fetch 强制跳过快照，对所有条目重新跑规则
+	forceRescan bool       // 由 ResetFeed 置 true：下次 fetch 强制跳过快照，对所有条目重新跑规则
 }
 
 func newFeedState() *feedState {

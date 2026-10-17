@@ -131,24 +131,11 @@ func newFilemgrEnv(t *testing.T, enabled bool, scanInterval int, torrentsJSON st
 	return env
 }
 
-func (e *filemgrEnv) setTorrents(json string) {
-	e.mu.Lock()
-	e.torrentsJSON = json
-	e.mu.Unlock()
-}
-
 // setFiles 覆盖 /torrents/files 的应答 JSON
 func (e *filemgrEnv) setFiles(json string) {
 	e.mu.Lock()
 	e.filesJSON = json
 	e.mu.Unlock()
-}
-
-// filesCallCount 返回 /torrents/files 被请求的次数
-func (e *filemgrEnv) filesCallCount() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.filesCalls
 }
 
 func (e *filemgrEnv) calls() []string {
