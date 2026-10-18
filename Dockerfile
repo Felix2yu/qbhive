@@ -18,4 +18,9 @@ ENV QBHIVE_WEB=/app/web/static
 
 EXPOSE 8088
 
+# /api/ping 在鉴权白名单里（见 internal/web/server.go 的 authMiddleware），
+# 配了 QBHIVE_TOKEN 之后探活仍然通。
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8088/api/ping >/dev/null || exit 1
+
 ENTRYPOINT ["/app/qbhive"]
