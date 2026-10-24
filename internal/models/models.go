@@ -100,6 +100,12 @@ type LimitRule struct {
 	Enabled     bool   `json:"enabled"`
 	Match       string `json:"match"`       // 正则匹配 torrent 名称
 	UploadLimit int    `json:"uploadLimit"` // KB/s，0 表示无限制
+	// RatioTarget 预期分享比率：比率超过它以后按 target/ratio 连续压低 UploadLimit。
+	// 零值 = 不启用比率维度，旧配置行为不变。
+	RatioTarget float64 `json:"ratioTarget"`
+	// MinUploaded 已上传量门槛（MB）：达不到这个数就不看比率。
+	// 小体积种子随手传完一轮比率就虚高，没门槛会被误判成「已经赚够了」而压速。
+	MinUploaded int64 `json:"minUploaded"`
 }
 
 type FileManagerConfig struct {

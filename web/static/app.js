@@ -320,6 +320,9 @@ function validateConfigJS(cfg) {
         return `限速规则 "${r.name || ""}" 的 match 正则无效: ${e.message}`;
       }
     }
+    if ((r.ratioTarget || 0) > 0 && !(r.uploadLimit > 0)) {
+      return `限速规则 "${r.name || ""}" 启用了比率目标，上传限速基准必须大于 0：不限速没有可压降的基准值`;
+    }
   }
   // 文件管理：清理自定义正则 + AI 通道
   if (c.fileManager) {
@@ -1137,6 +1140,8 @@ function syncFormToCfg() {
       name: n.value,
       match: document.querySelector(`[data-lm-match="${i}"]`).value,
       uploadLimit: parseInt(document.querySelector(`[data-lm-limit="${i}"]`).value || "0", 10),
+      ratioTarget: parseFloat(document.querySelector(`[data-lm-ratio="${i}"]`).value || "0") || 0,
+      minUploaded: parseInt(document.querySelector(`[data-lm-minup="${i}"]`).value || "0", 10) || 0,
     };
   });
   c.notifier.enabled = $("#nt-enabled").checked;
@@ -1210,7 +1215,13 @@ function renderLimiterRules() {
           "Go/RE2 语法，对任务名做部分匹配。")}
         ${field("上传限速",
           `<div class="controls"><input type="number" class="w-xs" data-lm-limit="${i}" value="${r.uploadLimit}" min="0"><span class="unit">KB/s</span></div>`,
-          "0 表示不限制。")}
+          "0 表示不限制；启用比率目标时必须大于 0。")}
+        ${field("比率目标",
+          `<div class="controls"><input type="number" class="w-xs" data-lm-ratio="${i}" value="${r.ratioTarget || 0}" min="0" step="0.1"><span class="unit">分享率</span></div>`,
+          "0 表示不按比率压速。超过目标后限速按「基准 × 目标 ÷ 实际比率」连续下降，最低 1 KB/s；变化不足 10% 时不重复下发。")}
+        ${field("最低上传量",
+          `<div class="controls"><input type="number" class="w-xs" data-lm-minup="${i}" value="${r.minUploaded || 0}" min="0"><span class="unit">MB</span></div>`,
+          "已上传量没到这个数就不看比率，防止小体积种子刚传一点就被压速。0 表示不设门槛。")}
       </div>`).join("");
   // 重新绑定删除按钮（checkbox/input 的 change 不丢值，不需要重绑）
   $$("[data-lm-del]", box).forEach(b => b.addEventListener("click", onLimDel));
@@ -1357,7 +1368,7 @@ async function renderSettings(root) {
     <div class="card">
       <div class="card-head">
         <h3>限速规则</h3>
-        <span class="desc">按任务名正则匹配，批量下发上传限速</span>
+        <span class="desc">按任务名正则匹配，批量下发上传限速；可选按分享比率连续压速</span>
       </div>
       ${field("启用", toggle(cfg.limiter.enabled, { id: "lim-enabled" }),
         "只对限速值发生变化的任务调用 qB 接口，不会反复下发。")}
@@ -1516,7 +1527,7 @@ async function renderSettings(root) {
 
   $("#lim-add").onclick = () => {
     syncFormToCfg();
-    _settingsCfg.limiter.rules.push({ id: genID(), name: `规则 ${(_settingsCfg.limiter.rules.length + 1)}`, enabled: true, match: "", uploadLimit: 0 });
+    _settingsCfg.limiter.rules.push({ id: genID(), name: `规则 ${(_settingsCfg.limiter.rules.length + 1)}`, enabled: true, match: "", uploadLimit: 0, ratioTarget: 0, minUploaded: 0 });
     renderLimiterRules();
   };
 

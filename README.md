@@ -37,7 +37,8 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 
 ### 限速规则
 - 按正则匹配任务名称，批量下发上传限速
-- 只对「限速值发生变化」的任务调用 qB API，避免无效请求
+- 可选按分享比率连续压速：比率超过目标后，限速按「基准 × 目标 ÷ 实际比率」下降，最低 1 KB/s
+- 只对「限速值发生变化」的任务调用 qB API，避免无效请求；比率压速另有 10% 迟滞带，比率小幅漂移不重复下发
 
 ### 文件管理（自动归档 & 文件名清理）
 - **单文件自动归档**：下载完成后若内容目录（5.x `content_path`，回退 `savePath/任务名`）下只有一个文件，自动上移到保存路径并清理空目录
@@ -265,7 +266,7 @@ go build -o qbhive ./cmd/server
     "enabled": false,
     "interval": 10,
     "rules": [
-      { "id": "l1", "name": "限速示例", "enabled": true, "match": "^SomePrefix", "uploadLimit": 512 }
+      { "id": "l1", "name": "限速示例", "enabled": true, "match": "^SomePrefix", "uploadLimit": 512, "ratioTarget": 1, "minUploaded": 2048 }
     ]
   },
   "fileManager": {
@@ -306,6 +307,8 @@ go build -o qbhive ./cmd/server
 | `rss.feeds[].rules[].uploadLimit` | 该规则下载任务的上传限速（KB/s），`0` 表示不限制 |
 | `limiter.rules[].match` | 匹配任务名的正则 |
 | `limiter.rules[].uploadLimit` | 命中后的上传限速（KB/s），`0` 表示不限制 |
+| `limiter.rules[].ratioTarget` | 预期分享比率，超过后按「`uploadLimit` × 目标 ÷ 实际比率」连续压速，最低 1 KB/s；`0` 表示不按比率压速。基准为「不限制」时无从缩放，此项不生效 |
+| `limiter.rules[].minUploaded` | 已上传量门槛（MB），未达到前不看比率，防止小体积种子刚传一点就比率虚高被误压速；`0` 表示不设门槛 |
 | `fileManager.scanInterval` | 单文件归档扫描间隔（秒） |
 | `fileManager.cleanEnabled` | 文件名自动清理开关（默认关闭） |
 | `fileManager.cleanRules` | 自定义清理正则列表（在内置规则之后执行，匹配内容被移除），最多 32 条、单条 ≤256 字符 |

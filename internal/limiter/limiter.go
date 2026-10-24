@@ -1,6 +1,7 @@
 package limiter
 
 import (
+	"math"
 	"regexp"
 	"time"
 
@@ -8,6 +9,35 @@ import (
 	"github.com/Felix2yu/qbhive/internal/logger"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
 )
+
+// ratioDeadbandPct 比率每轮都在涨，重算出的限速也会跟着微小变化；
+// 与上次下发值相差在此百分比内就不调用 qB 接口，否则每次扫描都会全量刷一遍限速。
+const ratioDeadbandPct = 10
+
+// ratioScaledLimit 按分享比率连续压速：比率不超过目标时保持基准值，
+// 超出后按 target/ratio 双曲下降，最低 1KB/s——qB 的 0 不表示「压到底」，不能下发。
+func ratioScaledLimit(baseKB int, target, ratio float64) int {
+	if baseKB <= 0 || target <= 0 || ratio <= target {
+		return baseKB
+	}
+	kb := int(math.Round(target / ratio * float64(baseKB)))
+	if kb < 1 {
+		kb = 1
+	}
+	return kb
+}
+
+// withinRatioDeadband 判断比率压速的新值是否离上次下发值足够近、可以跳过下发
+func withinRatioDeadband(prev, next int64) bool {
+	if prev <= 0 || next <= 0 {
+		return false
+	}
+	d := prev - next
+	if d < 0 {
+		d = -d
+	}
+	return d*100 <= prev*ratioDeadbandPct
+}
 
 // Limiter 定时扫描 torrent 列表，根据匹配规则设置上传限速
 type Limiter struct {
@@ -110,8 +140,9 @@ func (l *Limiter) apply() {
 	for _, t := range torrents {
 		seen[t.Hash] = true
 		var (
-			limit   int64 = -1 // 默认没命中规则 = 无限制
-			matched       = false
+			limit    int64 = -1 // 默认没命中规则 = 无限制
+			matched        = false
+			viaRatio       = false
 		)
 		for _, r := range rules {
 			if !r.Enabled {
@@ -122,8 +153,16 @@ func (l *Limiter) apply() {
 				continue
 			}
 			if ok {
-				if r.UploadLimit > 0 {
-					limit = int64(r.UploadLimit) * 1024
+				kb := r.UploadLimit
+				// 比率维度要求基准限速是个确定值：基准「不限制」无从缩放
+				if r.RatioTarget > 0 && kb > 0 && t.Uploaded >= r.MinUploaded*1024*1024 {
+					if scaled := ratioScaledLimit(kb, r.RatioTarget, t.Ratio); scaled < kb {
+						kb = scaled
+						viaRatio = true
+					}
+				}
+				if kb > 0 {
+					limit = int64(kb) * 1024
 				}
 				matched = true
 				break
@@ -137,13 +176,21 @@ func (l *Limiter) apply() {
 		if known && prev == limit {
 			continue // 值没变，跳过 API 调用
 		}
+		// 比率压速用相对迟滞：比率的微小漂移不值得再打一次 qB 接口
+		if known && viaRatio && withinRatioDeadband(prev, limit) {
+			continue
+		}
 		if err := l.client.SetUploadLimit(t.Hash, limit); err != nil {
 			logger.Warn.Printf("限速器设置限速 hash=%s 失败：%v", t.Hash, err)
 			continue
 		}
 		l.lastLimits[t.Hash] = limit
 		changes++
-		logger.Debug.Printf("限速器：任务 %s 限速 %d（规则命中）", t.Name, limit)
+		if viaRatio {
+			logger.Debug.Printf("限速器：任务 %s 比率 %.2f 已超目标，压速到 %d", t.Name, t.Ratio, limit)
+		} else {
+			logger.Debug.Printf("限速器：任务 %s 限速 %d（规则命中）", t.Name, limit)
+		}
 	}
 	// 清理已消失 torrent 的 lastLimits
 	for h := range l.lastLimits {
