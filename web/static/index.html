@@ -4,12 +4,19 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>QBHive — qBittorrent 辅助助手</title>
+  <!-- 图标：SVG 优先（任意缩放清晰），ico 兜底老浏览器，png 供 iOS / PWA 桌面使用。
+       位图由 scripts/gen-icons.py 从矢量母版生成，勿手改。 -->
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#0f1115" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">⚡</span>
+      <span class="logo"><img src="/icon.svg" alt="" width="24" height="24" /></span>
       <h1>QBHive</h1>
     </div>
     <nav class="tabs">

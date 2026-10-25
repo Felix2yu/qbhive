@@ -2,7 +2,7 @@
 #
 # 七个必备目标：build / dev / test / lint / fmt / docker / clean
 # 其余目标按仓库自身需要添加。
-.PHONY: build dev test lint lint-strict fmt docker clean
+.PHONY: build dev test lint lint-strict fmt docker clean icons
 
 BIN  := bin/qbhive
 MAIN := ./cmd/server
@@ -29,6 +29,11 @@ fmt:
 
 docker: build
 	docker build -t qbhive:dev .
+
+## 重新生成 web/static 下的图标位图（favicon / 应用图标 / PWA 图标）。
+## 几何与配色只在 scripts/gen-icons.py 顶部定义，改完重跑本目标即可。
+icons:
+	python3 scripts/gen-icons.py
 
 clean:
 	rm -rf bin

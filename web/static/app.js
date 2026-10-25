@@ -419,6 +419,20 @@ function applyTheme(mode) {
   document.querySelectorAll(".theme-switch button").forEach(b => {
     b.classList.toggle("active", b.dataset.themeOpt === mode);
   });
+  syncThemeColor();
+}
+
+// 移动端地址栏 / 状态栏跟随当前主题底色（--bg 已按 auto 模式解析成实际色值）
+function syncThemeColor() {
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (!bg) return;
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.name = "theme-color";
+    document.head.appendChild(meta);
+  }
+  meta.content = bg;
 }
 
 function getTheme() {

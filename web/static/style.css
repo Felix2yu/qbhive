@@ -99,7 +99,8 @@ a { color: var(--accent); }
 }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
-.logo { font-size: 22px; }
+.logo { display: block; width: 24px; height: 24px; flex: none; }
+.logo img { display: block; width: 100%; height: 100%; }
 .tabs { display: flex; gap: 4px; flex: 1; }
 .tab {
   background: transparent; color: var(--text-dim);
