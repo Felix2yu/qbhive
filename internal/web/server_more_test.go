@@ -412,8 +412,71 @@ func TestStartShutdown_ServesStaticAndAPI(t *testing.T) {
 	}
 }
 
+// TestAuthMiddleware_PublicAssets 覆盖鉴权白名单：图标与 PWA 清单无需 token 即可取到，
+// 页面 / 样式 / 脚本仍然 401（白名单不能扩大到整个静态目录）。
+func TestAuthMiddleware_PublicAssets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := setupTestServerFull(t, t.TempDir(), "", "secret-token")
+
+	webRoot := t.TempDir()
+	files := map[string]string{
+		"index.html":            "<html>QBHive Home</html>",
+		"style.css":             "body{}",
+		"app.js":                "console.log('qbhive')",
+		"icon.svg":              "<svg/>",
+		"favicon.ico":           "ico",
+		"apple-touch-icon.png":  "png",
+		"icon-192.png":          "png",
+		"icon-512.png":          "png",
+		"icon-maskable-512.png": "png",
+		"manifest.json":         "{}",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(webRoot, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	addr := freeLocalAddr(t)
+	cfg := s.cfg.Get()
+	cfg.Server.Listen = addr
+	s.cfg.Set(cfg)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(webRoot) }()
+	waitListening(t, addr)
+
+	// 白名单：不带任何凭据也必须 200
+	for _, p := range []string{
+		"/favicon.ico", "/icon.svg", "/apple-touch-icon.png",
+		"/icon-192.png", "/icon-512.png", "/icon-maskable-512.png", "/manifest.json",
+	} {
+		if code, _, _ := httpGet(t, "http://"+addr+p); code != 200 {
+			t.Errorf("%s 属公开图标资源，无 token 应 200，got %d", p, code)
+		}
+	}
+	// 非白名单：页面与前端资源仍要求 token
+	for _, p := range []string{"/", "/style.css", "/app.js"} {
+		if code, _, _ := httpGet(t, "http://"+addr+p); code != 401 {
+			t.Errorf("%s 不在白名单，无 token 应 401，got %d", p, code)
+		}
+	}
+	// 带 token 后白名单之外也能取（确认拒绝原因确实是缺凭据）
+	if code, _, _ := httpGet(t, "http://"+addr+"/style.css?token=secret-token"); code != 200 {
+		t.Errorf("带上正确 token 后 /style.css 应 200，got %d", code)
+	}
+
+	if err := s.Shutdown(); err != nil {
+		t.Fatalf("Shutdown 失败: %v", err)
+	}
+	if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Start 应返回 http.ErrServerClosed，实际 %v", err)
+	}
+}
+
 // TestStart_PortOccupiedReturnsError 覆盖 Start 的监听失败分支与 webRoot=="" 分支
 func TestStart_PortOccupiedReturnsError(t *testing.T) {
+
 	gin.SetMode(gin.TestMode)
 	s := setupTestServerFull(t, t.TempDir(), "", "")
 

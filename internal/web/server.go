@@ -115,6 +115,21 @@ func New(cfg *config.Manager, qbClient *qb.Client, lim *limiter.Limiter, rssEngi
 	}
 }
 
+// publicAssets 是无需鉴权即可访问的静态资源：查询路径 → 是否放行。
+//
+// 只收图标与 PWA 清单——它们不含任何业务数据，也不泄露配置；
+// 目的是让未登录状态下浏览器标签页、iOS「添加到主屏」、PWA 安装仍能取到图标。
+// 页面、样式、脚本一律不放行（否则整个前端就绕过了鉴权）。
+var publicAssets = map[string]bool{
+	"/favicon.ico":           true,
+	"/icon.svg":              true,
+	"/apple-touch-icon.png":  true,
+	"/icon-192.png":          true,
+	"/icon-512.png":          true,
+	"/icon-maskable-512.png": true,
+	"/manifest.json":         true,
+}
+
 // authMiddleware 根据 QBHIVE_TOKEN 校验请求。
 // 支持三种方式：Authorization: Bearer <token>、Cookie: qbhive_token=<token>、?token=<token>
 func (s *Server) authMiddleware() gin.HandlerFunc {
@@ -126,6 +141,11 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		// /api/ping /api/login /api/logout /api/auth/status 放行
 		p := c.Request.URL.Path
 		if p == "/api/ping" || p == "/api/login" || p == "/api/logout" || p == "/api/auth/status" {
+			c.Next()
+			return
+		}
+		// 图标类静态资源放行（见 publicAssets 注释）
+		if publicAssets[p] {
 			c.Next()
 			return
 		}
