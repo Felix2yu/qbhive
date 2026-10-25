@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
   <title>QBHive — qBittorrent 辅助助手</title>
   <!-- 图标：SVG 优先（任意缩放清晰），ico 兜底老浏览器，png 供 iOS / PWA 桌面使用。
        位图由 scripts/gen-icons.py 从矢量母版生成，勿手改。 -->
@@ -10,28 +11,48 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/manifest.json" />
-  <meta name="theme-color" content="#0f1115" />
+  <meta name="theme-color" content="#0a0c0f" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo"><img src="/icon.svg" alt="" width="24" height="24" /></span>
-      <h1>QBHive</h1>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#/dashboard" aria-label="QBHive 概览">
+        <span class="brand-mark"><img src="/icon.svg" alt="" width="24" height="24" /></span>
+        <span class="brand-copy"><strong>QBHive</strong><small>torrent console</small></span>
+      </a>
+      <div class="nav-scroll">
+        <nav class="nav" id="nav-desktop" aria-label="主导航"></nav>
+      </div>
+      <div class="sidebar-foot">
+        <div class="conn-card" id="conn-card" data-tone="idle">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span class="conn-copy">
+            <span class="conn-label">qBittorrent</span>
+            <span class="conn-state" id="qb-status">连接中…</span>
+          </span>
+        </div>
+        <p class="sidebar-note">单二进制 · 本地优先</p>
+      </div>
+    </aside>
+
+    <div class="app-body">
+      <header class="mobile-bar">
+        <a class="mobile-brand" href="#/dashboard">
+          <img src="/icon.svg" alt="" width="22" height="22" />
+          <span>QBHive</span>
+        </a>
+        <span class="conn-pill" id="mobile-status" data-tone="idle">连接中…</span>
+      </header>
+
+      <main id="content"></main>
+
+      <nav class="mobile-nav" id="nav-mobile" aria-label="底部导航"></nav>
     </div>
-    <nav class="tabs">
-      <button class="tab active" data-view="dashboard">概览</button>
-      <button class="tab" data-view="torrents">任务</button>
-      <button class="tab" data-view="files">文件</button>
-      <button class="tab" data-view="rss">RSS</button>
-      <button class="tab" data-view="logs">日志</button>
-      <button class="tab" data-view="settings">设置</button>
-    </nav>
-    <div class="status" id="qb-status">…</div>
-  </header>
+  </div>
 
-  <main id="content"></main>
-
+  <noscript><div class="noscript">QBHive 需要启用 JavaScript 才能运行。</div></noscript>
+  <script src="/ui.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
