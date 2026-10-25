@@ -49,7 +49,14 @@ type Server struct {
 	// stats 缓存（概览用，刷新频率更高）
 	scacheMu sync.Mutex
 	scache   *cacheEntry
+
+	// 共享任务快照：由 qbittorrent.TorrentCache 常驻增量维护。
+	// nil 或未就绪时回退到上面的直连缓存路径（启动首秒、qB 尚未全量同步）。
+	torrentCache *qb.TorrentCache
 }
+
+// SetTorrentCache 注入共享任务快照（装配层调用一次）。
+func (s *Server) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
 
 type cacheEntry struct {
 	data      interface{}
@@ -641,6 +648,18 @@ func (s *Server) listTorrents(c *gin.Context) {
 
 	cacheKey := filter + "|" + sortField + "|" + reverse
 
+	// 共享快照命中时全部在内存完成：过滤 → 排序 → 截断，不再触发 qB 序列化全表
+	if s.torrentCache != nil {
+		if list, err := s.torrentCache.GetTorrents(qbFilter, sortField, reverse); err == nil {
+			list = applyStateFilter(list, filter)
+			if limit > 0 && limit < len(list) {
+				list = list[:limit]
+			}
+			c.JSON(200, models.APIResponse{Success: true, Data: list})
+			return
+		}
+	}
+
 	// 查缓存
 	s.tcacheMu.Lock()
 	if ent, ok := s.tcache[cacheKey]; ok && time.Now().Before(ent.expiresAt) {
@@ -662,16 +681,7 @@ func (s *Server) listTorrents(c *gin.Context) {
 	}
 
 	// stoppedUP / stoppedDL 共用 qB filter="stopped"，拉回后按 state 二次过滤
-	if needsStateFilter[filter] {
-		allowed := stateFilterSets[filter]
-		filtered := make([]models.QBTorrent, 0, len(list))
-		for _, t := range list {
-			if allowed[t.State] {
-				filtered = append(filtered, t)
-			}
-		}
-		list = filtered
-	}
+	list = applyStateFilter(list, filter)
 
 	// 写缓存
 	s.tcacheMu.Lock()
@@ -689,11 +699,47 @@ func (s *Server) listTorrents(c *gin.Context) {
 	c.JSON(200, models.APIResponse{Success: true, Data: list})
 }
 
-// torrentsStats 是概览页用的轻量统计，不走 info 大接口。
-// 并发拉 5 路：transfer info（全局速度）+ active + stopped + stalled + errored，
-// 3 秒缓存；并发后墙钟时间降到「取单次最大延迟」。
+// applyStateFilter 把 qB 的宽 filter 结果收窄到前端选中的具体 state
+// （stoppedUP / stoppedDL 共用 qB 的 "stopped"）。
+func applyStateFilter(list []models.QBTorrent, filter string) []models.QBTorrent {
+	if !needsStateFilter[filter] {
+		return list
+	}
+	allowed := stateFilterSets[filter]
+	filtered := make([]models.QBTorrent, 0, len(list))
+	for _, t := range list {
+		if allowed[t.State] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+// torrentsStats 是概览页用的轻量统计。
+// 共享快照就绪时直接读内存（含 maindata 的全局速度），否则回退到
+// 并发拉 5 路：transfer info（全局速度）+ active + stopped + stalled + errored。
 
 func (s *Server) torrentsStats(c *gin.Context) {
+	// 共享快照：计数和速度都在内存里，单次耗时微秒级
+	if s.torrentCache != nil {
+		if st, ok := s.torrentCache.Stats(); ok {
+			c.JSON(200, models.APIResponse{Success: true, Data: map[string]interface{}{
+				"dlSpeed":          st.DlSpeed,
+				"upSpeed":          st.UpSpeed,
+				"dlSpeedLimit":     st.DlSpeedLimit,
+				"upSpeedLimit":     st.UpSpeedLimit,
+				"activeCount":      st.ActiveCount,
+				"stoppedUP":        st.StoppedUP,
+				"stoppedDL":        st.StoppedDL,
+				"downloadingCount": st.DownloadingCount,
+				"seedingCount":     st.SeedingCount,
+				"stalledCount":     st.StalledCount,
+				"erroredCount":     st.ErroredCount,
+			}})
+			return
+		}
+	}
+
 	// 查缓存
 	s.scacheMu.Lock()
 	if ent := s.scache; ent != nil && time.Now().Before(ent.expiresAt) {

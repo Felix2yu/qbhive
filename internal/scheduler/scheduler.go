@@ -31,6 +31,22 @@ type Scheduler struct {
 	mu        sync.Mutex
 	finished  map[string]bool // 已经发过完成通知的 hash；持久化到文件
 	stateFile string
+
+	// 共享任务快照：就绪后扫描不再拉 qB 全表（7158 条约 20MB / 每 10s）
+	torrentCache *qb.TorrentCache
+}
+
+// SetTorrentCache 注入共享任务快照（装配层在 Start 之前调用一次）。
+func (s *Scheduler) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
+
+// allTorrents 优先读共享快照；未就绪时回退到直连 qB。
+func (s *Scheduler) allTorrents() ([]models.QBTorrent, error) {
+	if s.torrentCache != nil {
+		if list, err := s.torrentCache.GetTorrents("all", "", ""); err == nil {
+			return list, nil
+		}
+	}
+	return s.client.GetTorrents("all", "", "")
 }
 
 // finished 记录文件（放在 config 同目录下，随容器卷一起持久化）
@@ -65,6 +81,9 @@ func New(cfg *config.Manager, client *qb.Client,
 func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	// 1) qB client 热换凭据（Web Server 也持有同一个 *Client 指针，SetCredentials 即可）
 	s.client.SetCredentials(qbCfg.URL, qbCfg.Username, qbCfg.Password, qbCfg.APIKey)
+	if s.torrentCache != nil {
+		s.torrentCache.SetCredentials(qbCfg.URL, qbCfg.Username, qbCfg.Password, qbCfg.APIKey)
+	}
 
 	// 2) 各子引擎 Reload（内部会根据新 cfg.Enabled 启停 ticker）
 	s.limiter.Reload(nil)
@@ -166,7 +185,7 @@ func (s *Scheduler) Start() {
 func (s *Scheduler) prefillFinished() {
 	// 拉 "all" 而不是 "completed"：某些 qB 版本的 "completed" 过滤器
 	// 只按 CompletedOn > 0 过滤，会漏掉 Progress=1.0 但 CompletedOn=0 的任务。
-	list, err := s.client.GetTorrents("all", "", "")
+	list, err := s.allTorrents()
 	if err != nil {
 		logger.Warn.Printf("调度器预填充获取已完成任务失败：%v", err)
 		return
@@ -201,7 +220,7 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) scanCompleted() {
 	cfg := s.cfg.Get()
-	list, err := s.client.GetTorrents("all", "", "")
+	list, err := s.allTorrents()
 	if err != nil {
 		logger.Warn.Printf("调度器扫描全部任务失败：%v", err)
 		return

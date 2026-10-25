@@ -40,6 +40,11 @@ func main() {
 		logger.Info.Println("qBittorrent 连接正常")
 	}
 
+	// 共享任务快照：sync/maindata 增量维护，Web 列表/统计和后台扫描都读它，
+	// 避免每次刷新让 qB 重新序列化全部任务（7000+ 条时单次 20MB）。
+	torrents := qb.NewTorrentCache(cfg.Qbittorrent.URL, cfg.Qbittorrent.Username, cfg.Qbittorrent.Password, cfg.Qbittorrent.APIKey)
+	torrents.Start()
+
 	notif := notifier.New(cfg.Notifier)
 	lim := limiter.New(cfgMgr, qbCli)
 	fm := filemgr.New(cfgMgr, qbCli)
@@ -48,9 +53,11 @@ func main() {
 	rssE := rss.New(cfgMgr, qbCli)
 
 	sch := scheduler.New(cfgMgr, qbCli, notif, lim, fm, rssE)
+	sch.SetTorrentCache(torrents)
 	sch.Start()
 
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch, fm)
+	srv.SetTorrentCache(torrents)
 
 	go func() {
 		logger.Info.Printf("QBHive 监听地址 %s", cfg.Server.Listen)
@@ -64,6 +71,7 @@ func main() {
 	<-sig
 	logger.Info.Println("正在关闭...")
 	sch.Stop()
+	torrents.Stop()
 	_ = srv.Shutdown()
 	logger.Info.Println("已退出")
 }

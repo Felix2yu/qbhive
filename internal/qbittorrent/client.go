@@ -175,21 +175,31 @@ func (c *Client) login() error {
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
-	if string(data) != "Ok." {
-		return fmt.Errorf("login failed: %s", string(data))
+
+	// qB <= 5.2：200 + "Ok." + SID cookie
+	// qB 5.3+：204 + 空 body + QBT_SID_<端口> cookie
+	body := strings.TrimSpace(string(data))
+	if body != "" && body != "Ok." {
+		return fmt.Errorf("login failed: %s", body)
 	}
-	for _, cc := range resp.Cookies() {
-		if cc.Name == "SID" {
-			c.cookie = "SID=" + cc.Value
-			return nil
-		}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("login failed: HTTP %d", resp.StatusCode)
 	}
+
+	// 统一从 cookie jar 取会话（cookie 名随 qB 版本/端口变化）
 	if cookies := c.httpCli.Jar.Cookies(mustParse(c.baseURL)); len(cookies) > 0 {
 		var parts []string
 		for _, cc := range cookies {
 			parts = append(parts, cc.Name+"="+cc.Value)
 		}
 		c.cookie = strings.Join(parts, "; ")
+		return nil
+	}
+	for _, cc := range resp.Cookies() {
+		if strings.Contains(strings.ToUpper(cc.Name), "SID") {
+			c.cookie = cc.Name + "=" + cc.Value
+			return nil
+		}
 	}
 	return nil
 }
@@ -339,6 +349,83 @@ func (c *Client) GetTransferInfo() (*TransferInfo, error) {
 		return nil, err
 	}
 	return &ti, nil
+}
+
+// MaindataResponse 是 /api/v2/sync/maindata 的返回。
+// torrents 里只包含与上次 rid 相比有变化的字段，调用方必须按 hash 合并，
+// 不能直接整体反序列化成 QBTorrent（缺失字段会被当成零值）。
+type MaindataResponse struct {
+	Rid             int                        `json:"rid"`
+	FullUpdate      bool                       `json:"full_update"`
+	Torrents        map[string]json.RawMessage `json:"torrents"`
+	TorrentsRemoved []string                   `json:"torrents_removed"`
+	ServerState     map[string]json.RawMessage `json:"server_state"`
+}
+
+// GetMaindata 拉 qBittorrent 增量同步数据。
+//
+// 必须走 cookie 会话：rid 游标绑定在 WebUI 会话上，用 API key 每次都会返回全量
+// （已在本机 qB 5.3 实测），增量因此失效。
+func (c *Client) GetMaindata(rid int) (*MaindataResponse, error) {
+	path := "/api/v2/sync/maindata?rid=" + strconv.Itoa(rid)
+	data, err := c.cookieGet(path)
+	if err != nil {
+		// 登录本身失败时不再重试：错误凭据连续撞 qB 的失败次数会触发 IP 封禁
+		if isLoginError(err) {
+			return nil, err
+		}
+		c.cookie = ""
+		if loginErr := c.login(); loginErr != nil {
+			return nil, fmt.Errorf("maindata: %w (re-login: %v)", err, loginErr)
+		}
+		if data, err = c.cookieGet(path); err != nil {
+			return nil, err
+		}
+	}
+	// qB 会话过期时可能返回 200 + "Fails."，与 do() 的嗅探保持一致
+	if isQBErrorString(data) {
+		c.cookie = ""
+		if loginErr := c.login(); loginErr != nil {
+			return nil, fmt.Errorf("maindata auth: %w", loginErr)
+		}
+		if data, err = c.cookieGet(path); err != nil {
+			return nil, err
+		}
+	}
+	var resp MaindataResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("maindata parse: %w (body: %.80q)", err, string(data))
+	}
+	return &resp, nil
+}
+
+// cookieGet 只用 cookie 会话请求，忽略 API key。
+func (c *Client) cookieGet(path string) ([]byte, error) {
+	if c.cookie == "" {
+		if err := c.login(); err != nil {
+			return nil, err
+		}
+	}
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Cookie", c.cookie)
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		c.cookie = ""
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		c.cookie = ""
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return data, nil
 }
 
 func (c *Client) GetTorrentFiles(hash string) ([]models.QBFile, error) {
