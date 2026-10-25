@@ -1925,3 +1925,96 @@ func TestTorrentDelete_DefaultsToKeepFiles(t *testing.T) {
 		})
 	}
 }
+
+// =============== 共享任务快照路径 ===============
+
+// TestTorrentCacheServedPages 验证快照就绪后，概览统计和任务列表不再请求
+// /api/v2/torrents/info（7000+ 条时单次可达 20MB），而是直接读内存。
+func TestTorrentCacheServedPages(t *testing.T) {
+	var maindataCalls, infoCalls int
+	var mu sync.Mutex
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "SID", Value: "testsid", Path: "/"})
+		_, _ = w.Write([]byte("Ok."))
+	})
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`"v5.3.0"`))
+	})
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		maindataCalls++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"rid":1,"full_update":true,"torrents":{
+			"h1":{"hash":"h1","name":"one","state":"downloading","dlspeed":100,"added_on":300},
+			"h2":{"hash":"h2","name":"two","state":"uploading","upspeed":50,"added_on":200},
+			"h3":{"hash":"h3","name":"three","state":"stoppedUP","progress":1,"added_on":100},
+			"h4":{"hash":"h4","name":"four","state":"missingFiles","added_on":400},
+			"h5":{"hash":"h5","name":"five","state":"queuedDL","added_on":500}
+		},"server_state":{"dl_info_speed":111,"up_info_speed":222,"dl_rate_limit":0,"up_rate_limit":333}}`))
+	})
+	mux.HandleFunc("/api/v2/torrents/info", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		infoCalls++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`[]`))
+	})
+	qbSrv := httptest.NewServer(mux)
+	defer qbSrv.Close()
+
+	s := setupTestServerFull(t, t.TempDir(), qbSrv.URL, "")
+	cache := qb.NewTorrentCache(qbSrv.URL, "u", "p", "")
+	if err := cache.Refresh(); err != nil {
+		t.Fatalf("快照首次同步失败: %v", err)
+	}
+	s.SetTorrentCache(cache)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/torrents", s.listTorrents)
+	r.GET("/api/torrents/stats", s.torrentsStats)
+
+	// 统计：全部来自快照
+	w := serveJSON(t, r, "GET", "/api/torrents/stats", "")
+	if w.Code != 200 {
+		t.Fatalf("stats 返回 %d: %s", w.Code, w.Body.String())
+	}
+	var stats map[string]interface{}
+	decodeAPI(t, w).bindData(t, &stats)
+	if stats["dlSpeed"].(float64) != 111 || stats["upSpeed"].(float64) != 222 ||
+		stats["upSpeedLimit"].(float64) != 333 {
+		t.Errorf("快照速度字段错误: %v", stats)
+	}
+	if stats["activeCount"].(float64) != 2 || stats["stoppedUP"].(float64) != 1 ||
+		stats["erroredCount"].(float64) != 1 || stats["seedingCount"].(float64) != 1 {
+		t.Errorf("快照计数错误: %v", stats)
+	}
+
+	// 列表：active + limit + added_on 倒序
+	w = serveJSON(t, r, "GET", "/api/torrents?filter=active&limit=10&sort=added_on&reverse=true", "")
+	if w.Code != 200 {
+		t.Fatalf("torrents 返回 %d: %s", w.Code, w.Body.String())
+	}
+	var list []models.QBTorrent
+	decodeAPI(t, w).bindData(t, &list)
+	if len(list) != 2 || list[0].Hash != "h1" || list[1].Hash != "h2" {
+		t.Errorf("快照列表/排序错误: %+v", list)
+	}
+
+	// stoppedUP 仍要在快照结果上做 state 收窄
+	w = serveJSON(t, r, "GET", "/api/torrents?filter=stoppedUP&limit=10", "")
+	var only []models.QBTorrent
+	decodeAPI(t, w).bindData(t, &only)
+	if len(only) != 1 || only[0].Hash != "h3" {
+		t.Errorf("stoppedUP 收窄错误: %+v", only)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maindataCalls != 1 {
+		t.Errorf("应为 1 次全量快照，实际 %d", maindataCalls)
+	}
+	if infoCalls != 0 {
+		t.Errorf("快照就绪后不应再请求 torrents/info，实际 %d 次", infoCalls)
+	}
+}

@@ -417,3 +417,37 @@ func TestClient_LoginAPI_NoAuthSniff(t *testing.T) {
 		t.Error("expected login failure")
 	}
 }
+
+// qB 5.3+ 登录成功返回 204 + 空 body + QBT_SID_<端口> cookie（不再是 "Ok." + SID）
+func TestClient_Login_QB53Returns204AndPortCookie(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "QBT_SID_8989", Value: "abc123", Path: "/"})
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "u", "p", "")
+	if err := cli.login(); err != nil {
+		t.Fatalf("qB 5.3 的 204 登录应视为成功: %v", err)
+	}
+	if !strings.Contains(cli.cookie, "QBT_SID_8989=abc123") {
+		t.Errorf("应使用端口命名的会话 cookie，got %q", cli.cookie)
+	}
+}
+
+// 非 Ok 的 body（如 Fails.）仍然必须报错，避免把认证失败当成成功
+func TestClient_Login_NonOKBodyFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Fails."))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "u", "p", "")
+	if err := cli.login(); err == nil {
+		t.Fatal("Fails. 应返回登录错误")
+	}
+}
