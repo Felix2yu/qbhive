@@ -199,6 +199,10 @@ func (s *Server) Start(webRoot string) error {
 		api.GET("/torrents/stats", s.torrentsStats)
 		api.GET("/torrents/:hash/limit", s.getTorrentLimit)
 		api.POST("/torrents/:hash/limit", s.setTorrentLimit)
+		// 任务控制（暂停/恢复/校验、改分类标签、删除）——移动端应急操作入口
+		api.POST("/torrents/:hash/action", s.torrentAction)
+		api.POST("/torrents/:hash/meta", s.torrentSetMeta)
+		api.DELETE("/torrents/:hash", s.torrentDelete)
 
 		api.GET("/rss/status", s.rssStatus)
 		api.POST("/rss/reset", s.rssReset)
@@ -408,12 +412,55 @@ func (s *Server) saveConfig(c *gin.Context) {
 		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
 		return
 	}
+	cur := s.cfg.Get()
+	// 局部保存：RSS 页只编辑 rss 一个子段，而设置页编辑的是整份配置。
+	// 两页都走「GET 全量 → 改自己那块 → POST 全量」，谁后保存谁就把对方
+	// 在这期间的改动静默回滚。前端可以用 ?only=rss（可逗号分隔多段）声明
+	// 本次只提交哪些段，未声明的段一律沿用当前内存值。
+	if only := strings.TrimSpace(c.Query("only")); only != "" {
+		known := map[string]bool{
+			"qbittorrent": true, "server": true, "notifier": true, "rss": true,
+			"limiter": true, "fileManager": true, "proxy": true,
+		}
+		keep := make(map[string]bool, 4)
+		for _, name := range strings.Split(only, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if !known[name] {
+				c.JSON(400, models.APIResponse{Success: false, Message: "未知的配置段：" + name})
+				return
+			}
+			keep[name] = true
+		}
+		if !keep["qbittorrent"] {
+			in.Qbittorrent = cur.Qbittorrent
+		}
+		if !keep["server"] {
+			in.Server = cur.Server
+		}
+		if !keep["notifier"] {
+			in.Notifier = cur.Notifier
+		}
+		if !keep["rss"] {
+			in.RSS = cur.RSS
+		}
+		if !keep["limiter"] {
+			in.Limiter = cur.Limiter
+		}
+		if !keep["fileManager"] {
+			in.FileManager = cur.FileManager
+		}
+		if !keep["proxy"] {
+			in.Proxy = cur.Proxy
+		}
+	}
 	// P1: 后端校验——在任何持久化/热生效之前拦截非法输入
 	if msg := validateConfig(&in); msg != "" {
 		c.JSON(400, models.APIResponse{Success: false, Message: msg})
 		return
 	}
-	cur := s.cfg.Get()
 	if strings.TrimSpace(in.Qbittorrent.Password) == "" || in.Qbittorrent.Password == "********" {
 		in.Qbittorrent.Password = cur.Qbittorrent.Password
 	}
@@ -456,6 +503,12 @@ func (s *Server) saveConfig(c *gin.Context) {
 		s.scheduler.ReloadAll(in.Qbittorrent)
 	}
 	s.notifier.Reload(in.Notifier)
+	// RSS 匹配规则变了要清掉 seen 重扫，否则改完规则保存、历史条目依旧被去重表挡住，
+	// 新规则看起来完全没生效。放在 ReloadAll 之后：此时引擎已切到新配置，
+	// 重新拉到的条目才会按新规则判定。
+	if s.rssEngine != nil {
+		s.rssEngine.OnConfigSaved(cur.RSS, in.RSS)
+	}
 	c.JSON(200, models.APIResponse{Success: true})
 }
 
@@ -800,6 +853,111 @@ func (s *Server) getTorrentLimit(c *gin.Context) {
 		kb = int(limit) / 1024
 	}
 	c.JSON(200, models.APIResponse{Success: true, Data: limitPayload{UploadLimit: kb}})
+}
+
+// invalidateTorrentCache 任务发生变更后清空列表缓存，避免前端看到操作前的旧状态
+func (s *Server) invalidateTorrentCache() {
+	s.tcacheMu.Lock()
+	s.tcache = make(map[string]*cacheEntry)
+	s.tcacheMu.Unlock()
+}
+
+// torrentAction 单任务控制：暂停 / 恢复 / 强制校验。
+func (s *Server) torrentAction(c *gin.Context) {
+	hash := strings.TrimSpace(c.Param("hash"))
+	if hash == "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: "缺少任务 hash"})
+		return
+	}
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	var err error
+	var msg string
+	switch body.Action {
+	case "pause":
+		err, msg = s.qbClient.StopTorrents(hash), "任务已暂停"
+	case "resume":
+		err, msg = s.qbClient.StartTorrents(hash), "任务已恢复"
+	case "recheck":
+		err, msg = s.qbClient.Recheck(hash), "已开始强制校验"
+	default:
+		c.JSON(400, models.APIResponse{Success: false, Message: "未知操作：" + body.Action})
+		return
+	}
+	if err != nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	s.invalidateTorrentCache()
+	logger.Info.Printf("任务操作：%s → %s", body.Action, hash)
+	c.JSON(200, models.APIResponse{Success: true, Message: msg})
+}
+
+// torrentSetMeta 修改任务的分类 / 标签（只对传了的字段生效，缺省字段保持不变）。
+func (s *Server) torrentSetMeta(c *gin.Context) {
+	hash := strings.TrimSpace(c.Param("hash"))
+	if hash == "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: "缺少任务 hash"})
+		return
+	}
+	var body struct {
+		Category *string `json:"category"`
+		Tags     *string `json:"tags"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	if body.Category == nil && body.Tags == nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: "没有需要修改的字段"})
+		return
+	}
+	if body.Category != nil {
+		if err := s.qbClient.SetCategory([]string{hash}, strings.TrimSpace(*body.Category)); err != nil {
+			c.JSON(500, models.APIResponse{Success: false, Message: "设置分类失败：" + err.Error()})
+			return
+		}
+	}
+	if body.Tags != nil {
+		if err := s.qbClient.SetTags([]string{hash}, *body.Tags); err != nil {
+			c.JSON(500, models.APIResponse{Success: false, Message: "设置标签失败：" + err.Error()})
+			return
+		}
+	}
+	s.invalidateTorrentCache()
+	logger.Info.Printf("任务元数据已更新：%s", hash)
+	c.JSON(200, models.APIResponse{Success: true, Message: "已更新"})
+}
+
+// torrentDelete 从 qB 移除任务。默认只移除任务、保留磁盘文件；
+// 传 deleteFiles=true 才连文件一起删除（不可逆，需要前端二次确认）。
+func (s *Server) torrentDelete(c *gin.Context) {
+	hash := strings.TrimSpace(c.Param("hash"))
+	if hash == "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: "缺少任务 hash"})
+		return
+	}
+	deleteFiles := c.Query("deleteFiles") == "true" || c.Query("deleteFiles") == "1"
+	if err := s.qbClient.DeleteTorrents([]string{hash}, deleteFiles); err != nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	s.invalidateTorrentCache()
+	if deleteFiles {
+		logger.Warn.Printf("任务已删除（含磁盘文件）：%s", hash)
+	} else {
+		logger.Info.Printf("任务已移除（保留文件）：%s", hash)
+	}
+	msg := "任务已移除，磁盘文件保留"
+	if deleteFiles {
+		msg = "任务与磁盘文件已删除"
+	}
+	c.JSON(200, models.APIResponse{Success: true, Message: msg})
 }
 
 func (s *Server) forceRSS(c *gin.Context) {

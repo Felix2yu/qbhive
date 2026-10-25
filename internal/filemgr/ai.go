@@ -24,6 +24,10 @@ const (
 	aiMaxNames    = 64 // 单次请求最多携带的文件名数
 	aiMaxAttempts = 3  // AI 调用失败最多重试轮数，超过后降级为仅正则清洗
 	aiMaxPrompt   = 4000
+	// aiRearmAfter AI 连续失败降级后的冷却时长，到点自动重武装。
+	// 没有这层冷却重试，一次网络抖动或 AI 服务临时不可用，
+	// 就会把该任务永久钉死在「仅正则清洗」，用户事后修好也回不来。
+	aiRearmAfter = 30 * time.Minute
 )
 
 // defaultAIPrompt 内置默认提示词。{files} 替换为待格式化文件名 JSON 数组，

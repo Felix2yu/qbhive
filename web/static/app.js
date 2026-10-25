@@ -372,8 +372,83 @@ function hashToView() {
 }
 
 let currentView = "dashboard";
+
+// ---------- 未保存守卫 ----------
+// RSS 与设置两页都是「编辑本地对象 → 手动点保存」，而切换视图原本直接清空 DOM：
+// 用户填完一整页配置、点一下标签栏就全没了，且没有任何提示。
+// 这里统一标脏 → 离开前拦截 → 关闭/刷新前拦截。
+const VIEW_LABEL = { rss: "RSS 订阅", settings: "设置" };
+const _dirty = { rss: false, settings: false };
+// 上次「与服务端一致」时的表单快照。判断是否脏必须靠快照比对，不能只看事件：
+// 文本框一旦被改过，之后任意一次失焦都会再补发一次 change，纯事件置位会在
+// 「保存成功后点标签栏」这个最常见的动作上误报「有未保存的修改」。
+const _savedSnap = { rss: "", settings: "" };
+
+// 把当前页所有表单控件的值拼成一个可比较的字符串
+function formSnapshot() {
+  const parts = [];
+  $$("#content input, #content textarea, #content select").forEach((el, i) => {
+    let v;
+    if (el.type === "checkbox" || el.type === "radio") v = el.checked ? "1" : "0";
+    else if (el.type === "file") v = "";
+    else v = el.value;
+    parts.push(i + ":" + v);
+  });
+  return parts.join("\u0001");
+}
+
+// 显式标脏：程序化增删规则/通道不触发 input 事件，由处理函数自己调用
+function markDirty(view) {
+  if (!VIEW_LABEL[view]) return;
+  _dirty[view] = true;
+  syncDirtyUI();
+}
+
+// 按快照重新计算脏状态（表单改动触发）
+function refreshDirty(view) {
+  if (!VIEW_LABEL[view]) return;
+  _dirty[view] = formSnapshot() !== _savedSnap[view];
+  syncDirtyUI();
+}
+
+// 与服务端对齐：保存成功或刚从服务端载入时调用
+function clearDirty(view) {
+  if (!VIEW_LABEL[view]) return;
+  _savedSnap[view] = formSnapshot();
+  _dirty[view] = false;
+  syncDirtyUI();
+}
+
+// 未保存提示：标签页与保存按钮上各挂一个小圆点
+function syncDirtyUI() {
+  Object.keys(VIEW_LABEL).forEach(v => {
+    const tab = document.querySelector(`.tab[data-view="${v}"]`);
+    if (tab) tab.classList.toggle("dirty", _dirty[v]);
+    document.querySelectorAll(`[data-save="${v}"]`).forEach(b => b.classList.toggle("unsaved", _dirty[v]));
+  });
+}
+
+// 离开当前视图前的确认。返回 true 表示允许离开。
+async function guardUnsaved(next) {
+  if (!_dirty[currentView]) return true;
+  const staying = next === currentView;
+  const ok = await confirmDialog("有未保存的修改",
+    `「${VIEW_LABEL[currentView]}」页有尚未保存的修改，${staying ? "重新加载" : "离开"}后会丢失。`,
+    { danger: true, okText: "放弃修改" });
+  if (!ok) return false;
+  _dirty[currentView] = false;
+  syncDirtyUI();
+  return true;
+}
+
 async function switchView(name, background = false) {
   if (!views[name]) name = "dashboard";
+  // 后台自动刷新是同一视图内的数据更新，不触发守卫
+  if (!background && !(await guardUnsaved(name))) {
+    // 守卫拒绝了切换：若 hash 已变则还原，避免地址栏与页面内容不一致
+    if (location.hash === "#/" + name) history.replaceState(null, "", "#/" + currentView);
+    return;
+  }
   currentView = name;
   // hash 路由：把 URL 同步成当前页，刷新/分享链接都能停留在原页面；
   // 后台自动刷新（background）不改 URL。赋值会触发 hashchange，
@@ -396,6 +471,23 @@ async function switchView(name, background = false) {
 }
 
 $$(".tab").forEach(b => b.addEventListener("click", () => switchView(b.dataset.view)));
+
+// 表单一改动就重新比对快照（覆盖输入、下拉、开关）。程序化改动（增删规则/通道）
+// 不触发事件，由各处理函数显式调用 markDirty。
+["input", "change"].forEach(evt => {
+  document.addEventListener(evt, (e) => {
+    if (!VIEW_LABEL[currentView]) return;
+    if (e.target && e.target.closest && e.target.closest("#content")) refreshDirty(currentView);
+  });
+});
+
+// 关闭标签页 / 刷新前的最后一道拦截
+window.addEventListener("beforeunload", (e) => {
+  if (_dirty.rss || _dirty.settings) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+});
 
 // 浏览器前进/后退、手动改 hash 时切换到对应页面
 window.addEventListener("hashchange", () => {
@@ -565,6 +657,11 @@ function stateTag(s) {
   return `<span class="tag ${v.c}">${escapeHTML(v.t)}</span>`;
 }
 
+// 是否处于「可恢复」的停止态：stopped*/paused* 都算，missingFiles/error 不算
+function isStoppedState(s) {
+  return /^(stopped|paused)/.test(s || "");
+}
+
 function torrentTable(list, withActions) {
   if (!list || list.length === 0) return '<div class="empty">暂无任务</div>';
   const rows = list.map(t => torrentRow(t, withActions)).join("");
@@ -577,7 +674,7 @@ function torrentTable(list, withActions) {
       <div class="cell speed">下速</div>
       <div class="cell speed">上速</div>
       <div class="cell cat">分类</div>
-      ${withActions ? '<div class="cell actions">限速</div>' : ''}
+      ${withActions ? '<div class="cell actions">操作</div>' : ''}
     </div>`;
   return `<div class="torrent-list">${head}${rows}</div>`;
 }
@@ -600,15 +697,95 @@ function torrentRow(t, withActions) {
     <div class="cell speed dl">${humanSpeed(t.dlspeed)}</div>
     <div class="cell speed up">${humanSpeed(t.upspeed)}</div>
     <div class="cell cat" title="${safeCat}">${safeCat}</div>
-    ${withActions ? `<div class="cell actions"><button class="btn small" data-limit-btn="${safeHash}">限速</button></div>` : ""}
+    ${withActions ? `<div class="cell actions">
+      <button class="btn small" data-torrent-action="${safeHash}" data-act="${isStoppedState(t.state) ? "resume" : "pause"}">${isStoppedState(t.state) ? "继续" : "暂停"}</button>
+      <button class="btn small" data-torrent-recheck="${safeHash}">校验</button>
+      <button class="btn small" data-torrent-meta="${safeHash}">分类</button>
+      <button class="btn small" data-limit-btn="${safeHash}">限速</button>
+      <button class="btn small danger" data-torrent-del="${safeHash}" data-name="${safeName}">删除</button>
+    </div>` : ""}
   </div>`;
 }
 
-// 限速按钮弹框绑定
-function bindLimitButtons() {
+// 任务行内操作（暂停/继续、强制校验、改分类、限速、删除）。
+// 一次绑定全部，避免列表重渲后漏绑某个按钮。
+function bindTorrentRowActions() {
   $$("[data-limit-btn]").forEach(btn => {
     if (btn.__bound) return; btn.__bound = true;
     btn.addEventListener("click", () => openLimitDialog(btn.dataset.limitBtn));
+  });
+  $$("[data-torrent-action]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
+    btn.addEventListener("click", () => runTorrentAction(btn.dataset.torrentAction, btn.dataset.act));
+  });
+  $$("[data-torrent-recheck]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
+    btn.addEventListener("click", () => runTorrentAction(btn.dataset.torrentRecheck, "recheck"));
+  });
+  $$("[data-torrent-meta]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
+    btn.addEventListener("click", () => openMetaDialog(btn.dataset.torrentMeta));
+  });
+  $$("[data-torrent-del]").forEach(btn => {
+    if (btn.__bound) return; btn.__bound = true;
+    btn.addEventListener("click", () => openDeleteTorrentDialog(btn.dataset.torrentDel, btn.dataset.name || ""));
+  });
+}
+
+// 单任务操作：pause / resume / recheck
+async function runTorrentAction(hash, action) {
+  const labels = { pause: "已暂停", resume: "已恢复", recheck: "已开始校验" };
+  const res = await api("POST", `/torrents/${encodeURIComponent(hash)}/action`, { action });
+  toast(res.success ? (res.message || labels[action] || "已执行") : (res.message || "操作失败"),
+    res.success ? "ok" : "err");
+  if (res.success) fetchTorrents();
+}
+
+// 改分类 / 标签：只提交用户在弹窗里真正改动的字段
+async function openMetaDialog(hash) {
+  const t = (_torrentsState.rawList || []).find(x => x.hash === hash) || {};
+  const cat = await inputDialog("修改分类", "留空表示取消分类。只改分类，不移动文件。",
+    { value: t.category || "", unit: "", type: "text", placeholder: "如 电影" });
+  if (cat === null) return;
+  const tags = await inputDialog("修改标签", "多个标签用英文逗号分隔；留空表示清空标签。",
+    { value: t.tags || "", unit: "", type: "text", placeholder: "如 国语,4K" });
+  if (tags === null) return;
+  const body = {};
+  if ((cat || "") !== (t.category || "")) body.category = cat;
+  if ((tags || "") !== (t.tags || "")) body.tags = tags;
+  if (Object.keys(body).length === 0) { toast("没有改动", "ok"); return; }
+  const res = await api("POST", `/torrents/${encodeURIComponent(hash)}/meta`, body);
+  toast(res.success ? "已更新" : (res.message || "更新失败"), res.success ? "ok" : "err");
+  if (res.success) fetchTorrents();
+}
+
+// 删除任务：默认只从 qB 移除、保留磁盘文件；勾选后才连文件一起删（不可逆）
+function openDeleteTorrentDialog(hash, name) {
+  const { mask, done, result } = openModal(`
+    <h3>移除任务</h3>
+    <p>${escapeHTML(name || hash)}<br>仅从 qBittorrent 移除任务记录，磁盘文件保留。</p>
+    <label class="check-row">
+      <input type="checkbox" data-del-files>
+      <span>同时删除磁盘文件（不可逆，无法回退）</span>
+    </label>
+    <div class="modal-actions">
+      <button class="btn confirm-danger" data-yes>移除</button>
+      <button class="btn" data-no>取消</button>
+    </div>`);
+  const cb = mask.querySelector("[data-del-files]");
+  // 勾选删除文件时按钮文案同步变红更醒目，避免用户误以为只是移除任务
+  cb.addEventListener("change", () => {
+    mask.querySelector("[data-yes]").textContent = cb.checked ? "删除任务和文件" : "移除";
+  });
+  mask.querySelector("[data-yes]").onclick = () => done({ ok: true, deleteFiles: cb.checked });
+  mask.querySelector("[data-no]").onclick = () => done({ ok: false });
+  setTimeout(() => mask.querySelector("[data-no]").focus(), 0);
+  return result.then(async (r) => {
+    if (!r || !r.ok) return;
+    const q = r.deleteFiles ? "?deleteFiles=true" : "";
+    const res = await api("DELETE", `/torrents/${encodeURIComponent(hash)}${q}`);
+    toast(res.success ? (res.message || "已移除") : (res.message || "删除失败"), res.success ? "ok" : "err");
+    if (res.success) fetchTorrents();
   });
 }
 
@@ -669,7 +846,7 @@ async function renderTorrents(root, background = false) {
     <div class="page-head">
       <div class="titles">
         <h2>下载任务</h2>
-        <p>按状态筛选、搜索与分页；可对单个任务直接下发上传限速。</p>
+        <p>按状态筛选、搜索与分页；每行可直接暂停/恢复、强制校验、改分类与标签、改上传限速或移除任务。</p>
       </div>
     </div>
     <div class="card">
@@ -769,7 +946,7 @@ function renderPage() {
 
   body.innerHTML = torrentTable(pageSlice, true) + pageNav(list.length, page, _torrentsState.pageSize);
   bindPageNav(p => { _torrentsState.page = p; renderPage(); });
-  bindLimitButtons();
+  bindTorrentRowActions();
 }
 
 // ---------- RSS ----------
@@ -794,6 +971,7 @@ function autosizeAll(root) {
 async function renderRSS(root, rss) {
   // 第二个参数可能是 switchView 传入的 background 布尔，也可能是内部重渲传入的 rss 配置对象；
   // 只有真正的对象才复用，其余一律从 /config 重新拉取（并兜底请求失败）
+  let freshLoad = false;
   if (!rss || typeof rss !== "object") {
     const cr = await api("GET", "/config");
     if (!cr.success || !cr.data) {
@@ -801,6 +979,7 @@ async function renderRSS(root, rss) {
       return;
     }
     rss = cr.data.rss || {};
+    freshLoad = true;
   }
   if (!rss.feeds) rss.feeds = [];
 
@@ -822,7 +1001,6 @@ async function renderRSS(root, rss) {
         <div class="head-actions">
           <button class="btn small" id="rss-force">立即拉取</button>
           <button class="btn small" id="rss-reset-all">全部重新匹配</button>
-          <button class="btn small primary" id="rss-save">保存</button>
         </div>
       </div>
       ${field("启用", toggle(rss.enabled, { id: "rss-enabled" }), "关闭后不再拉取任何订阅源，已提交的下载不受影响。")}
@@ -842,6 +1020,12 @@ async function renderRSS(root, rss) {
       </div>
       <div id="rss-status-panel"><div class="empty">加载中…</div></div>
     </div>
+
+    <div class="card save-bar">
+      <span class="hint">订阅源与规则的改动保存后才生效；匹配规则发生变化时会自动对历史条目重新匹配。</span>
+      <span class="spacer"></span>
+      <button class="btn primary" id="rss-save" data-save="rss">保存</button>
+    </div>
   `;
 
   $("#rss-force").onclick = async () => {
@@ -855,6 +1039,7 @@ async function renderRSS(root, rss) {
     collectRSS(rss);
     const newFeed = { id: genID(), name: "新订阅源", url: "", enabled: true, rules: [] };
     rss.feeds.push(newFeed);
+    markDirty("rss"); // 增删不触发 input 事件，需显式标脏
     renderRSS(root, rss);
   };
   $("#rss-reset-all").onclick = async () => {
@@ -881,6 +1066,9 @@ async function renderRSS(root, rss) {
     refreshRSSStatus(true);
   });
   bindFeedEvents(rss);
+  // 刚从服务端载入：把当前 DOM 记成基准快照，避免把「加载」误判成「有改动」
+  if (freshLoad) clearDirty("rss");
+  else syncDirtyUI(); // 重渲后重建了保存按钮，未保存标记要重新贴一遍
   autosizeAll(root); // 初始渲染：按已填内容撑高 include/exclude，长规则不再被截断
 
   // 启动状态自动刷新（先停掉旧的，避免多个 RSS 页并发）
@@ -963,6 +1151,7 @@ function bindFeedEvents(rss) {
     collectRSS(rss);
     const id = b.dataset.delFeed;
     rss.feeds = rss.feeds.filter(f => f.id !== id);
+    markDirty("rss");
     renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-add-rule]").forEach(b => b.addEventListener("click", () => {
@@ -971,6 +1160,7 @@ function bindFeedEvents(rss) {
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules = feed.rules || [];
     feed.rules.push({ id: genID(), name: "规则 " + (feed.rules.length + 1), enabled: true, mode: "keyword", include: "", exclude: "", savePath: "", category: "", tags: "", uploadLimit: 0, stopped: false });
+    markDirty("rss");
     renderRSS(document.getElementById("content"), rss);
   }));
   $$("[data-del-rule]").forEach(b => b.addEventListener("click", () => {
@@ -978,6 +1168,7 @@ function bindFeedEvents(rss) {
     const [fid, ri] = b.dataset.delRule.split("-");
     const feed = rss.feeds.find(f => f.id === fid);
     feed.rules.splice(parseInt(ri, 10), 1);
+    markDirty("rss");
     renderRSS(document.getElementById("content"), rss);
   }));
 }
@@ -1104,7 +1295,10 @@ async function saveRSS(rss) {
   cfg.rss = rss;
   const vmsg = validateConfigJS(cfg);
   if (vmsg) { toast("❌ " + vmsg, "err"); return; }
-  const res = await api("POST", "/config", cfg);
+  // only=rss：本页只负责 rss 段，其余段沿用服务端当前值，
+  // 否则设置页刚保存的改动会被这次全量提交静默回滚。
+  const res = await api("POST", "/config?only=rss", cfg);
+  if (res.success) clearDirty("rss");
   toast(res.success ? "RSS 配置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
 }
 
@@ -1271,6 +1465,7 @@ function onAIDel() {
   if (removed && _settingsCfg.fileManager.aiActive === removed.id) {
     _settingsCfg.fileManager.aiActive = (_settingsCfg.fileManager.aiChannels.find(ch => ch.enabled) || {}).id || "";
   }
+  markDirty("settings");
   renderAIChannels();
 }
 
@@ -1484,13 +1679,14 @@ async function renderSettings(root) {
     <div class="card save-bar">
       <span class="hint">保存前会先做一次本地校验（URL 协议、正则、间隔下限等）。</span>
       <span class="spacer"></span>
-      <button class="btn primary" id="save-all">保存全部设置</button>
+      <button class="btn primary" id="save-all" data-save="settings">保存全部设置</button>
     </div>
   `;
 
   // 首次渲染 limiter 规则与 AI 通道
   renderLimiterRules();
   renderAIChannels();
+  syncDirtyUI(); // 重渲后重建了保存按钮，未保存标记要重新贴一遍
 
   // --- 主题按钮高亮 + 事件 ---
   applyTheme(getTheme());
@@ -1525,6 +1721,7 @@ async function renderSettings(root) {
   $("#lim-add").onclick = () => {
     syncFormToCfg();
     _settingsCfg.limiter.rules.push({ id: genID(), name: `规则 ${(_settingsCfg.limiter.rules.length + 1)}`, enabled: true, match: "", uploadLimit: 0, ratioTarget: 0, minUploaded: 0 });
+    markDirty("settings");
     renderLimiterRules();
   };
 
@@ -1551,6 +1748,7 @@ async function renderSettings(root) {
     const ch = { id: genID(), name: `通道 ${chans.length + 1}`, baseURL: "", apiKey: "", model: "", prompt: "", enabled: true };
     chans.push(ch);
     _settingsCfg.fileManager.aiActive = ch.id;
+    markDirty("settings");
     renderAIChannels();
   };
 
@@ -1568,7 +1766,8 @@ async function renderSettings(root) {
     const out = _settingsCfg; // 掩码值已在 syncFormToCfg 里被忽略，后端会保留原密码/apiKey
     const vmsg = validateConfigJS(out);
     if (vmsg) { toast("❌ " + vmsg, "err"); return; }
-    const res = await api("POST", "/config", out);
+    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy", out);
+    if (res.success) clearDirty("settings");
     toast(res.success ? "设置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
     // 保存成功后重新 GET 一次，让密码/API key 回到掩码状态
     if (res.success) {
@@ -1576,12 +1775,16 @@ async function renderSettings(root) {
       _settingsCfg = fresh;
     }
   };
+
+  // 本页每次都从服务端重新载入，载入完成即基准状态
+  clearDirty("settings");
 }
 
 function onLimDel() {
   syncFormToCfg();
   const idx = parseInt(this.dataset.lmDel, 10);
   _settingsCfg.limiter.rules.splice(idx, 1);
+  markDirty("settings");
   renderLimiterRules();
 }
 
@@ -1736,7 +1939,7 @@ async function renderAudit(root) {
         <span class="cell change" title="${escapeHTML(e.old)} → ${escapeHTML(e.new)}">
           ${escapeHTML(e.old)} <span class="arrow">→</span> <b>${escapeHTML(e.new)}</b>
         </span>
-        <span class="cell via text-dim">${e.via === "ai" ? "AI" : e.via === "prune" ? "后处理清理" : "正则"}</span>
+        <span class="cell via text-dim">${e.via === "ai" ? "AI" : e.via === "prune" ? "后处理清理" : e.via === "local-move" ? "本地归档" : e.via === "manual" ? "手动" : "正则"}</span>
         <span class="status"><span class="tag ${st.c}">${st.t}</span></span>
         <span class="act">${canRollback
           ? `<button class="btn small" data-audit-rollback="${escapeHTML(e.id)}">回退</button>`

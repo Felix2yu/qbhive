@@ -675,48 +675,30 @@ func TestClient_doRaw_UnauthorizedRetryKeepsContentType(t *testing.T) {
 	}
 }
 
-func TestClient_applyLatestUploadLimit(t *testing.T) {
-	t.Run("拉取列表失败直接返回", func(t *testing.T) {
-		srv, cli := newQBMock(t, nil, nil)
-		if err := cli.login(); err != nil {
-			t.Fatal(err)
-		}
-		srv.Close()
-		cli.applyLatestUploadLimit(100) // 不应 panic
+// 缩短轮询等待，避免「找不到新增任务」这类用例真的空转 15 秒
+func shortenUploadLimitLookup(t *testing.T) {
+	t.Helper()
+	oldTimeout, oldInterval := uploadLimitLookupTimeout, uploadLimitLookupInterval
+	uploadLimitLookupTimeout, uploadLimitLookupInterval = 300*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() {
+		uploadLimitLookupTimeout, uploadLimitLookupInterval = oldTimeout, oldInterval
 	})
+}
 
-	t.Run("列表为空直接返回", func(t *testing.T) {
-		_, cli := newQBMock(t, nil, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(`[]`))
-		})
-		cli.applyLatestUploadLimit(100)
-	})
-
-	t.Run("命中下载中任务则下发限速", func(t *testing.T) {
-		var mu sync.Mutex
-		var gotLimit string
+func TestClient_applyUploadLimitToAdded(t *testing.T) {
+	t.Run("基线缺失直接返回", func(t *testing.T) {
+		shortenUploadLimitLookup(t)
 		_, cli := newQBMock(t, nil, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v2/torrents/setUploadLimit" {
-				_ = r.ParseForm()
-				mu.Lock()
-				gotLimit = r.FormValue("hashes") + ":" + r.FormValue("limit")
-				mu.Unlock()
-				w.WriteHeader(http.StatusOK)
-				return
+				t.Error("基线缺失时不应下发限速")
 			}
-			_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"uploading"},{"hash":"h2","name":"b","state":"stalledDL"}]`))
+			w.WriteHeader(http.StatusOK)
 		})
-
-		cli.applyLatestUploadLimit(512)
-		mu.Lock()
-		got := gotLimit
-		mu.Unlock()
-		if got != "h2:524288" {
-			t.Errorf("应对第一个 downloading/stalledDL 任务下发限速，got %q want h2:524288", got)
-		}
+		cli.applyUploadLimitToAdded(nil, 100) // 不应 panic
 	})
 
-	t.Run("没有下载中任务则不下发", func(t *testing.T) {
+	t.Run("没有新增任务则不下发", func(t *testing.T) {
+		shortenUploadLimitLookup(t)
 		var mu sync.Mutex
 		calls := 0
 		_, cli := newQBMock(t, nil, func(w http.ResponseWriter, r *http.Request) {
@@ -727,53 +709,126 @@ func TestClient_applyLatestUploadLimit(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"uploading"}]`))
+			_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"uploading","added_on":100}]`))
 		})
 
-		cli.applyLatestUploadLimit(512)
+		cli.applyUploadLimitToAdded(map[string]bool{"h1": true}, 512)
 		mu.Lock()
 		got := calls
 		mu.Unlock()
 		if got != 0 {
-			t.Errorf("没有下载中任务时不应下发，calls=%d", got)
+			t.Errorf("列表里没有新增任务时不应下发，calls=%d", got)
+		}
+	})
+
+	// 这是旧实现最大的坑：规则配了「添加后停止」的任务不在 downloading 过滤内，
+	// 限速被静默丢弃。新实现按 hash 差集定位，与任务状态无关。
+	t.Run("暂停态的新增任务也要下发", func(t *testing.T) {
+		shortenUploadLimitLookup(t)
+		var mu sync.Mutex
+		var got string
+		_, cli := newQBMock(t, nil, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v2/torrents/setUploadLimit" {
+				_ = r.ParseForm()
+				mu.Lock()
+				got = r.FormValue("hashes") + ":" + r.FormValue("limit")
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"uploading","added_on":100},
+			                        {"hash":"h2","name":"b","state":"stoppedDL","added_on":200}]`))
+		})
+
+		cli.applyUploadLimitToAdded(map[string]bool{"h1": true}, 512)
+		mu.Lock()
+		gotLimit := got
+		mu.Unlock()
+		if gotLimit != "h2:524288" {
+			t.Errorf("暂停态的新增任务同样应下发限速，got %q want h2:524288", gotLimit)
+		}
+	})
+
+	t.Run("差集多条取 added_on 最新的一条", func(t *testing.T) {
+		shortenUploadLimitLookup(t)
+		var mu sync.Mutex
+		var got string
+		_, cli := newQBMock(t, nil, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v2/torrents/setUploadLimit" {
+				_ = r.ParseForm()
+				mu.Lock()
+				got = r.FormValue("hashes")
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			_, _ = w.Write([]byte(`[{"hash":"h2","name":"old-new","state":"downloading","added_on":200},
+			                        {"hash":"h3","name":"newest","state":"downloading","added_on":300}]`))
+		})
+
+		cli.applyUploadLimitToAdded(map[string]bool{"h1": true}, 512)
+		mu.Lock()
+		gotHash := got
+		mu.Unlock()
+		if gotHash != "h3" {
+			t.Errorf("应取 added_on 最新的一条，got %q want h3", gotHash)
 		}
 	})
 }
 
-// AddTorrent(uploadLimitKB>0) 会起 goroutine，在 3 秒后调用 applyLatestUploadLimit。
+// AddTorrent(uploadLimitKB>0) 会起 goroutine 给新增任务下发限速。
 // 这里轮询等待该调用发生（上限 5 秒），确保 goroutine 内的语句被覆盖且测试退出前已结束。
+//
+// 关键断言：限速必须落在本次新增的 h2 上，而不是基线里已有的 h1 —— 旧实现按
+// 「第一个 downloading 任务」选取，正是这里出错。stopped=true 是为了覆盖
+// 「添加后停止的任务限速被丢弃」这个旧缺陷。
 func TestClient_AddTorrent_AppliesUploadLimitAsynchronously(t *testing.T) {
+	shortenUploadLimitLookup(t)
 	var mu sync.Mutex
-	applied := false
+	var appliedTo, appliedLimit string
+	infoCalls := 0
 	_, cli := newQBMock(t, nil, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v2/torrents/setUploadLimit" {
+		switch r.URL.Path {
+		case "/api/v2/torrents/setUploadLimit":
 			_ = r.ParseForm()
 			mu.Lock()
-			applied = r.FormValue("limit") == "1048576"
+			appliedTo, appliedLimit = r.FormValue("hashes"), r.FormValue("limit")
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 			return
-		}
-		if r.URL.Path == "/api/v2/torrents/add" {
+		case "/api/v2/torrents/add":
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"downloading"}]`))
+		// info：第一次是添加前的基线，之后才带上新增任务
+		mu.Lock()
+		infoCalls++
+		n := infoCalls
+		mu.Unlock()
+		if n == 1 {
+			_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"stoppedDL","added_on":100}]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"hash":"h1","name":"a","state":"stoppedDL","added_on":100},
+		                        {"hash":"h2","name":"new","state":"stoppedDL","added_on":200}]`))
 	})
 
-	if err := cli.AddTorrent([]byte("fake-torrent"), "/dl", "", "", 1024, false); err != nil {
+	if err := cli.AddTorrent([]byte("fake-torrent"), "/dl", "", "", 1024, true); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
-		ok := applied
+		to, lim := appliedTo, appliedLimit
 		mu.Unlock()
-		if ok {
+		if to != "" {
+			if to != "h2" || lim != "1048576" {
+				t.Fatalf("限速应下发到新增任务 h2 且值为 1048576，got %s limit=%s", to, lim)
+			}
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("等待 applyLatestUploadLimit 超时（源码固定 3 秒延迟）")
+	t.Fatal("等待新增任务限速下发超时")
 }

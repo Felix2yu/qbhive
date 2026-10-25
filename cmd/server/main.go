@@ -43,6 +43,8 @@ func main() {
 	notif := notifier.New(cfg.Notifier)
 	lim := limiter.New(cfgMgr, qbCli)
 	fm := filemgr.New(cfgMgr, qbCli)
+	// 文件管理的异常/不可逆动作走通知通道（未启用通知时 Notify 内部直接返回）
+	fm.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
 	rssE := rss.New(cfgMgr, qbCli)
 
 	sch := scheduler.New(cfgMgr, qbCli, notif, lim, fm, rssE)

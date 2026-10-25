@@ -51,6 +51,8 @@ type mockQB struct {
 	torrentsHdr []http.Header // 同上，收到的请求头（断言 Authorization / Cookie）
 	limitReq    []url.Values  // /api/v2/torrents/setUploadLimit 收到的 form
 	loginReq    []url.Values  // /api/v2/auth/login 收到的 form
+	actionReq   []string      // 任务操作类端点（stop/start/recheck/delete/setCategory/addTags/removeTags）收到的请求
+	actionStatus int          // 非 0 → 任务操作类端点统一返回该状态码
 
 	// 可控行为
 	torrentsBody   string
@@ -104,6 +106,15 @@ func (m *mockQB) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(m.versionStatus)
 		}
 		w.Write([]byte("v5.0.0-test"))
+	case "/api/v2/torrents/stop", "/api/v2/torrents/start", "/api/v2/torrents/recheck",
+		"/api/v2/torrents/delete", "/api/v2/torrents/setCategory",
+		"/api/v2/torrents/addTags", "/api/v2/torrents/removeTags":
+		m.actionReq = append(m.actionReq, r.URL.Path+"?"+r.Form.Encode())
+		if m.actionStatus != 0 {
+			w.WriteHeader(m.actionStatus)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	case "/api/v2/torrents/info":
 		m.torrentsReq = append(m.torrentsReq, r.Form.Clone())
 		m.torrentsHdr = append(m.torrentsHdr, r.Header.Clone())
@@ -1643,5 +1654,274 @@ func TestRandomID(t *testing.T) {
 			t.Fatalf("RandomID 碰撞: %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+// =============== O2：配置按段提交，避免两页互相覆盖 ===============
+
+// RSS 页只编辑 rss 段，设置页编辑其余各段。两页都走「GET 全量 → 改一块 → POST 全量」，
+// 若不加 ?only=，后保存的一方会把对方刚保存的改动静默回滚。
+// 这里用「干净」与「只提交 rss」两路对照，证明合并真的发生。
+func TestSaveConfig_OnlySectionKeepsOtherSections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// 每次返回一份全新配置：Feeds 是切片，若共用一个 base，
+	// 某个子测试里改 Feeds[0].Name 会连带改到其它子测试（底层数组是同一份）。
+	mkBase := func() models.AppConfig {
+		return models.AppConfig{
+			Qbittorrent: models.QBConfig{URL: "http://127.0.0.1:8080"},
+			RSS: models.RSSConfig{Enabled: true, Interval: 15,
+				Feeds: []models.RSSFeed{{ID: "f1", Name: "旧名", URL: "https://example.com/feed.xml", Enabled: true}}},
+			Limiter:     models.LimiterConfig{Enabled: true, Interval: 10},
+			FileManager: models.FileManagerConfig{Enabled: false, ScanInterval: 60},
+		}
+	}
+	post := func(t *testing.T, s *Server, query string, cfg models.AppConfig) *httptest.ResponseRecorder {
+		t.Helper()
+		r := gin.New()
+		r.POST("/api/config", s.saveConfig)
+		body, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("POST", "/api/config"+query, strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("only=rss 不覆盖 limiter", func(t *testing.T) {
+		base := mkBase()
+		s := setupTestServer(t, "", "")
+		s.cfg.Set(base)
+
+		// 设置页先保存：把 limiter.interval 改成 30
+		settings := mkBase()
+		settings.Limiter.Interval = 30
+		if w := post(t, s, "", settings); w.Code != 200 {
+			t.Fatalf("设置页保存失败：%d %s", w.Code, w.Body.String())
+		}
+
+		// RSS 页用的是它打开时 GET 到的旧快照（interval 仍为 10），只提交 rss 段
+		rssPage := mkBase()
+		rssPage.Limiter.Interval = 10
+		rssPage.RSS.Feeds[0].Name = "新名"
+		if w := post(t, s, "?only=rss", rssPage); w.Code != 200 {
+			t.Fatalf("RSS 页保存失败：%d %s", w.Code, w.Body.String())
+		}
+
+		got := s.cfg.Get()
+		if got.RSS.Feeds[0].Name != "新名" {
+			t.Errorf("rss 段应被写入，got %q", got.RSS.Feeds[0].Name)
+		}
+		if got.Limiter.Interval != 30 {
+			t.Errorf("未声明的 limiter 段必须保留服务端当前值 30，got %d（说明仍被全量覆盖）", got.Limiter.Interval)
+		}
+	})
+
+	t.Run("不带 only 时仍是全量覆盖（对照）", func(t *testing.T) {
+		s := setupTestServer(t, "", "")
+		s.cfg.Set(mkBase())
+		settings := mkBase()
+		settings.Limiter.Interval = 30
+		post(t, s, "", settings)
+
+		stale := mkBase()
+		stale.Limiter.Interval = 10
+		post(t, s, "", stale)
+		if got := s.cfg.Get().Limiter.Interval; got != 10 {
+			t.Errorf("无 only 参数时行为应保持全量覆盖（兼容旧客户端），got %d", got)
+		}
+	})
+
+	t.Run("未知段名直接拒绝", func(t *testing.T) {
+		s := setupTestServer(t, "", "")
+		s.cfg.Set(mkBase())
+		w := post(t, s, "?only=rss,notARealSection", mkBase())
+		if w.Code != 400 || !strings.Contains(w.Body.String(), "未知的配置段") {
+			t.Errorf("未知段名应 400 并提示，got %d %s", w.Code, w.Body.String())
+		}
+		if got := s.cfg.Get().RSS.Feeds[0].Name; got != "旧名" {
+			t.Errorf("被拒绝的请求不应写入任何改动，got %q", got)
+		}
+	})
+}
+
+// =============== N1：任务控制接口 ===============
+
+// TestTorrentAction_MapsToQBEndpoints 覆盖 pause/resume/recheck 到 qB 5.x 端点的映射
+func TestTorrentAction_MapsToQBEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		action string
+		path   string
+	}{
+		{"pause", "/api/v2/torrents/stop"},
+		{"resume", "/api/v2/torrents/start"},
+		{"recheck", "/api/v2/torrents/recheck"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			mock := newMockQB(t)
+			s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+			r := gin.New()
+			r.POST("/api/torrents/:hash/action", s.torrentAction)
+
+			w := serveJSON(t, r, "POST", "/api/torrents/H1/action", `{"action":"`+tc.action+`"}`)
+			if w.Code != 200 {
+				t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+			}
+			mock.mu.Lock()
+			reqs := append([]string(nil), mock.actionReq...)
+			mock.mu.Unlock()
+			if len(reqs) != 1 || !strings.HasPrefix(reqs[0], tc.path) {
+				t.Fatalf("%s 应调用 %s，实际 %v", tc.action, tc.path, reqs)
+			}
+			if !strings.Contains(reqs[0], "hashes=H1") {
+				t.Errorf("应带上任务 hash，got %q", reqs[0])
+			}
+		})
+	}
+}
+
+func TestTorrentAction_RejectsUnknownAndReportsFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("未知动作 → 400 且不调用 qB", func(t *testing.T) {
+		mock := newMockQB(t)
+		s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+		r := gin.New()
+		r.POST("/api/torrents/:hash/action", s.torrentAction)
+
+		w := serveJSON(t, r, "POST", "/api/torrents/H1/action", `{"action":"nuke"}`)
+		if w.Code != 400 {
+			t.Fatalf("未知动作应 400，got %d", w.Code)
+		}
+		mock.mu.Lock()
+		n := len(mock.actionReq)
+		mock.mu.Unlock()
+		if n != 0 {
+			t.Errorf("未知动作不应调用 qB，实际 %d 次", n)
+		}
+	})
+
+	t.Run("qB 失败 → 500", func(t *testing.T) {
+		mock := newMockQB(t)
+		mock.actionStatus = http.StatusInternalServerError
+		s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+		r := gin.New()
+		r.POST("/api/torrents/:hash/action", s.torrentAction)
+
+		w := serveJSON(t, r, "POST", "/api/torrents/H1/action", `{"action":"pause"}`)
+		if w.Code != 500 {
+			t.Fatalf("qB 失败应 500，got %d body=%s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// TestTorrentSetMeta_PartialUpdate 只提交用户真正改动的字段，未提交的字段不触碰
+func TestTorrentSetMeta_PartialUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("只改分类", func(t *testing.T) {
+		mock := newMockQB(t)
+		mock.torrentsBody = `[{"hash":"H1","name":"n","tags":"old-tag"}]`
+		s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+		r := gin.New()
+		r.POST("/api/torrents/:hash/meta", s.torrentSetMeta)
+
+		w := serveJSON(t, r, "POST", "/api/torrents/H1/meta", `{"category":"电影"}`)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+		}
+		mock.mu.Lock()
+		reqs := append([]string(nil), mock.actionReq...)
+		mock.mu.Unlock()
+		if len(reqs) != 1 || !strings.HasPrefix(reqs[0], "/api/v2/torrents/setCategory") {
+			t.Fatalf("只应调用 setCategory，实际 %v", reqs)
+		}
+		if !strings.Contains(reqs[0], "category="+url.QueryEscape("电影")) {
+			t.Errorf("分类参数应编码后传递，got %q", reqs[0])
+		}
+	})
+
+	t.Run("只改标签：差集添加", func(t *testing.T) {
+		mock := newMockQB(t)
+		mock.torrentsBody = `[{"hash":"H1","name":"n","tags":"old,keep"}]`
+		s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+		r := gin.New()
+		r.POST("/api/torrents/:hash/meta", s.torrentSetMeta)
+
+		w := serveJSON(t, r, "POST", "/api/torrents/H1/meta", `{"tags":"keep,new"}`)
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+		}
+		mock.mu.Lock()
+		reqs := append([]string(nil), mock.actionReq...)
+		mock.mu.Unlock()
+		var hasAdd, hasDel bool
+		for _, q := range reqs {
+			if strings.HasPrefix(q, "/api/v2/torrents/addTags") && strings.Contains(q, "tags=new") {
+				hasAdd = true
+			}
+			if strings.HasPrefix(q, "/api/v2/torrents/removeTags") && strings.Contains(q, "tags=old") {
+				hasDel = true
+			}
+			if strings.HasPrefix(q, "/api/v2/torrents/setCategory") {
+				t.Errorf("只改标签时不应调用 setCategory：%v", reqs)
+			}
+		}
+		if !hasAdd || !hasDel {
+			t.Errorf("应按差集 addTags(new) + removeTags(old)，实际 %v", reqs)
+		}
+	})
+
+	t.Run("两个字段都没传 → 400", func(t *testing.T) {
+		mock := newMockQB(t)
+		s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+		r := gin.New()
+		r.POST("/api/torrents/:hash/meta", s.torrentSetMeta)
+
+		w := serveJSON(t, r, "POST", "/api/torrents/H1/meta", `{}`)
+		if w.Code != 400 {
+			t.Fatalf("空请求应 400，got %d", w.Code)
+		}
+	})
+}
+
+// TestTorrentDelete_DefaultsToKeepFiles 默认只移除任务，必须显式传参才删文件
+func TestTorrentDelete_DefaultsToKeepFiles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		name       string
+		query      string
+		wantDelete string
+	}{
+		{"默认保留文件", "", "deleteFiles=false"},
+		{"显式删除文件", "?deleteFiles=true", "deleteFiles=true"},
+		{"deleteFiles=1 也当 true", "?deleteFiles=1", "deleteFiles=true"},
+		{"其他值当 false", "?deleteFiles=0", "deleteFiles=false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newMockQB(t)
+			s := setupTestServerFull(t, t.TempDir(), mock.URL(), "")
+			r := gin.New()
+			r.DELETE("/api/torrents/:hash", s.torrentDelete)
+
+			w := serveJSON(t, r, "DELETE", "/api/torrents/H1"+tc.query, "")
+			if w.Code != 200 {
+				t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+			}
+			mock.mu.Lock()
+			reqs := append([]string(nil), mock.actionReq...)
+			mock.mu.Unlock()
+			if len(reqs) != 1 || !strings.HasPrefix(reqs[0], "/api/v2/torrents/delete") {
+				t.Fatalf("应调用 delete，实际 %v", reqs)
+			}
+			if !strings.Contains(reqs[0], tc.wantDelete) {
+				t.Errorf("应带 %s，got %q", tc.wantDelete, reqs[0])
+			}
+		})
 	}
 }

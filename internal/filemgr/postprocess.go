@@ -868,6 +868,9 @@ func (m *Manager) deletePostFile(t models.QBTorrent, p string) {
 		Via:     auditViaPrune,
 		Status:  AuditPruned,
 	})
+	// 删除文件不可回退，属于必须让用户看见的动作
+	m.notifyEvent("QBHive 后处理删除了文件",
+		fmt.Sprintf("任务「%s」按大小二选一删除了：\n%s", t.Name, p))
 }
 
 // matchExt 判断文件是否命中扩展名白名单（白名单为空即放行）。

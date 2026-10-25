@@ -26,6 +26,7 @@ type filemgrEnv struct {
 	torrentsJSON string
 	stopStatus   int
 	renameStatus int
+	renameFailN  int // 前 N 次 renameFile 强制失败，之后按 renameStatus（0=成功）
 	startStatus  int
 	filesStatus  int    // 非 0 → /torrents/files 返回该状态码（模拟取列表失败）
 	filesJSON    string // 非空 → /torrents/files 返回该 JSON（覆盖磁盘遍历）
@@ -67,6 +68,10 @@ func newFilemgrEnv(t *testing.T, enabled bool, scanInterval int, torrentsJSON st
 			st := 0
 			if kind == "renameFile" {
 				st = env.renameStatus
+				if env.renameFailN > 0 {
+					env.renameFailN--
+					st = http.StatusInternalServerError
+				}
 			} else if kind == "stop" {
 				st = env.stopStatus
 			} else if kind == "start" {
@@ -439,7 +444,9 @@ func TestManager_handleCompleted_FallbackLocalRename(t *testing.T) {
 	env := newFilemgrEnv(t, false, 15, `[]`)
 	env.mu.Lock()
 	env.stopStatus = http.StatusInternalServerError
-	env.renameStatus = http.StatusInternalServerError
+	// 只让第一次 renameFile 失败：触发本地回退后，代码还会再用 renameFile 把
+	// qB 的内部路径同步到新位置，这一次必须成功（否则会整轮回滚）。
+	env.renameFailN = 1
 	env.startStatus = http.StatusInternalServerError
 	env.mu.Unlock()
 
@@ -454,9 +461,12 @@ func TestManager_handleCompleted_FallbackLocalRename(t *testing.T) {
 	env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: env.saveDir})
 
 	calls := env.calls()
-	if len(calls) != 3 || !strings.HasPrefix(calls[0], "stop:") ||
-		!strings.HasPrefix(calls[1], "renameFile:") || !strings.HasPrefix(calls[2], "start:") {
-		t.Errorf("期望 stop→renameFile→start（即便都失败也要继续），got %v", calls)
+	// stop(失败) → renameFile(失败，触发本地回退) → renameFile(同步 qB 路径) → start(失败)
+	if len(calls) != 4 || !strings.HasPrefix(calls[0], "stop:") ||
+		!strings.HasPrefix(calls[1], "renameFile:") ||
+		!strings.HasPrefix(calls[2], "renameFile:") ||
+		!strings.HasPrefix(calls[3], "start:") {
+		t.Errorf("期望 stop→renameFile→renameFile(同步)→start，got %v", calls)
 	}
 	// 本地回退应把文件搬到 savePath 下
 	moved := filepath.Join(env.saveDir, "video.mkv")
@@ -477,7 +487,7 @@ func TestManager_handleCompleted_FallbackLocalRename(t *testing.T) {
 func TestManager_handleCompleted_FallbackTargetExists(t *testing.T) {
 	env := newFilemgrEnv(t, false, 15, `[]`)
 	env.mu.Lock()
-	env.renameStatus = http.StatusInternalServerError
+	env.renameFailN = 1 // 首次失败触发本地回退，同步 qB 的第二次成功
 	env.mu.Unlock()
 
 	torrentDir := filepath.Join(env.saveDir, "Movie")
@@ -902,4 +912,355 @@ func TestManager_handleClean_MissingFilesSkips(t *testing.T) {
 	if !renamed {
 		t.Fatalf("健康任务应提交清洗改名: %v", env.calls())
 	}
+}
+
+// ==================== F2：清理规则指纹 ====================
+
+// F2 回归：清理规则一变，此前判定 Done 的历史任务必须重新评估。
+// 旧行为下 rec.Done 一旦置位，本进程内永不复查，用户新加的自定义正则对历史任务完全无效。
+func TestManager_handleClean_RuleChangeReopensDone(t *testing.T) {
+	m, calls, srv, saveDir := setupFilemgr(t, `[{"hash":"h1","name":"n","state":"stoppedUP","progress":1.0,"save_path":"{SAVE}"}]`)
+	defer srv.Close()
+
+	// 只放一个「内置规则洗不动、只有新自定义正则洗得动」的文件名：
+	// 【广告】不含域名，内置的模式 1/2/3 都不会命中
+	if err := os.WriteFile(filepath.Join(saveDir, "【广告】video.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 该任务此前按「无自定义规则」判定为已清理完成
+	m.cleanState["h1"] = &cleanRecord{Done: true,
+		CleanSig: cleanRulesSignature(models.FileManagerConfig{Enabled: true, CleanEnabled: true})}
+
+	// 用户新增一条自定义正则并保存
+	cfg := m.cfg.Get()
+	cfg.FileManager = models.FileManagerConfig{
+		Enabled: true, CleanEnabled: true, CleanRules: []string{`^【[^】]*】`},
+	}
+	m.cfg.Set(cfg)
+
+	m.handleClean(models.QBTorrent{Hash: "h1", Name: "n", State: "stoppedUP", SavePath: saveDir, Progress: 1.0})
+
+	// 重新评估的直接证据：按新规则提交了重命名
+	if len(*calls) == 0 {
+		t.Fatal("规则变更后应重新评估该任务并提交重命名，实际无任何 qB 调用")
+	}
+	if got, want := m.cleanState["h1"].CleanSig, cleanRulesSignature(cfg.FileManager); got != want {
+		t.Errorf("CleanSig 应更新为新规则指纹\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// 指纹必须对「影响清理结果」的每一项敏感，且对纯空格改动不敏感
+func TestCleanRulesSignature_Sensitivity(t *testing.T) {
+	base := models.FileManagerConfig{Enabled: true, CleanEnabled: true}
+	baseSig := cleanRulesSignature(base)
+
+	if cleanRulesSignature(models.FileManagerConfig{
+		Enabled: true, CleanEnabled: true, CleanRules: []string{`^【[^】]*】`},
+	}) == baseSig {
+		t.Error("新增自定义正则应改变指纹")
+	}
+	if cleanRulesSignature(models.FileManagerConfig{
+		Enabled: true, CleanEnabled: true, AIEnabled: true,
+	}) == baseSig {
+		t.Error("启用 AI 应改变指纹")
+	}
+	if cleanRulesSignature(models.FileManagerConfig{
+		Enabled: true, CleanEnabled: true, CleanRules: []string{`  ^【[^】]*】  `},
+	}) == cleanRulesSignature(models.FileManagerConfig{
+		Enabled: true, CleanEnabled: true, CleanRules: []string{`^【[^】]*】`},
+	}) == false {
+		t.Error("纯首尾空格的改动不应产生不同指纹（否则白白重开一批任务）")
+	}
+}
+
+// ==================== F3：AI 熔断重武装 ====================
+
+// F3 回归：AI 熔断要能自动重武装；没有可用通道时不得熔断、不得消耗重试次数。
+// 旧行为下两者都会把任务永久钉死在「仅正则清洗」。
+func TestManager_handleClean_AIRearm(t *testing.T) {
+	m, _, srv, saveDir := setupFilemgr(t, `[]`)
+	defer srv.Close()
+
+	cfg := m.cfg.Get()
+	cfg.FileManager = models.FileManagerConfig{Enabled: true, CleanEnabled: true, AIEnabled: true}
+	m.cfg.Set(cfg)
+	sig := cleanRulesSignature(cfg.FileManager)
+	t1 := models.QBTorrent{Hash: "h1", Name: "n", State: "stoppedUP", SavePath: saveDir, Progress: 1.0}
+
+	// 注意：全程不配 AIChannels，activeAIChannel 返回 nil
+
+	t.Run("没有可用通道时不熔断也不消耗重试次数", func(t *testing.T) {
+		m.cleanState["h1"] = &cleanRecord{CleanSig: sig}
+		m.handleClean(t1)
+		rec := m.cleanState["h1"]
+		if rec.AISettled {
+			t.Error("没有可用通道时不应置位熔断，否则用户配好通道后该任务永久失去 AI")
+		}
+		if rec.AiAttempts != 0 {
+			t.Errorf("没有可用通道时不应消耗重试次数，got %d", rec.AiAttempts)
+		}
+	})
+
+	t.Run("冷却结束后自动重武装", func(t *testing.T) {
+		m.cleanState["h1"] = &cleanRecord{
+			CleanSig: sig, AISettled: true, AiAttempts: aiMaxAttempts,
+			AISettledAt: time.Now().Add(-aiRearmAfter - time.Minute).Unix(),
+		}
+		m.handleClean(t1)
+		rec := m.cleanState["h1"]
+		if rec.AISettled {
+			t.Error("熔断冷却结束后应自动重武装，不应永久钉死在仅正则清洗")
+		}
+		if rec.AiAttempts != 0 {
+			t.Errorf("重武装应同时清零重试次数，got %d", rec.AiAttempts)
+		}
+	})
+
+	t.Run("冷却未到则不重武装", func(t *testing.T) {
+		m.cleanState["h1"] = &cleanRecord{
+			CleanSig: sig, AISettled: true, AiAttempts: aiMaxAttempts,
+			AISettledAt: time.Now().Add(-time.Minute).Unix(),
+		}
+		m.handleClean(t1)
+		if !m.cleanState["h1"].AISettled {
+			t.Error("冷却未到不应重武装，否则 AI 不可用时每轮都会重试，扫描被拖死")
+		}
+	})
+}
+
+// TestManager_handleCompleted_FallbackSyncFailsRollsBack 覆盖 F6 的关键约束：
+// 本地移动成功但 qB 路径同步失败时，必须把文件移回原处。
+// 旧实现留下「磁盘已移动、qB 仍指旧路径」的状态 → 任务显示 missingFiles，
+// 而清理逻辑又因该状态拒绝处理，形成无法自愈的死结。
+func TestManager_handleCompleted_FallbackSyncFailsRollsBack(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	env.mu.Lock()
+	env.renameStatus = http.StatusInternalServerError // 两次 renameFile 都失败
+	env.mu.Unlock()
+
+	torrentDir := filepath.Join(env.saveDir, "Movie")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(torrentDir, "video.mkv")
+	if err := os.WriteFile(src, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	already, didWork := env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: env.saveDir})
+	if already || didWork {
+		t.Errorf("同步失败应返回 (false,false) 以便下轮重试，got already=%v didWork=%v", already, didWork)
+	}
+	// 文件必须回到原处：宁可整轮白干，也不能留下 qB 追不上的状态
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("同步失败必须回滚本地移动，文件应回到 %s: %v", src, err)
+	}
+	if string(data) != "content" {
+		t.Errorf("回滚后内容被改动: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(env.saveDir, "video.mkv")); err == nil {
+		t.Error("回滚后 savePath 下不应残留副本")
+	}
+	// 原目录必须保留（里面还有文件）
+	if st, err := os.Stat(torrentDir); err != nil || !st.IsDir() {
+		t.Errorf("回滚后原目录应保留，err=%v", err)
+	}
+}
+
+// ==================== moveFileSafe（跨卷移动） ====================
+
+func TestMoveFileSafe_MoveAndRefuseOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.bin")
+	dst := filepath.Join(dir, "b.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveFileSafe(src, dst); err != nil {
+		t.Fatalf("moveFileSafe: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("源文件应已删除")
+	}
+	if data, err := os.ReadFile(dst); err != nil || string(data) != "payload" {
+		t.Errorf("目标内容错误: %q err=%v", data, err)
+	}
+
+	// 目标已存在时绝不覆盖
+	if err := os.WriteFile(src, []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveFileSafe(src, dst); err == nil {
+		t.Error("目标已存在时必须拒绝覆盖")
+	} else if !strings.Contains(err.Error(), "拒绝覆盖") {
+		t.Errorf("错误信息应说明拒绝覆盖，got %v", err)
+	}
+	if data, _ := os.ReadFile(dst); string(data) != "payload" {
+		t.Errorf("已存在的目标文件不能被改动，got %q", data)
+	}
+}
+
+// copyThenRemove 是跨卷（EXDEV）分支的实现：验证内容、权限位与失败清理。
+func TestCopyThenRemove(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "v.mkv")
+	dst := filepath.Join(dir, "out", "v.mkv")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Repeat("0123456789", 1000)
+	if err := os.WriteFile(src, []byte(payload), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyThenRemove(src, dst); err != nil {
+		t.Fatalf("copyThenRemove: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != payload {
+		t.Error("复制内容与原文件不一致")
+	}
+	if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm() != 0o640 {
+		t.Errorf("权限位应保留 0640，got %v err=%v", fi.Mode().Perm(), err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("复制完成后源文件应被删除")
+	}
+	// 临时文件不能残留
+	if entries, _ := os.ReadDir(filepath.Dir(dst)); len(entries) != 1 {
+		t.Errorf("目标目录应只有最终文件，实际 %d 个", len(entries))
+	}
+
+	// 复制失败（源不存在）时应清掉半成品临时文件
+	missing := filepath.Join(dir, "nope.bin")
+	out2 := filepath.Join(dir, "out", "nope.bin")
+	if err := copyThenRemove(missing, out2); err == nil {
+		t.Error("源不存在时应报错")
+	}
+	if _, err := os.Stat(out2 + ".qbhive-part"); !os.IsNotExist(err) {
+		t.Error("失败后不应残留 .qbhive-part 临时文件")
+	}
+}
+
+// ==================== 审计 + 通知闭环 ====================
+
+// 收通知的假通道：记录 title/body 供断言
+type notifyRecorder struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (n *notifyRecorder) fn(title, body string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.msgs = append(n.msgs, title+"|"+body)
+}
+
+func (n *notifyRecorder) list() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.msgs...)
+}
+
+// 归档走本地回退是异常路径（qB renameFile 坏了），必须通知用户，否则以后每次
+// 归档都会静默走同一条路径，用户毫无察觉。
+func TestManager_Notify_OnLocalFallbackArchive(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	rec := &notifyRecorder{}
+	env.m.SetNotifier(rec.fn)
+	env.mu.Lock()
+	env.renameFailN = 1 // 首次失败触发本地回退，同步 qB 的第二次成功
+	env.mu.Unlock()
+
+	torrentDir := filepath.Join(env.saveDir, "Movie")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: env.saveDir})
+
+	msgs := rec.list()
+	if len(msgs) != 1 {
+		t.Fatalf("本地回退应发 1 条通知，got %d: %v", len(msgs), msgs)
+	}
+	if !strings.Contains(msgs[0], "本地回退") {
+		t.Errorf("通知标题应说明走了本地回退，got %q", msgs[0])
+	}
+	// 同时必须留下可回退的审计记录
+	list, total := env.m.AuditList(0, 10)
+	if total != 1 || len(list) != 1 {
+		t.Fatalf("本地回退应写 1 条审计，got total=%d", total)
+	}
+	if list[0].Via != auditViaLocalMove || list[0].Status != AuditConfirmed {
+		t.Errorf("审计应为 local-move/confirmed，got %s/%s", list[0].Via, list[0].Status)
+	}
+}
+
+// 回滚属于「本轮白干、下轮重试」的常规失败，不该发通知吵用户
+func TestManager_Notify_SilentOnRollback(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	rec := &notifyRecorder{}
+	env.m.SetNotifier(rec.fn)
+	env.mu.Lock()
+	env.renameStatus = http.StatusInternalServerError
+	env.mu.Unlock()
+
+	torrentDir := filepath.Join(env.saveDir, "Movie")
+	if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.m.handleCompleted(models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: env.saveDir})
+
+	if msgs := rec.list(); len(msgs) != 0 {
+		t.Errorf("回滚重试不应发通知，got %v", msgs)
+	}
+}
+
+// 按大小二选一删文件不可回退，必须通知 + 写 pruned 审计
+func TestManager_DeletePostFile_AuditAndNotify(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	rec := &notifyRecorder{}
+	env.m.SetNotifier(rec.fn)
+
+	target := filepath.Join(env.saveDir, "old.mkv")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tor := models.QBTorrent{Hash: testHash, Name: "Movie", SavePath: env.saveDir}
+	env.m.deletePostFile(tor, target)
+
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Error("文件应被删除")
+	}
+	list, total := env.m.AuditList(0, 10)
+	if total != 1 || list[0].Status != AuditPruned {
+		t.Fatalf("应写 1 条 pruned 审计，got total=%d status=%v", total, list)
+	}
+	if list[0].Via != auditViaPrune {
+		t.Errorf("via 应为 prune，got %q", list[0].Via)
+	}
+	msgs := rec.list()
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "删除") {
+		t.Errorf("删除文件必须通知，got %v", msgs)
+	}
+}
+
+// 未注入通知通道时不得 panic（filemgr 可脱离 notifier 单独使用）
+func TestManager_NotifyNilSafe(t *testing.T) {
+	env := newFilemgrEnv(t, false, 15, `[]`)
+	env.m.SetNotifier(nil)
+	target := filepath.Join(env.saveDir, "x.mkv")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.m.deletePostFile(models.QBTorrent{Hash: testHash, Name: "Movie"}, target)
 }

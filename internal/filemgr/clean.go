@@ -131,6 +131,11 @@ func sepPrefix(s string) (int, bool) {
 	return n, onlyDotDash
 }
 
+// cleanBuiltinVersion 内置清洗模式的版本号。
+// 增删改 defaultCleanPatterns 中任意一条都必须 +1：它是清理规则指纹的一部分，
+// 版本变化会让此前判定「已清理完成」的历史任务重新评估一轮。
+const cleanBuiltinVersion = 1
+
 var defaultCleanPatterns = []*regexp.Regexp{
 	// 1) 前缀 "www.example.com - " / "example.com - " / "https://a.com — "
 	//    （分隔符含全角 ：·~—）

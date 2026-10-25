@@ -434,6 +434,164 @@ func (c *Client) StartTorrents(hashes ...string) error {
 	return nil
 }
 
+// Recheck 强制校验：让 qB 重新扫描磁盘文件与 torrent 元数据是否一致。
+// 归档回退把文件挪到新位置后，必须让 qB 重新对上，否则任务会一直停在 missingFiles。
+func (c *Client) Recheck(hashes ...string) error {
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	resp, err := c.do("POST", "/api/v2/torrents/recheck",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("recheck status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// DeleteTorrents 从 qB 移除任务。deleteFiles=true 会连同磁盘文件一起删除（不可逆）。
+// 调用方必须自己承担护栏责任：本方法不做任何路径校验。
+func (c *Client) DeleteTorrents(hashes []string, deleteFiles bool) error {
+	if len(hashes) == 0 {
+		return fmt.Errorf("deleteTorrents: hashes 为空")
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	form.Set("deleteFiles", strconv.FormatBool(deleteFiles))
+	resp, err := c.do("POST", "/api/v2/torrents/delete",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete status=%d body=%s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// SetCategory 设置任务分类（空字符串表示取消分类）。
+func (c *Client) SetCategory(hashes []string, category string) error {
+	if len(hashes) == 0 {
+		return fmt.Errorf("setCategory: hashes 为空")
+	}
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	form.Set("category", category)
+	resp, err := c.do("POST", "/api/v2/torrents/setCategory",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("setCategory status=%d body=%s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// GetTorrentInfo 按 hash 精确取任务信息（不拉全量列表）。
+func (c *Client) GetTorrentInfo(hashes []string) ([]models.QBTorrent, error) {
+	if len(hashes) == 0 {
+		return nil, fmt.Errorf("getTorrentInfo: hashes 为空")
+	}
+	v := url.Values{}
+	v.Set("hashes", strings.Join(hashes, "|"))
+	resp, err := c.do("GET", "/api/v2/torrents/info?"+v.Encode(), nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var list []models.QBTorrent
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, fmt.Errorf("getTorrentInfo 解析失败：%v（前 200 字节：%.200s）", err, string(data))
+	}
+	return list, nil
+}
+
+// SetTags 覆盖式设置标签。qB 5.x 没有「设置标签」端点，只能先移除当前标签再追加新的；
+// 差集在这里算，避免把用户的旧标签全部抹掉又加上重复项。
+func (c *Client) SetTags(hashes []string, tags string) error {
+	if len(hashes) == 0 {
+		return fmt.Errorf("setTags: hashes 为空")
+	}
+	// 期望的标签集合（去重，保持顺序）
+	want := make([]string, 0, 4)
+	seen := make(map[string]bool, 4)
+	for _, t := range strings.Split(tags, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		want = append(want, t)
+	}
+
+	list, err := c.GetTorrentInfo(hashes)
+	if err != nil {
+		return fmt.Errorf("读取当前标签失败：%w", err)
+	}
+	have := make(map[string]bool, 4)
+	for _, t := range list {
+		for _, tag := range strings.Split(t.Tags, ",") {
+			if tag = strings.TrimSpace(tag); tag != "" {
+				have[tag] = true
+			}
+		}
+	}
+	var toAdd, toDel []string
+	for _, t := range want {
+		if !have[t] {
+			toAdd = append(toAdd, t)
+		}
+	}
+	for t := range have {
+		if !seen[t] {
+			toDel = append(toDel, t)
+		}
+	}
+	if len(toAdd) > 0 {
+		if err := c.postTags("/api/v2/torrents/addTags", hashes, toAdd); err != nil {
+			return err
+		}
+	}
+	if len(toDel) > 0 {
+		if err := c.postTags("/api/v2/torrents/removeTags", hashes, toDel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// postTags 提交 addTags / removeTags 请求（两个端点的参数形式一致）
+func (c *Client) postTags(endpoint string, hashes, tags []string) error {
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	form.Set("tags", strings.Join(tags, ","))
+	resp, err := c.do("POST", endpoint, strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s status=%d body=%s", endpoint[strings.LastIndex(endpoint, "/")+1:], resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 // RenameFile 通过 qB API 重命名 torrent 内的文件/子目录（qBittorrent 5.x）。
 // oldPath/newPath 是 torrent 内的相对路径（例："Movie/Video.mkv" -> "Video.mkv"）。
 // 调用前应先停止 torrent，避免做种中断。
@@ -493,6 +651,13 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 	writeFormField("stopped", stoppedStr, false, "", nil)
 	buf.WriteString("--" + boundary + "--\r\n")
 
+	// 限速必须下发到「刚添加的那个任务」上，先记下添加前已有哪些 hash，
+	// 添加后用差集精确定位新增项。放在 do 之前采样，避免把新任务算进基线里。
+	var knownHashes map[string]bool
+	if uploadLimitKB > 0 {
+		knownHashes = c.torrentHashes()
+	}
+
 	resp, err := c.do("POST", "/api/v2/torrents/add", &buf,
 		"multipart/form-data; boundary="+boundary)
 	if err != nil {
@@ -504,23 +669,72 @@ func (c *Client) AddTorrent(torrentData []byte, savePath, category, tags string,
 		logger.Warn.Printf("添加种子失败 status=%d body=%s", resp.StatusCode, string(b))
 	}
 	if uploadLimitKB > 0 {
-		go func() {
-			time.Sleep(3 * time.Second)
-			c.applyLatestUploadLimit(uploadLimitKB)
-		}()
+		go c.applyUploadLimitToAdded(knownHashes, uploadLimitKB)
 	}
 	return nil
 }
 
-func (c *Client) applyLatestUploadLimit(uploadLimitKB int) {
-	list, err := c.GetTorrents("downloading", "", "")
-	if err != nil || len(list) == 0 {
+// torrentHashes 返回当前全部任务的 hash 集合；拉取失败时返回 nil（调用方据此降级）
+func (c *Client) torrentHashes() map[string]bool {
+	list, err := c.GetTorrents("", "", "")
+	if err != nil {
+		logger.Warn.Printf("获取任务列表失败，无法为新增任务精确定位：%v", err)
+		return nil
+	}
+	m := make(map[string]bool, len(list))
+	for _, t := range list {
+		m[t.Hash] = true
+	}
+	return m
+}
+
+// 定位新增任务的轮询参数。拆成变量是为了让测试能缩短等待，
+// 生产默认 15 秒足够覆盖 qB 把新任务登记进列表的延迟。
+var (
+	uploadLimitLookupTimeout  = 15 * time.Second
+	uploadLimitLookupInterval = 500 * time.Millisecond
+)
+
+// applyUploadLimitToAdded 把上传限速下发给本次新增的那个任务。
+//
+// 旧实现是 sleep 3s 后对 filter=downloading 列表里「第一个」任务限速，两个硬伤：
+//  1. 多个订阅源并发添加时，限速必然打到别人头上；
+//  2. 规则配置了「添加后停止」的任务不在 downloading 过滤内，限速直接丢失。
+//
+// 改为按 hash 差集定位：与添加前的快照比对，只认本次多出来的任务，
+// 与它是否处于 downloading 无关。qB 的 /torrents/add 不返回 hash，
+// 只能这样反查；差集有多个时取 added_on 最新的一条。
+func (c *Client) applyUploadLimitToAdded(before map[string]bool, uploadLimitKB int) {
+	if before == nil {
+		logger.Warn.Printf("无法定位新增任务，跳过上传限速 %d KB/s（差集基线缺失）", uploadLimitKB)
 		return
 	}
-	for _, t := range list {
-		if t.State == "downloading" || t.State == "stalledDL" {
-			_ = c.SetUploadLimit(t.Hash, int64(uploadLimitKB)*1024)
-			return
+	deadline := time.Now().Add(uploadLimitLookupTimeout)
+	for time.Now().Before(deadline) {
+		list, err := c.GetTorrents("", "added_on", "true")
+		if err == nil {
+			var hash string
+			var maxAdded int64
+			for _, t := range list {
+				if before[t.Hash] {
+					continue
+				}
+				if t.AddedOn > maxAdded {
+					maxAdded = t.AddedOn
+					hash = t.Hash
+				}
+			}
+			if hash != "" {
+				if err := c.SetUploadLimit(hash, int64(uploadLimitKB)*1024); err != nil {
+					logger.Warn.Printf("设置新增任务上传限速失败 hash=%s：%v", hash, err)
+				} else {
+					logger.Info.Printf("已为新增任务 %s 设置上传限速 %d KB/s", hash, uploadLimitKB)
+				}
+				return
+			}
 		}
+		time.Sleep(uploadLimitLookupInterval)
 	}
+	logger.Warn.Printf("新增任务已提交但 %s 内未在任务列表中出现，跳过上传限速 %d KB/s",
+		uploadLimitLookupTimeout, uploadLimitKB)
 }

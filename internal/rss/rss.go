@@ -208,6 +208,40 @@ func (e *Engine) isFreshFeed(feedID string) bool {
 	return !ok || len(m) == 0
 }
 
+// isSeen 查询某条目是否已见过（只读，用于跳过重复条目）
+func (e *Engine) isSeen(feedID, key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.seen[feedID][key]
+}
+
+// claimSeen 原子地「检查并标记」一个条目：首次见到返回 true 并置位，已见过返回 false。
+//
+// 检查与置位必须在同一临界区内完成。拆成两步的话，并发到达同一订阅源的两次拉取
+// （用户手动「立即拉取」叠加定时 fetchAll）会在检查与标记之间同时通过，
+// 把同一个条目提交给 qBittorrent 两次，造成重复下载。
+func (e *Engine) claimSeen(feedID, key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m, ok := e.seen[feedID]
+	if !ok {
+		m = make(map[string]bool)
+		e.seen[feedID] = m
+	}
+	if m[key] {
+		return false
+	}
+	m[key] = true
+	return true
+}
+
+// unsee 撤消一个条目的已见标记，让它在下一周期被重新处理（提交 qB 失败时用）
+func (e *Engine) unsee(feedID, key string) {
+	e.mu.Lock()
+	delete(e.seen[feedID], key)
+	e.mu.Unlock()
+}
+
 func (e *Engine) getOrCreateState(feedID string) *feedState {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -427,8 +461,16 @@ func (e *Engine) fetchAll() {
 func (e *Engine) fetchFeed(feed models.RSSFeed) {
 	st := e.getOrCreateState(feed.ID)
 
-	// 运行态：准备开始
+	// 运行态：准备开始。
+	// fetching 同时充当「在飞互斥」：用户手动点「立即拉取」（ForceFetch）与定时 fetchAll
+	// 可能同时落到同一个订阅源上，先抢占到的一方独占本轮，另一方直接放弃。
+	// 没有这层保护时两个 goroutine 会各处理一遍同一批条目，把同一种子重复提交。
 	st.mu.Lock()
+	if st.fetching {
+		st.mu.Unlock()
+		logger.Debug.Printf("RSS 订阅源 %s 上一次拉取尚未结束，跳过本次", feed.Name)
+		return
+	}
 	st.fetching = true
 	st.lastFetchAt = time.Now()
 	st.itemCount = 0
@@ -477,13 +519,6 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 		logger.Info.Printf("RSS 订阅源 %s 强制重扫：跳过快照模式", feed.Name)
 	}
 
-	e.mu.Lock()
-	if _, ok := e.seen[feed.ID]; !ok {
-		e.seen[feed.ID] = make(map[string]bool)
-	}
-	seen := e.seen[feed.ID]
-	e.mu.Unlock()
-
 	// 本轮 itemCount 记下来
 	st.mu.Lock()
 	st.itemCount = len(parsed.Channel.Items)
@@ -500,7 +535,7 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 		if key == "" {
 			continue
 		}
-		if seen[key] {
+		if e.isSeen(feed.ID, key) {
 			// 已见过的也记录进 recent：让 UI 上 itemCount（=XML 总条数）和 recent 数量对齐，
 			// 用户点开能看到每一条的状态。用 seen_duplicate 标记方便前端做不同展示。
 			st.mu.Lock()
@@ -519,10 +554,14 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 			continue
 		}
 
-		// 正常模式：mark + 处理；下载失败则回滚，下次重试
-		e.mu.Lock()
-		seen[key] = true
-		e.mu.Unlock()
+		// 正常模式：claimSeen 原子「检查+标记」后处理；下载失败则回滚，下次重试。
+		// 抢占失败说明并发的那次拉取已经把它拿走了，本轮直接放弃，绝不重复提交。
+		if !e.claimSeen(feed.ID, key) {
+			st.mu.Lock()
+			st.pushRecent(RecentItem{Title: item.Title, Action: "seen_duplicate", ProcessedAt: time.Now()})
+			st.mu.Unlock()
+			continue
+		}
 		ruleName, procErr := e.processItem(feed, item)
 		st.mu.Lock()
 		if procErr != nil {
@@ -540,20 +579,17 @@ func (e *Engine) fetchFeed(feed models.RSSFeed) {
 
 		if procErr != nil {
 			// 处理失败（下载 torrent 失败 / AddTorrent 失败）→ 从 seen 撤出来，下次再试
-			e.mu.Lock()
-			delete(seen, key)
-			e.mu.Unlock()
+			e.unsee(feed.ID, key)
 		}
 	}
 
 	if isFresh {
 		logger.Info.Printf("RSS 订阅源 %s 首次快照：%d 条目标记，未下载（每个订阅源保存一次已见状态）",
 			feed.Name, len(newlySeen))
-		e.mu.Lock()
+		// claimSeen 自身持锁，这里不能再包一层 e.mu，否则死锁
 		for _, k := range newlySeen {
-			seen[k] = true
+			e.claimSeen(feed.ID, k)
 		}
-		e.mu.Unlock()
 		// 快照后立即落盘，避免进程重启又重新快照（会漏新条目但影响不大，落盘更稳）
 		e.saveSeen()
 	}
@@ -706,4 +742,52 @@ func httpGet(target string) ([]byte, error) {
 // ForceFetch 用于 API 调用立即触发一次 RSS 拉取
 func (e *Engine) ForceFetch() {
 	go e.fetchAll()
+}
+
+// OnConfigSaved 在配置保存后调用：对比新旧 RSS 配置，对「匹配规则发生变化」的订阅源
+// 自动清空已见状态并重新拉取。
+//
+// 背景：seen 是持久化的去重表，一个条目只要被标记过，后续拉取一律跳过。
+// 于是「用户改了匹配规则 → 保存」之后，历史条目仍然被 seen 挡在门外，
+// 新规则看起来完全没生效，必须手动点「重新匹配」才行。这里把这一步自动化。
+//
+// 只对影响命中判定的字段做指纹（是否启用 / 模式 / include / exclude）：
+// SavePath、Category、Tags、UploadLimit、Stopped 决定的是「怎么下载」而不是「下载哪些」，
+// 改它们不值得把整个订阅源的历史条目重新下一遍。
+func (e *Engine) OnConfigSaved(oldCfg, newCfg models.RSSConfig) {
+	oldFeeds := make(map[string]models.RSSFeed, len(oldCfg.Feeds))
+	for _, f := range oldCfg.Feeds {
+		oldFeeds[f.ID] = f
+	}
+	var changed []string
+	for _, nf := range newCfg.Feeds {
+		of, ok := oldFeeds[nf.ID]
+		if !ok {
+			// 新增的订阅源本来就是「第一次见到」，会走快照模式，无需重置
+			continue
+		}
+		if ruleMatchSignature(of.Rules) == ruleMatchSignature(nf.Rules) {
+			continue
+		}
+		changed = append(changed, nf.ID)
+	}
+	if len(changed) == 0 {
+		return
+	}
+	for _, id := range changed {
+		e.ResetFeed(id)
+	}
+	logger.Info.Printf("RSS 检测到 %d 个订阅源的匹配规则发生变化，已清空其已见状态并重新拉取", len(changed))
+	e.ForceFetch()
+}
+
+// ruleMatchSignature 一组规则的「匹配指纹」：只含决定是否命中的字段，
+// 即 规则ID / 是否启用 / 匹配模式 / include / exclude。
+func ruleMatchSignature(rules []models.RSSRule) string {
+	var b strings.Builder
+	for _, r := range rules {
+		b.WriteString(fmt.Sprintf("%s|%t|%s|%s|%s;",
+			r.ID, r.Enabled, r.Mode, strings.TrimSpace(r.Include), strings.TrimSpace(r.Exclude)))
+	}
+	return b.String()
 }

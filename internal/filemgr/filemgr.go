@@ -37,6 +37,11 @@ type Manager struct {
 	rulesKey   string                  // rulesCache 对应的规则指纹
 	audit      *auditLog               // 重命名审计日志
 
+	// notify 由装配层注入的通知通道（nil 表示不通知）。
+	// 只在「需要人介入」或「不可逆」的事件上调用：归档本地回退、失联回滚、清理删原片、
+	// 批量重命名完成、审计回退。常规成功路径不发通知，避免把用户淹在消息里。
+	notify func(title, body string)
+
 	// ---- 转码后处理 ----
 	// postRunMu 保护 postBusy：全局串行闸门，一次只允许一条后处理命令在跑
 	// （转码吃满 CPU 与磁盘带宽，并发跑只会互相拖慢）
@@ -58,7 +63,16 @@ type cleanRecord struct {
 	Pending    []cleanRename `json:"pending,omitempty"` // 已提交待确认落地的重命名
 	Done       bool          `json:"done,omitempty"`    // 已无待办且全部落地
 	AiAttempts int           `json:"aiAttempts,omitempty"`
-	AISettled  bool          `json:"aiSettled,omitempty"` // AI 已成功调用过 / 无可用通道 / 重试耗尽
+	AISettled  bool          `json:"aiSettled,omitempty"` // AI 已成功调用过 / 重试耗尽
+	// AISettledAt 记录「因连续失败而降级」的时刻（Unix 秒）。
+	// 0 表示 AI 已成功调用过这类终态，永不重武装；非 0 表示失败降级，
+	// 冷却 aiRearmAfter 后自动重试，避免一次瞬时故障让任务永久失去 AI 美化。
+	AISettledAt int64 `json:"aiSettledAt,omitempty"`
+
+	// CleanSig 记录本任务判定 Done 时生效的清理规则指纹（内置版本+自定义正则+AI 开关）。
+	// 指纹一变（用户新增自定义正则、启用 AI、内置规则升级）就解除 Done，
+	// 让历史任务按新规则重新评估，否则这些改动对已扫描过的任务永远不生效。
+	CleanSig string `json:"cleanSig,omitempty"`
 
 	// FlattenDir 记录单文件归档已提交 qB 异步移动、等待清空后删除的原目录（绝对路径）。
 	// 非空表示上一轮已把 savePath 子目录里唯一的文件移到保存根，qB 的磁盘移动是异步的，
@@ -116,6 +130,25 @@ func New(cfg *config.Manager, client *qb.Client) *Manager {
 // SetClient 热替换 qb 客户端
 func (m *Manager) SetClient(c *qb.Client) {
 	m.client = c
+}
+
+// SetNotifier 注入通知通道（由装配层传入 notifier.Notify）。
+// filemgr 不直接依赖 notifier 包：这里只留一个函数值，nil 时通知静默跳过。
+func (m *Manager) SetNotifier(fn func(title, body string)) {
+	m.mu.Lock()
+	m.notify = fn
+	m.mu.Unlock()
+}
+
+// notifyEvent 发送一条通知（未注入通道时静默跳过，绝不因通知失败影响主流程）
+func (m *Manager) notifyEvent(title, body string) {
+	m.mu.Lock()
+	fn := m.notify
+	m.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(title, body)
 }
 
 // Reload 根据最新配置重启（或停止）扫描轮询
@@ -379,7 +412,10 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		qbNew = path.Join(path.Dir(qbNew), conflictFreeName(newBase, t.Hash))
 	}
 
-	// 1) 先通过 qB API 停止 torrent
+	// 1) 先通过 qB API 停止 torrent。
+	//    记下操作前的暂停态：stoppedUP 通常来自用户「下载完成即暂停」的设置，
+	//    归档结束后必须还原成暂停，把任务重新拉起做种属于覆盖用户意图。
+	wasPaused := isPausedState(t.State)
 	if err := m.client.StopTorrents(t.Hash); err != nil {
 		logger.Warn.Printf("文件管理 [%s] 停止失败：%v", t.Name, err)
 	}
@@ -397,20 +433,57 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 		if src == dst {
 			// 防御性兜底（理论不可达）：同路径无需移动，更不可删目录
 			logger.Warn.Printf("文件管理 [%s] 本地重命名源与目标相同（%s），跳过并保留目录", t.Name, src)
-			_ = m.client.StartTorrents(t.Hash)
+			if !wasPaused {
+				_ = m.client.StartTorrents(t.Hash)
+			}
 			return true, false
 		}
-		if err := os.Rename(src, dst); err != nil {
-			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，启动 torrent 后下次重试",
+		if err := moveFileSafe(src, dst); err != nil {
+			logger.Warn.Printf("文件管理 [%s] 本地重命名 %s → %s 失败：%v，恢复 torrent 状态后下次重试",
 				t.Name, src, dst, err)
-			_ = m.client.StartTorrents(t.Hash)
+			if !wasPaused {
+				_ = m.client.StartTorrents(t.Hash)
+			}
 			return false, false
 		}
+		// 磁盘已经动了，但 qB 的内部路径还指着旧位置 —— 这会让任务立刻变成
+		// missingFiles（qB 找不到文件），而清理逻辑又因该状态拒绝处理，形成死结。
+		// 所以本地移动之后必须把 qB 元数据同步到新路径；同步失败就把文件移回去，
+		// 宁可整轮重试，也绝不留下「磁盘已移动、qB 未同步」的失联状态。
+		if syncErr := m.client.RenameFile(t.Hash, qbOld, qbNew); syncErr != nil {
+			logger.Error.Printf("文件管理 [%s] 本地已移动但 qB 路径同步失败（%s → %s）：%v，回滚本地移动",
+				t.Name, qbOld, qbNew, syncErr)
+			if rbErr := moveFileSafe(dst, src); rbErr != nil {
+				// 最坏情况：两边对不上，只能如实告知用户，并停止对该任务的自动处理
+				logger.Error.Printf("文件管理 [%s] 危险：回滚 %s → %s 也失败：%v；文件已在新位置 %s，任务将显示缺少文件",
+					t.Name, dst, src, rbErr, dst)
+				m.audit.Append(auditEntry{
+					Hash: t.Hash, Torrent: t.Name, Old: qbOld, New: qbNew,
+					Via: auditViaLocalMove, Status: AuditFailed,
+				})
+				m.notifyEvent("QBHive 归档异常",
+					fmt.Sprintf("任务「%s」的文件已移动到 %s，但 qBittorrent 记录未能同步，任务会显示缺文件。请手动校验或重新添加。",
+						t.Name, dst))
+				if !wasPaused {
+					_ = m.client.StartTorrents(t.Hash)
+				}
+				return true, true // 不再重试：反复搬动只会让状态更乱
+			}
+			logger.Info.Printf("文件管理 [%s] 已回滚本地移动，文件回到 %s，下轮重试", t.Name, src)
+			if !wasPaused {
+				_ = m.client.StartTorrents(t.Hash)
+			}
+			return false, false
+		}
+		logger.Info.Printf("文件管理 [%s] 本地移动已同步到 qB：%s → %s", t.Name, qbOld, qbNew)
 	}
 
-	// 3) 启动 torrent
-	if err := m.client.StartTorrents(t.Hash); err != nil {
-		logger.Warn.Printf("文件管理 [%s] 启动失败：%v", t.Name, err)
+	// 3) 恢复 torrent：只在操作前处于运行态时才启动。
+	//    用户主动暂停的任务（stoppedUP）保持暂停，绝不擅自拉起。
+	if !wasPaused {
+		if err := m.client.StartTorrents(t.Hash); err != nil {
+			logger.Warn.Printf("文件管理 [%s] 启动失败：%v", t.Name, err)
+		}
 	}
 
 	if viaQB {
@@ -424,6 +497,17 @@ func (m *Manager) handleCompleted(t models.QBTorrent) (already bool, didWork boo
 	}
 
 	logger.Info.Printf("文件管理 [%s] 已本地移动 %s → %s", t.Name, qbOld, qbNew)
+	// 写审计：本地回退的移动同样是一次改名，qB 元数据已同步，因此可以正常回退。
+	// 不写审计的话这类改动在 UI 上完全隐身，用户既看不到也回不去。
+	m.audit.Append(auditEntry{
+		Hash: t.Hash, Torrent: t.Name, Old: qbOld, New: qbNew,
+		Via: auditViaLocalMove, Status: AuditConfirmed,
+	})
+	// 本地回退说明 qB 的 renameFile 有问题（路径不一致/权限/瞬时故障），
+	// 这类异常需要用户知道，否则以后所有归档都会静默走同一条路径。
+	m.notifyEvent("QBHive 归档走了本地回退",
+		fmt.Sprintf("任务「%s」的 qBittorrent 重命名失败，已改用本地移动并同步 qB 记录：\n%s → %s",
+			t.Name, qbOld, qbNew))
 	// 本地 os.Rename 是同步的，移动已落地，原目录（savePath 严格子目录）可直接清理
 	if err := os.RemoveAll(torrentDir); err != nil {
 		logger.Warn.Printf("文件管理 [%s] 清理目录 %s 失败：%v，下次重试", t.Name, torrentDir, err)
@@ -603,12 +687,27 @@ func (m *Manager) ensureRules() {
 // Stop → 批量 renameFile → Start。全程不覆盖任何已存在的文件。
 func (m *Manager) handleClean(t models.QBTorrent) {
 	cfg := m.cfg.Get().FileManager
+	sig := cleanRulesSignature(cfg)
+	changed := false
+
 	m.mu.Lock()
 	rec := m.cleanState[t.Hash]
 	if rec == nil {
 		rec = &cleanRecord{}
 		m.cleanState[t.Hash] = rec
 	}
+	// 清理规则变了（新增自定义正则、启用/关闭 AI、内置规则升级）→ 解除此前判 Done 的任务。
+	// rec.Done 一旦置位本进程就不再回头看，不重置的话用户新加的正则对历史任务永远不生效。
+	if rec.Done && rec.CleanSig != "" && rec.CleanSig != sig {
+		logger.Info.Printf("文件清理 [%s] 清理规则已变更，重新评估该任务", t.Name)
+		rec.Done = false
+		// 顺带解除 AI 熔断：规则都改了，AI 通道可能也是刚配好的
+		rec.AISettled = false
+		rec.AISettledAt = 0
+		rec.AiAttempts = 0
+		changed = true
+	}
+	rec.CleanSig = sig
 	if rec.Done {
 		m.mu.Unlock()
 		return
@@ -627,7 +726,6 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 		logger.Warn.Printf("文件清理 [%s] 获取文件列表失败：%v，下轮重试", t.Name, err)
 		return
 	}
-	changed := false
 
 	// 1) 核销 pending：qB renameFile 异步，按「旧完整路径从文件列表消失」判定落地。
 	//    重命名以文件为粒度（newPath 可改目录段），仅比 base 名会把换目录误判为未落地。
@@ -669,27 +767,40 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	var aiNames map[string]string
 	aiPending := false
 	if cfg.AIEnabled {
+		// 熔断冷却到点 → 重武装。此前一旦降级就永久钉死在「仅正则」，
+		// 用户事后修好网络或换通道也回不来。
 		m.mu.Lock()
+		if rec.AISettled && rec.AISettledAt > 0 &&
+			time.Since(time.Unix(rec.AISettledAt, 0)) >= aiRearmAfter {
+			logger.Info.Printf("文件清理 [%s] AI 熔断冷却结束，重新尝试 AI 格式化", t.Name)
+			rec.AISettled = false
+			rec.AISettledAt = 0
+			rec.AiAttempts = 0
+		}
 		settled := rec.AISettled
 		m.mu.Unlock()
 		if !settled {
 			ch := activeAIChannel(cfg)
 			if ch == nil {
-				m.mu.Lock()
-				rec.AISettled = true
-				m.mu.Unlock()
-				changed = true
+				// 没有可用通道：既不消耗重试次数，也不置位熔断。
+				// 用户随时可能在设置里配好通道并保存，置位会让该任务永久失去 AI 美化。
+				logger.Debug.Printf("文件清理 [%s] 暂无可用 AI 通道，本轮跳过（不熔断、不消耗重试次数）", t.Name)
 			} else {
 				names := collectAINames(files, m.rulesCache)
 				aiNames = aiFormatNames(*ch, names, t.Name)
 				m.mu.Lock()
 				if aiNames != nil {
+					// 成功是终态：AISettledAt 留 0，永不重武装
 					rec.AISettled = true
+					rec.AISettledAt = 0
 				} else {
 					rec.AiAttempts++
 					if rec.AiAttempts >= aiMaxAttempts {
-						logger.Warn.Printf("文件清理 [%s] AI 连续 %d 次失败，降级为仅正则清洗", t.Name, rec.AiAttempts)
+						logger.Warn.Printf("文件清理 [%s] AI 连续 %d 次失败，降级为仅正则清洗（%s 后自动重试）",
+							t.Name, rec.AiAttempts, aiRearmAfter)
+						// 失败降级：记下时刻，冷却结束后可重武装
 						rec.AISettled = true
+						rec.AISettledAt = time.Now().Unix()
 					} else {
 						aiPending = true
 					}
@@ -719,7 +830,7 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	}
 
 	// 5) 应用：一次 Stop → 批量 rename → 必然 Start
-	committed := m.applyRenames(t.Hash, plan)
+	committed := m.applyRenames(t.Hash, plan, isPausedState(t.State))
 	if len(committed) > 0 {
 		for i := range committed {
 			e := m.audit.Append(auditEntry{
@@ -742,10 +853,43 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	}
 }
 
-// applyRenames 一次 Stop → 逐条 RenameFile → 必然 Start。
+// cleanRulesSignature 清理配置的指纹：内置规则版本 + 自定义正则 + 清理/AI 开关。
+//
+// 任一项变化都意味着「用户改了清理规则」。rec.Done 一旦置位本进程就不再复查该任务，
+// 没有这个指纹，用户新加的自定义正则、刚启用的 AI 对已扫描过的任务永远不生效，
+// 只能靠删状态文件或重启解决。
+//
+// 与后处理的 postFilterSignature 同一套思路：把原文（而非摘要）存进状态文件，
+// 便于人回看排查；空改动（纯空格）已归一化，不会白白重开一批任务。
+func cleanRulesSignature(fm models.FileManagerConfig) string {
+	rules := make([]string, 0, len(fm.CleanRules))
+	for _, r := range fm.CleanRules {
+		if s := strings.TrimSpace(r); s != "" {
+			rules = append(rules, s)
+		}
+	}
+	return fmt.Sprintf("v%d|clean=%t|ai=%t|rules=%s",
+		cleanBuiltinVersion, fm.CleanEnabled, fm.AIEnabled, strings.Join(rules, "\x1f"))
+}
+
+// isPausedState 判断任务是否处于「被主动暂停」的暂停态。
+//
+// 只有 stoppedUP / stoppedDL 是真正的暂停：前者常见于是用户开启了「下载完成即暂停」，
+// 后者是用户手动停下的未完成下载。stalledUP / queuedUP 只是暂时没有速度，
+// 任务仍在运行队列里，不属于暂停。
+//
+// 归档与重命名都要 Stop → 操作 → 恢复，恢复时必须据此判断：
+// 把用户主动暂停的任务重新拉起做种，是在覆盖用户的显式意图。
+func isPausedState(state string) bool {
+	return state == "stoppedUP" || state == "stoppedDL"
+}
+
+// applyRenames 一次 Stop → 逐条 RenameFile → 按操作前的状态决定是否恢复。
 // 返回提交成功的条目（失败的条目下轮重试）；任何情况下不覆盖已有文件
 // （冲突已在 buildCleanPlan 预检兜底）。
-func (m *Manager) applyRenames(hash string, plan []cleanRename) []cleanRename {
+//
+// wasPaused 为 true 表示调用前任务就是暂停态，此时保持暂停，不调用 StartTorrents。
+func (m *Manager) applyRenames(hash string, plan []cleanRename, wasPaused bool) []cleanRename {
 	if err := m.client.StopTorrents(hash); err != nil {
 		logger.Warn.Printf("文件清理：停止任务 %s 失败：%v", hash, err)
 	}
@@ -758,8 +902,11 @@ func (m *Manager) applyRenames(hash string, plan []cleanRename) []cleanRename {
 		logger.Info.Printf("文件清理：提交重命名 %s → %s（%s）", r.Old, r.New, r.Via)
 		committed = append(committed, r)
 	}
-	if err := m.client.StartTorrents(hash); err != nil {
-		logger.Warn.Printf("文件清理：恢复任务 %s 失败：%v", hash, err)
+	// 只恢复原本在跑的任务：被用户暂停的（stoppedUP / stoppedDL）保持暂停
+	if !wasPaused {
+		if err := m.client.StartTorrents(hash); err != nil {
+			logger.Warn.Printf("文件清理：恢复任务 %s 失败：%v", hash, err)
+		}
 	}
 	return committed
 }
@@ -796,27 +943,29 @@ func (m *Manager) RollbackAudit(id string) error {
 	if err != nil {
 		return fmt.Errorf("获取文件列表失败：%w", err)
 	}
+	// 按完整相对路径比对，不能只比 base 名：归档类记录只改目录段、文件名不变
+	// （ABC/x.mp4 → x.mp4），按 base 比对会把「新名就是旧名」判定成冲突，导致这类
+	// 记录永远回退不了。
 	foundNew, foundOld := false, false
 	for _, f := range files {
-		b := path.Base(f.Name)
-		if b == path.Base(e.New) {
+		if f.Name == e.New {
 			foundNew = true
 		}
-		if b == path.Base(e.Old) {
+		if f.Name == e.Old {
 			foundOld = true
 		}
 	}
 	if !foundNew {
-		return fmt.Errorf("当前文件列表中找不到 %s，可能已被其他操作修改", path.Base(e.New))
+		return fmt.Errorf("当前文件列表中找不到 %s，可能已被其他操作修改", e.New)
 	}
 	if foundOld {
-		return fmt.Errorf("旧名 %s 已存在于任务中，拒绝回退（绝不覆盖）", path.Base(e.Old))
+		return fmt.Errorf("旧路径 %s 已存在于任务中，拒绝回退（绝不覆盖）", e.Old)
 	}
 	dst := filepath.Join(tor.SavePath, filepath.FromSlash(e.Old))
 	if _, err := os.Stat(dst); err == nil {
 		return fmt.Errorf("磁盘上已存在 %s，拒绝回退（绝不覆盖）", e.Old)
 	}
-	committed := m.applyRenames(e.Hash, []cleanRename{{Old: e.New, New: e.Old, Via: e.Via}})
+	committed := m.applyRenames(e.Hash, []cleanRename{{Old: e.New, New: e.Old, Via: e.Via}}, isPausedState(tor.State))
 	if len(committed) == 0 {
 		return fmt.Errorf("renameFile 提交失败，详见服务日志")
 	}
@@ -829,6 +978,8 @@ func (m *Manager) RollbackAudit(id string) error {
 	m.mu.Unlock()
 	m.saveCleanState()
 	logger.Info.Printf("审计回退 [%s] 已提交 %s → %s", e.Torrent, e.New, e.Old)
+	m.notifyEvent("QBHive 已回退改名",
+		fmt.Sprintf("任务「%s」的文件已从 %s 回退为 %s", e.Torrent, e.New, e.Old))
 	return nil
 }
 

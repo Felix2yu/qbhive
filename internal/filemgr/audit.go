@@ -36,6 +36,10 @@ const (
 // auditViaPrune 审计记录 via 字段取值：后处理按大小清理（区别于正则 / AI 改名）
 const auditViaPrune = "prune"
 
+// auditViaLocalMove 审计记录 via 字段取值：qB renameFile 失败后由本地移动完成的归档。
+// 移动完成后 qB 元数据已同步到新路径，因此这类记录同样可以回退。
+const auditViaLocalMove = "local-move"
+
 type auditEntry struct {
 	ID      string `json:"id"`
 	TS      int64  `json:"ts"`

@@ -245,7 +245,7 @@ func (m *Manager) ApplyBatchRename(hash, template string) (int, error) {
 	if len(plan) == 0 {
 		return 0, nil
 	}
-	committed := m.applyRenames(hash, plan)
+	committed := m.applyRenames(hash, plan, isPausedState(tor.State))
 	if len(committed) == 0 {
 		return 0, fmt.Errorf("renameFile 全部提交失败，详见服务日志")
 	}
@@ -272,5 +272,9 @@ func (m *Manager) ApplyBatchRename(hash, template string) (int, error) {
 	m.mu.Unlock()
 	m.saveCleanState()
 	logger.Info.Printf("批量重命名 [%s] 已提交 %d/%d 条（模板：%s）", tor.Name, len(committed), len(plan), template)
+	// 批量改名动辄几十个文件，完成后给一条汇总通知，用户不必回页面确认
+	m.notifyEvent("QBHive 批量重命名已提交",
+		fmt.Sprintf("任务「%s」按模板 %s 重命名 %d/%d 个文件（异步落地，可在文件名审计里回退）",
+			tor.Name, template, len(committed), len(plan)))
 	return len(committed), nil
 }

@@ -167,6 +167,10 @@ func newMockQB() *mockQB {
 				}
 			}
 			m.adds = append(m.adds, rec)
+			// 模拟 qB 把新任务登记进列表：新增项的 hash 与已有项不同，
+			// 让「按 hash 差集定位新增任务」的限速逻辑能在测试里命中
+			m.infoJSON = fmt.Sprintf(`[{"hash":"abc123","name":"t","state":"stoppedDL","added_on":100},`+
+				`{"hash":"new-%d","name":"new","state":"stoppedDL","added_on":200}]`, len(m.adds))
 			_, _ = io.WriteString(w, "Ok.")
 		case "/api/v2/torrents/info":
 			_, _ = io.WriteString(w, m.infoJSON)

@@ -149,15 +149,15 @@ func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 第一轮：stop → renameFile → start，提交移动
+	// 第一轮：stop → renameFile 提交移动。
+	// 任务处于 stoppedUP（用户暂停态），归档后必须保持暂停，不得 start
 	m.scan()
 
 	// 调用序列与 rename 参数
-	if len(*calls) != 3 ||
+	if len(*calls) != 2 ||
 		!strings.HasPrefix((*calls)[0], "stop:") ||
-		!strings.HasPrefix((*calls)[1], "renameFile:h1:Movie.mkv/video.mkv->video.mkv") ||
-		!strings.HasPrefix((*calls)[2], "start:") {
-		t.Fatalf("expected stop + renameFile(Movie.mkv/video.mkv->video.mkv) + start, got: %v", *calls)
+		!strings.HasPrefix((*calls)[1], "renameFile:h1:Movie.mkv/video.mkv->video.mkv") {
+		t.Fatalf("expected stop + renameFile(Movie.mkv/video.mkv->video.mkv)，stoppedUP 任务不应被启动, got: %v", *calls)
 	}
 	// 关键回归：qB renameFile 的磁盘移动是异步的，此时目录必须保留、
 	// 文件绝不能被删（此前提交后立即 RemoveAll 会删掉尚未移走的文件）
@@ -181,11 +181,54 @@ func TestManager_handleCompleted_RealDirFlatFiles(t *testing.T) {
 	if !m.done["h1"] {
 		t.Error("second scan should mark done after cleanup")
 	}
-	if len(*calls) != 3 {
+	if len(*calls) != 2 {
 		t.Errorf("second scan should not call qB again, got: %v", *calls)
 	}
 	if _, err := os.Stat(filepath.Join(saveDir, "video.mkv")); err != nil {
 		t.Errorf("archived file must exist: %v", err)
+	}
+}
+
+// F7 回归：归档只在任务原本处于运行态时才恢复，绝不把用户主动暂停的任务拉起做种。
+// stoppedUP 通常来自「下载完成即暂停」的设置，擅自 start 等于覆盖用户意图。
+func TestManager_handleCompleted_RespectsPausedState(t *testing.T) {
+	cases := []struct {
+		state     string
+		wantStart bool
+	}{
+		{"stoppedUP", false},  // 已完成且暂停：保持暂停
+		{"uploading", true},   // 正在做种：要恢复
+		{"stalledUP", true},   // 做种停滞：仍在运行队列，要恢复
+		{"forcedUP", true},    // 强制做种：要恢复
+		{"queuedUP", true},    // 排队做种：要恢复
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			m, calls, srv, saveDir := setupFilemgr(t,
+				`[{"hash":"h1","name":"Movie.mkv","state":"`+tc.state+`","progress":1.0,"save_path":"{SAVE}"}]`)
+			defer srv.Close()
+
+			torrentDir := filepath.Join(saveDir, "Movie.mkv")
+			if err := os.MkdirAll(torrentDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(torrentDir, "video.mkv"), []byte("fake"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			m.scan()
+
+			started := false
+			for _, c := range *calls {
+				if strings.HasPrefix(c, "start:") {
+					started = true
+				}
+			}
+			if started != tc.wantStart {
+				t.Fatalf("state=%s 的 start 调用不符：got started=%v want %v, calls=%v",
+					tc.state, started, tc.wantStart, *calls)
+			}
+		})
 	}
 }
 
@@ -315,7 +358,8 @@ func TestManager_contentPath_DirDiffersFromName(t *testing.T) {
 	m.scan()
 
 	// rename 的内部路径按 content_path 相对 save_path 推导，而非任务名
-	if len(*calls) != 3 || !strings.HasPrefix((*calls)[1], "renameFile:h1:ActualDir/video.mkv->video.mkv") {
+	// stoppedUP 保持暂停：只有 stop + renameFile 两条调用
+	if len(*calls) != 2 || !strings.HasPrefix((*calls)[1], "renameFile:h1:ActualDir/video.mkv->video.mkv") {
 		t.Fatalf("rename should use content_path relative dir, got: %v", *calls)
 	}
 	if m.done["h1"] {
