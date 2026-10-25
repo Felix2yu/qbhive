@@ -297,29 +297,14 @@ function validateConfigJS(cfg) {
       if (feed.url && feed.url.trim() && !feed.url.trim().startsWith("http")) {
         return `RSS 订阅源 "${feed.name || feed.url}" 的 URL 必须以 http 开头`;
       }
-      for (const r of (feed.rules || [])) {
-        if (r.mode === "regex") {
-          if (r.include && r.include.trim()) {
-            try { new RegExp(r.include); } catch (e) {
-              return `订阅源 ${feed.name || ""} / 规则 ${r.name || ""} 的 include 正则无效: ${e.message}`;
-            }
-          }
-          if (r.exclude && r.exclude.trim()) {
-            try { new RegExp(r.exclude); } catch (e) {
-              return `订阅源 ${feed.name || ""} / 规则 ${r.name || ""} 的 exclude 正则无效: ${e.message}`;
-            }
-          }
-        }
-      }
+      // 正则语法一律交给后端校验：规则按 Go/RE2 语法编写（例如 (?i) 内联标志），
+      // 浏览器 RegExp 不认这类写法，在这里拦截会把合法规则误判成"正则无效"。
+      // 后端 validateConfig 用 regexp.Compile 编译，非法时保存请求返回具体原因。
     }
   }
   // Limiter rules
   for (const r of ((c.limiter && c.limiter.rules) || [])) {
-    if (r.match && r.match.trim()) {
-      try { new RegExp(r.match); } catch (e) {
-        return `限速规则 "${r.name || ""}" 的 match 正则无效: ${e.message}`;
-      }
-    }
+    // match 正则的语法校验同样交给后端 regexp.Compile（支持 (?i) 等 RE2 写法）
     if ((r.ratioTarget || 0) > 0 && !(r.uploadLimit > 0)) {
       return `限速规则 "${r.name || ""}" 启用了比率目标，上传限速基准必须大于 0：不限速没有可压降的基准值`;
     }
@@ -331,12 +316,10 @@ function validateConfigJS(cfg) {
     if (rules.length > 32) return "文件名清理自定义规则不能超过 32 条";
     for (let i = 0; i < rules.length; i++) {
       if ((rules[i] || "").length > 256) return `文件名清理规则 ${i + 1} 长度超过 256 字符`;
-      if ((rules[i] || "").trim()) {
-        try { new RegExp(rules[i]); } catch (e) {
-          return `文件名清理规则 ${i + 1} 正则无效: ${e.message}`;
-        }
-      }
     }
+    // 正则语法不在这里校验：清理规则用 Go/RE2 语法，(?i) 等内联标志浏览器
+    // RegExp 不认，前端拦截会把合法规则误判成"正则无效"。后端
+    // validateConfig 用 regexp.Compile 编译，非法时保存请求返回具体原因。
     const pp = fm.postProcess || {};
     if (pp.enabled) {
       if (!((pp.command || "").trim())) return "后处理已启用，请填写要执行的命令";
