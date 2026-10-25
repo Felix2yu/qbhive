@@ -1407,7 +1407,7 @@ async function renderSettings(root) {
           "自动移除站点域名水印与 emoji 装饰，通过 qB 重命名接口执行，不影响做种。")}
         ${field("自定义正则",
           `<textarea id="fm-clean-rules" class="ctrl mono" placeholder="每行一个正则（Go/RE2 语法），匹配内容会被移除，例如：&#10;^【[^】]*】\\s*&#10;\\s*-\\s*4KHDR.*$">${escapeHTML((cfg.fileManager.cleanRules || []).join("\n"))}</textarea>`,
-          "内置规则已覆盖 <code>www.xxx.com - </code> 前缀、<code>[xxx.com]</code> / <code>【xxx.com】</code> 括号、<code>@xxx.com</code> 后缀等常见水印；自定义规则在内置规则之后执行。清洗保证保留扩展名、结果非空、不含非法字符，所有改动记录在「文件」页并可回退。")}
+          "内置规则已覆盖 <code>www.xxx.com - </code> 前缀、<code>[xxx.com]</code> / <code>【xxx.com】</code> 括号、<code>@xxx.com</code> 后缀、<code>www.xxx.com@@</code> 这类域名带 @ 尾巴的水印；自定义规则在内置规则之后执行。清洗保证保留扩展名、结果非空、不含非法字符，所有改动记录在「文件」页并可回退。")}
       </div>
 
       <div class="section">

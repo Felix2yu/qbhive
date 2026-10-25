@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Felix2yu/qbhive/internal/logger"
 	"github.com/Felix2yu/qbhive/internal/models"
@@ -105,7 +106,30 @@ func validateDomainCandidate(m string, strict bool) bool {
 
 // ---- 内置默认清洗模式 ----
 // 作用于去掉扩展名后的 base；前两条位置锚定（前缀）用宽松校验，
-// 后三条（后缀/独立 token）用严格校验，全部为「替换为空串」语义。
+// 其余（后缀/独立 token/域名+@ 尾巴）用严格校验，全部为「替换为空串」语义。
+
+// sepChars 清洗时视为「域名边界」的分隔与包裹字符集合
+const sepChars = "._-–—~@＠[]（）()【】「」 \t"
+
+// sepPrefix 返回 s 开头连续分隔符的字节长度，以及这段前缀是否仅由 . 和 - 组成。
+// 后者为真说明匹配起点落在域名 token 内部（如 "xyz.a.b.com" 命中 ".b.com"），
+// 整段不能删，否则会把一个完整 token 削成残段。
+func sepPrefix(s string) (int, bool) {
+	n, onlyDotDash := 0, true
+	for _, r := range s {
+		if !strings.ContainsRune(sepChars, r) {
+			break
+		}
+		if r != '.' && r != '-' {
+			onlyDotDash = false
+		}
+		n += utf8.RuneLen(r)
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return n, onlyDotDash
+}
 
 var defaultCleanPatterns = []*regexp.Regexp{
 	// 1) 前缀 "www.example.com - " / "example.com - " / "https://a.com — "
@@ -113,52 +137,32 @@ var defaultCleanPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)^\s*(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*[-–—~·:：]\s*`),
 	// 2) 前缀括号包裹 "[example.com] " / "【example.com】" / "(www.example.com) "
 	regexp.MustCompile(`(?i)^\s*[\[（(【「]\s*(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*[\]）)】」]\s*`),
-	// 3) 后缀 " - example.com" / ".example.com" / "@example.com" / "＠example.com"
-	regexp.MustCompile(`(?i)[\s._\-–—~@＠]+(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*$`),
+	// 3) 后缀 " - example.com" / ".example.com" / "@example.com" / "example.com@@"：
+	//    域名后可跟一串 @/＠（下载站水印常见形态，如 "www.98T.la@@"）
+	regexp.MustCompile(`(?i)[\s._\-–—~@＠]+(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[@＠]*\s*$`),
 	// 4) 后缀括号包裹 " [example.com]" / "【example.com】"
 	regexp.MustCompile(`(?i)\s*[\[（(【「]\s*(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*[\]）)】」]\s*$`),
-	// 5) 独立域名 token（处理 "www.a.com.b.com Movie" 等连写残留）：
-	//    分隔符边界上的完整域名，须严格校验（www. 前缀或白名单 TLD）
-	regexp.MustCompile(`(?:^|[\s._\-–—~@＠\[\]（）()【】「」])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+){1,3}(?:$|[\s\-–—~@＠])`),
+	// 5) 任意位置的「域名 + @ 尾巴」："某视频 489155.com@ 1080p"、"www.98T.la@@ 剧名"。
+	//    以 @ 结尾天然有右边界，故不吃后置分隔符，避免把两侧文字粘成 "某视频1080p"；
+	//    末尾可选吞一个右括号，处理 "[www.98T.la@@]" 这类包裹形态（否则残留 "]"）。
+	//    必须排在模式 6 之前：模式 6 的尾部边界会把一个 @ 吞进匹配，留下孤零零的 "@"。
+	regexp.MustCompile(`(?i)(?:^|[\s._\-–—~@＠\[\]（）()【】「」])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[@＠]+[\]）)】」]?`),
+	// 6) 独立域名 token（处理 "www.a.com.b.com Movie" 等连写残留）：
+	//    分隔符边界上的完整域名，须严格校验（www. 前缀或白名单 TLD）。
+	//    必须带 (?i)：大小写混合域名（"98T.la"）否则匹配不上。
+	regexp.MustCompile(`(?i)(?:^|[\s._\-–—~@＠\[\]（）()【】「」])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+){1,3}(?:$|[\s\-–—~@＠])`),
 }
 
-// replaceWithBoundary 带前置边界校验的替换：拒绝在域名/单词 token 内部开始的
-// 匹配（前置字符为字母数字或点时作废），避免 "www.example.com" 类完整 token
-// 被削成残段。
-func replaceWithBoundary(re *regexp.Regexp, s string, strict bool) string {
-	locs := re.FindAllStringIndex(s, -1)
-	if len(locs) == 0 {
-		return s
-	}
-	var b strings.Builder
-	last := 0
-	for _, loc := range locs {
-		if loc[0] > 0 {
-			prev := s[loc[0]-1]
-			isBoundary := prev == ' ' || prev == '\t' || strings.ContainsRune("_–—~@＠[]（）()【】「」", rune(prev))
-			if !isBoundary {
-				continue // token 内部匹配，作废
-			}
-		}
-		m := s[loc[0]:loc[1]]
-		if !validateDomainCandidate(m, strict) {
-			continue
-		}
-		b.WriteString(s[last:loc[0]])
-		last = loc[1]
-	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
-}
-
-// replaceSuffixToken 模式 3（后缀）专用替换。边界判定不看前置字符（前置是
-// 单词字符属正常场景，如 "Movie - site.com"），而是看匹配开头连续分隔符
-// 是否仅由 "."/"-" 组成——那是域名 token 的内部字符，命中则作废，
-// 避免 "www.example.com" 被削成 "www"。
-func replaceSuffixToken(re *regexp.Regexp, s string, strict bool) string {
+// replaceDomainToken 供「后缀模式」「独立 token 模式」「域名+@ 尾巴模式」共用。
+// 这几类模式的匹配都可能从域名 token 内部开始（"www.example.com" 命中成
+// ".example.com"、"xyz.a.b.com" 命中成 ".b.com"），因此不按前一个字符判边界，
+// 而是看匹配开头连续分隔符的构成：仅由 . / - 组成即为 token 内部，整条作废；
+// 否则（含空格、@、括号等真实边界分隔符）放行。
+//
+// 旧实现里 replaceWithBoundary 额外检查 s[loc[0]-1] 是否为边界，与模式自身
+// 已把前置分隔符吃进匹配的事实重复，导致 "某视频 489155.com@ 1080p" 这类
+// 单空格前缀的 token 一律被判无效——这是域名+@ 水印清不掉的第二个原因。
+func replaceDomainToken(re *regexp.Regexp, s string, strict bool) string {
 	locs := re.FindAllStringIndex(s, -1)
 	if len(locs) == 0 {
 		return s
@@ -167,20 +171,13 @@ func replaceSuffixToken(re *regexp.Regexp, s string, strict bool) string {
 	last := 0
 	for _, loc := range locs {
 		m := s[loc[0]:loc[1]]
-		i := 0
-		for i < len(m) && strings.ContainsRune(".-_ –—~@＠", rune(m[i])) {
-			i++
-		}
-		// 开头分隔符仅由点/连字符组成 → 域名 token 内部匹配，作废
-		tokenInternal := i > 0
-		for _, r := range m[:i] {
-			if r != '.' && r != '-' {
-				tokenInternal = false
-				break
+		if _, tokenInternal := sepPrefix(m); tokenInternal {
+			// 例外：域名候选自带 www. 前缀（如 ".www.98T.la@@" 命中 ".www.98T.la@@"）
+			// 说明前面的点只是水印分隔符，域名起点在 www.，删掉不会留下残段。
+			// 而 "www.example.com" 被命中成 ".example.com" 时候选不带 www.，仍须作废。
+			if !strings.HasPrefix(strings.ToLower(domainCandidateRe.FindString(m)), "www.") {
+				continue
 			}
-		}
-		if tokenInternal {
-			continue
 		}
 		if !validateDomainCandidate(m, strict) {
 			continue
@@ -244,7 +241,7 @@ func stripDecor(s string) string {
 var kaomojiGroupRe = regexp.MustCompile(
 	`[\[（(【「][^\[\]（）()【】「」\w\x{3040}-\x{30ff}\x{3130}-\x{318f}\x{3400}-\x{4dbf}\x{4e00}-\x{9fff}\x{f900}-\x{faff}\x{ac00}-\x{d7af}\x{ff10}-\x{ff19}\x{ff21}-\x{ff3a}\x{ff41}-\x{ff5a}]{1,32}[\]）)】」]`)
 
-// cleanBase 对单个 base 名执行清洗：内置模式（前两条宽松、后三条严格）→
+// cleanBase 对单个 base 名执行清洗：内置模式（前两条宽松、其余严格）→
 // 自定义正则 → 颜文字括号组 → emoji/装饰符号 → 循环至稳定（最多 5 轮），
 // 处理 "[a.com] [b.com] Movie" 叠加场景
 func cleanBase(base string, custom []*regexp.Regexp) string {
@@ -252,15 +249,12 @@ func cleanBase(base string, custom []*regexp.Regexp) string {
 	for round := 0; round < 5; round++ {
 		next := cur
 		for i, re := range defaultCleanPatterns {
-			strict := i >= 2 // 模式 3/4/5 无位置锚定，须严格 TLD 校验
+			strict := i >= 2 // 模式 3 起无位置锚定，须严格 TLD 校验
 			switch i {
-			case 2:
-				// 模式 3 的分隔符类含 "." 与 "-"（域名 token 内部字符），
-				// 边界判定须看开头分隔符构成而非前置字符
-				next = replaceSuffixToken(re, next, strict)
-			case 4:
-				// 模式 5 前置边界看前一个字符
-				next = replaceWithBoundary(re, next, strict)
+			case 2, 4, 5:
+				// 后缀 / 独立 token / 域名+@ 尾巴：三类都可能从域名 token 内部开始匹配，
+				// 边界判定统一看「匹配开头的分隔符构成」
+				next = replaceDomainToken(re, next, strict)
 			default:
 				next = re.ReplaceAllStringFunc(next, func(m string) string {
 					if !validateDomainCandidate(m, strict) {
