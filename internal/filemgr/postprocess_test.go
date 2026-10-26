@@ -345,6 +345,64 @@ func TestHandlePostProcess_SkipByCategoryTag(t *testing.T) {
 	}
 }
 
+// 转码必须等文件名清理收敛：清理未 Done 时派发，外部工具会按改名前的脏名写出产物，
+// 而产物不在 qB 的文件列表里（清理只遍历 /torrents/files），之后再也没人洗得掉它。
+// 清理卡住也不能让转码永久停摆：到 postCleanMaxWaits 就放行，且只告警一次。
+func TestHandlePostProcess_WaitsForCleanSettled(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "www.a.com clip.mov"), "x")
+	m := setupPostProcess(t, models.PostProcessConfig{
+		Enabled: true, Command: "true", Extensions: "mov",
+	}, qbFiles("www.a.com clip.mov"))
+	cfg := m.cfg.Get()
+	cfg.FileManager.CleanEnabled = true
+	m.cfg.Set(cfg)
+	m.cleanState["h"] = &cleanRecord{Done: false}
+	tor := models.QBTorrent{Name: "n", Hash: "h", SavePath: dir}
+
+	for round := 1; round < postCleanMaxWaits; round++ {
+		done, retry := m.handlePostProcess(tor)
+		if done || !retry {
+			t.Fatalf("第 %d 轮清理未收敛应让路（done=false, retry=true），got (%v, %v)", round, done, retry)
+		}
+		if rec := m.cleanState["h"]; len(rec.PostDispatched) != 0 || rec.PostCleanWarned {
+			t.Fatalf("第 %d 轮不该派发也不该告警，got %+v", round, rec)
+		}
+	}
+
+	// 到上限：放行派发（产物可能带脏名），并把告警标记落下
+	if done, _ := m.handlePostProcess(tor); done {
+		t.Error("放行后本轮应仍在派发队列（done=false）")
+	}
+	if rec := m.cleanState["h"]; len(rec.PostDispatched) != 1 || !rec.PostCleanWarned {
+		t.Fatalf("到上限后应照常派发并记下告警，got %+v", rec)
+	}
+}
+
+// 清理已收敛时必须第一轮就派发：新闸门不能给正常路径多垫一轮延迟
+func TestHandlePostProcess_DispatchesWhenCleanSettled(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "clip.mov"), "x")
+	m := setupPostProcess(t, models.PostProcessConfig{
+		Enabled: true, Command: "true", Extensions: "mov",
+	}, qbFiles("clip.mov"))
+	cfg := m.cfg.Get()
+	cfg.FileManager.CleanEnabled = true
+	m.cfg.Set(cfg)
+	m.cleanState["h"] = &cleanRecord{Done: true}
+
+	if done, _ := m.handlePostProcess(models.QBTorrent{Name: "n", Hash: "h", SavePath: dir}); done {
+		t.Error("派发后本轮不该终结任务")
+	}
+	rec := m.cleanState["h"]
+	if len(rec.PostDispatched) != 1 {
+		t.Fatalf("清理已收敛应立刻派发，got %+v", rec)
+	}
+	if rec.PostCleanWaits != 0 {
+		t.Errorf("收敛时不该累计让路轮数，got %d", rec.PostCleanWaits)
+	}
+}
+
 // 正常转码完成的任务不受「改了过滤名单」影响：不该被重新拖回转码
 func TestHandlePostProcess_FilterChangeKeepsSettledTasksSettled(t *testing.T) {
 	dir := t.TempDir()

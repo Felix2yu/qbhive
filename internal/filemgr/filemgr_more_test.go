@@ -914,6 +914,95 @@ func TestManager_handleClean_MissingFilesSkips(t *testing.T) {
 	}
 }
 
+// 回归：qB 的 renameFile 落地是异步的，而 handleClean 的文件列表快照在轮首抓取。
+// 上一轮刚提交的旧路径可能还留在下一轮快照里，于是同一个 old→new 会被再算出来一次。
+// 不去重的后果不止是重复审计：每条副本各自累加 Attempts，三条同名就能一起撞满
+// 「连续 3 轮未确认落地 → 放弃重命名」，把本来还能落地的改名白白放弃掉。
+func TestManager_handleClean_PendingRenameNotResubmitted(t *testing.T) {
+	env := newFilemgrEnv(t, true, 15, "")
+	save := env.saveDir
+	touchCleanSource(t, save, "www.a.com Movie.mkv")
+	// 钉死文件列表：改名提交后旧路径仍照实报出，模拟 qB 内部路径尚未更新
+	env.setFiles(`[{"name":"www.a.com Movie.mkv","size":1,"progress":1.0}]`)
+
+	t1 := models.QBTorrent{Hash: testHash, Name: "n", State: "stoppedUP", SavePath: save, Progress: 1.0}
+	env.m.handleClean(t1)
+	if n := env.callCount("renameFile"); n != 1 {
+		t.Fatalf("首轮应提交 1 条改名，got %d: %v", n, env.calls())
+	}
+
+	for round := 2; round <= 3; round++ {
+		env.m.handleClean(t1)
+		if n := env.callCount("renameFile"); n != 1 {
+			t.Fatalf("第 %d 轮重复提交了在途改名: %v", round, env.calls())
+		}
+	}
+
+	rec := env.m.cleanState[testHash]
+	if rec == nil || len(rec.Pending) != 1 {
+		t.Fatalf("Pending 应只保留 1 条在途改名，got %+v", rec)
+	}
+	if rec.Pending[0].Attempts != 2 {
+		t.Errorf("未落地的改名每轮只累加一次 Attempts，got %d, want 2", rec.Pending[0].Attempts)
+	}
+	if _, total := env.m.audit.List(0, 50); total != 1 {
+		t.Errorf("审计只应有 1 条改名记录，got %d", total)
+	}
+
+	// 第 4 轮到「连续 3 轮未落地」上限：条目被放弃、Pending 清空，计划才能重新提交
+	// （去重不能把任务永久钉死）。重新提交后应重新开始计数。
+	env.m.handleClean(t1)
+	if n := env.callCount("renameFile"); n != 2 {
+		t.Fatalf("放弃后第 4 轮应重新提交一次改名，got %d: %v", n, env.calls())
+	}
+	rec = env.m.cleanState[testHash]
+	if rec == nil || len(rec.Pending) != 1 || rec.Pending[0].Attempts != 0 {
+		t.Fatalf("重新提交后应有一条全新的在途记录，got %+v", rec)
+	}
+}
+
+// 正在转码的文件不能被清理改名：派发给 shell 的是路径快照，清理此时把源文件搬走，
+// 外部工具会按旧名写出产物，postPrune 的源片配对也随之中断（源片和产物都留在磁盘上）。
+func TestManager_handleClean_FreezesInFlightTranscodePaths(t *testing.T) {
+	env := newFilemgrEnv(t, true, 15, "")
+	save := env.saveDir
+	touchCleanSource(t, save, "www.a.com Movie.mkv")
+	env.setFiles(`[{"name":"www.a.com Movie.mkv","size":1,"progress":1.0}]`)
+	env.m.cleanState[testHash] = &cleanRecord{
+		PostDispatched: []string{filepath.Join(save, "www.a.com Movie.mkv")},
+	}
+	tor := models.QBTorrent{Hash: testHash, Name: "n", State: "stoppedUP", SavePath: save, Progress: 1.0}
+
+	env.m.handleClean(tor)
+	if n := env.callCount("renameFile"); n != 0 {
+		t.Fatalf("转码在途的文件不该被改名: %v", env.calls())
+	}
+	if rec := env.m.cleanState[testHash]; rec.Done {
+		t.Fatal("有改名让给转码时，绝不能据此判定清理完成")
+	}
+
+	// 转码终结后恢复清洗
+	env.m.cleanState[testHash].PostDone = true
+	env.m.handleClean(tor)
+	if n := env.callCount("renameFile"); n != 1 {
+		t.Fatalf("转码终结后应恢复清洗: %v", env.calls())
+	}
+}
+
+// 清理收敛时必须清零「转码让路」的计数与告警标记，否则下一次未收敛不会重新计时、也不再告警
+func TestManager_handleClean_ResetsPostCleanWaitOnSettle(t *testing.T) {
+	env := newFilemgrEnv(t, true, 15, "")
+	env.setFiles(`[]`)
+	env.m.cleanState[testHash] = &cleanRecord{PostCleanWaits: 5, PostCleanWarned: true}
+
+	env.m.handleClean(models.QBTorrent{Hash: testHash, Name: "n", State: "stoppedUP", SavePath: env.saveDir, Progress: 1.0})
+
+	rec := env.m.cleanState[testHash]
+	if !rec.Done || rec.PostCleanWaits != 0 || rec.PostCleanWarned {
+		t.Fatalf("收敛后应清零转码让路计数，got %+v", rec)
+	}
+}
+
 // ==================== F2：清理规则指纹 ====================
 
 // F2 回归：清理规则一变，此前判定 Done 的历史任务必须重新评估。
