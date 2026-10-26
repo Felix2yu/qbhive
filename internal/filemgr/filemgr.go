@@ -96,6 +96,11 @@ type cleanRecord struct {
 	// 用户先过滤错、之后放宽名单时，历史任务能补转，不用手改状态文件。
 	// 正常转码完成的任务这里为空，改名单不会把它们重新拖回转码。
 	PostFilterList string `json:"postFilterList,omitempty"`
+	// PostCleanWaits 转码因「文件名清理未收敛」而让路的累计轮数。到 postCleanMaxWaits
+	// 就放行并告警一次：清理卡住不能让转码永久停摆。清理一旦收敛即清零。
+	PostCleanWaits int `json:"postCleanWaits,omitempty"`
+	// PostCleanWarned 已就「清理未收敛仍派发转码」告警过，避免每轮刷通知
+	PostCleanWarned bool `json:"postCleanWarned,omitempty"`
 }
 
 const cleanStateFile = "filemgr_clean.json"
@@ -813,10 +818,57 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 
 	// 4) 构建清洗计划（bottom-up 排序 + 计划内去重 + 磁盘冲突兜底，绝不覆盖）
 	plan := buildCleanPlan(files, m.rulesCache, aiNames, t.SavePath, t.Hash)
+	// 已在途的改名不重复提交：files 是本轮开头抓的快照，而 qB 的 renameFile 落地是异步的，
+	// 上一轮提交的路径可能还留在这一轮的快照里 → 同一条 old→new 会被再算出来一次，
+	// 既写重复审计，又让每个副本各自累加 Attempts（三条同名就能撞满「3 轮未落地即放弃」）。
+	//
+	// 同时冻结正在转码的路径：派发给 shell 的是路径快照，清理此时把源文件搬走，
+	// 外部工具会按旧名写出产物，postPrune 的源片配对也随之中断（源片和产物都留在磁盘上）。
+	// 只冻结在途的那几条路径，其余文件照常清洗，避免一个长转码冻住整个任务。
+	frozenOut := 0
+	m.mu.Lock()
+	if len(plan) > 0 {
+		var pendingOld map[string]bool
+		if len(rec.Pending) > 0 {
+			pendingOld = make(map[string]bool, len(rec.Pending))
+			for _, p := range rec.Pending {
+				pendingOld[p.Old] = true
+			}
+		}
+		var inFlight map[string]bool
+		if len(rec.PostDispatched) > 0 && !rec.PostDone {
+			inFlight = make(map[string]bool, len(rec.PostDispatched))
+			for _, p := range rec.PostDispatched {
+				inFlight[p] = true
+			}
+		}
+		if pendingOld != nil || inFlight != nil {
+			kept := plan[:0]
+			for _, r := range plan {
+				if pendingOld[r.Old] {
+					continue
+				}
+				if inFlight[filepath.Join(t.SavePath, filepath.FromSlash(r.Old))] ||
+					inFlight[filepath.Join(t.SavePath, filepath.FromSlash(r.New))] {
+					frozenOut++
+					continue
+				}
+				kept = append(kept, r)
+			}
+			plan = kept
+		}
+	}
+	m.mu.Unlock()
+	if frozenOut > 0 {
+		logger.Debug.Printf("文件清理 [%s] 让路 %d 条改名：目标文件正在转码", t.Name, frozenOut)
+	}
 	if len(plan) == 0 {
 		m.mu.Lock()
-		if len(rec.Pending) == 0 && !aiPending {
+		// frozenOut > 0 说明本轮有活没干（让给转码），绝不能据此判定 Done
+		if len(rec.Pending) == 0 && !aiPending && frozenOut == 0 {
 			rec.Done = true
+			rec.PostCleanWaits = 0
+			rec.PostCleanWarned = false
 			m.mu.Unlock()
 			logger.Info.Printf("文件清理 [%s] 已完成（无待清理项）", t.Name)
 			m.saveCleanState()

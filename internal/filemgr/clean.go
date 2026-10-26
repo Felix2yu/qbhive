@@ -111,6 +111,17 @@ func validateDomainCandidate(m string, strict bool) bool {
 // sepChars 清洗时视为「域名边界」的分隔与包裹字符集合
 const sepChars = "._-–—~@＠[]（）()【】「」 \t"
 
+// isSepText 边界捕获组的内容是否只是分隔符（可随域名一起吃掉）。
+// 空串（^ / $ 零宽锚点）算分隔符；单个非分隔 rune——中文、全角标点——必须原样保留，
+// 否则 "最新地址489155.com" 会连 "址" 一起删掉。
+func isSepText(s string) bool {
+	if s == "" {
+		return true
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	return size == len(s) && strings.ContainsRune(sepChars, r)
+}
+
 // sepPrefix 返回 s 开头连续分隔符的字节长度，以及这段前缀是否仅由 . 和 - 组成。
 // 后者为真说明匹配起点落在域名 token 内部（如 "xyz.a.b.com" 命中 ".b.com"），
 // 整段不能删，否则会把一个完整 token 削成残段。
@@ -134,7 +145,7 @@ func sepPrefix(s string) (int, bool) {
 // cleanBuiltinVersion 内置清洗模式的版本号。
 // 增删改 defaultCleanPatterns 中任意一条都必须 +1：它是清理规则指纹的一部分，
 // 版本变化会让此前判定「已清理完成」的历史任务重新评估一轮。
-const cleanBuiltinVersion = 1
+const cleanBuiltinVersion = 2
 
 var defaultCleanPatterns = []*regexp.Regexp{
 	// 1) 前缀 "www.example.com - " / "example.com - " / "https://a.com — "
@@ -151,11 +162,17 @@ var defaultCleanPatterns = []*regexp.Regexp{
 	//    以 @ 结尾天然有右边界，故不吃后置分隔符，避免把两侧文字粘成 "某视频1080p"；
 	//    末尾可选吞一个右括号，处理 "[www.98T.la@@]" 这类包裹形态（否则残留 "]"）。
 	//    必须排在模式 6 之前：模式 6 的尾部边界会把一个 @ 吞进匹配，留下孤零零的 "@"。
-	regexp.MustCompile(`(?i)(?:^|[\s._\-–—~@＠\[\]（）()【】「」])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[@＠]+[\]）)】」]?`),
+	//    左边界放进捕获组 (1) 并放开到「任意非 ASCII 字母数字」：水印常写成
+	//    "最新位址：489155.com@"，全角冒号既不在旧分隔符类里、也不是 RE2 的 \s（只含 ASCII），
+	//    锚点落不上就整条不命中。捕获文本是吞还是留，统一由 replaceDomainToken 判。
+	regexp.MustCompile(`(?i)(^|[^0-9A-Za-z])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[@＠]+[\]）)】」]?`),
 	// 6) 独立域名 token（处理 "www.a.com.b.com Movie" 等连写残留）：
-	//    分隔符边界上的完整域名，须严格校验（www. 前缀或白名单 TLD）。
-	//    必须带 (?i)：大小写混合域名（"98T.la"）否则匹配不上。
-	regexp.MustCompile(`(?i)(?:^|[\s._\-–—~@＠\[\]（）()【】「」])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+){1,3}(?:$|[\s\-–—~@＠])`),
+	//    完整域名，须严格校验（www. 前缀或白名单 TLD）。必须带 (?i)：大小写混合域名
+	//    （"98T.la"）否则匹配不上。
+	//    左右边界都放开到「任意非 ASCII 字母数字」并捕获为 (1)(2)：紧贴中文的形态
+	//    （"取：489155.com 收藏"、"489155.com收藏不迷路"）此前一律认不出。代价是边界
+	//    可能是中文，匹配文本必须按原样写回，否则删域名会连邻字一起吃掉。
+	regexp.MustCompile(`(?i)(^|[^0-9A-Za-z])(?:https?://)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+){1,3}([^0-9A-Za-z]|$)`),
 }
 
 // replaceDomainToken 供「后缀模式」「独立 token 模式」「域名+@ 尾巴模式」共用。
@@ -164,17 +181,21 @@ var defaultCleanPatterns = []*regexp.Regexp{
 // 而是看匹配开头连续分隔符的构成：仅由 . / - 组成即为 token 内部，整条作废；
 // 否则（含空格、@、括号等真实边界分隔符）放行。
 //
+// 边界类放开到「任意非 ASCII 字母数字」之后，捕获组 (1)/(2) 里的文本可能是中文或全角
+// 标点，只有分隔符才允许随域名一起删——否则 "最新地址489155.com" 会连 "址" 一起吃掉。
+//
 // 旧实现里 replaceWithBoundary 额外检查 s[loc[0]-1] 是否为边界，与模式自身
 // 已把前置分隔符吃进匹配的事实重复，导致 "某视频 489155.com@ 1080p" 这类
 // 单空格前缀的 token 一律被判无效——这是域名+@ 水印清不掉的第二个原因。
 func replaceDomainToken(re *regexp.Regexp, s string, strict bool) string {
-	locs := re.FindAllStringIndex(s, -1)
-	if len(locs) == 0 {
+	subs := re.FindAllStringSubmatchIndex(s, -1)
+	if len(subs) == 0 {
 		return s
 	}
 	var b strings.Builder
 	last := 0
-	for _, loc := range locs {
+	for _, sub := range subs {
+		loc := sub[0:2]
 		m := s[loc[0]:loc[1]]
 		if _, tokenInternal := sepPrefix(m); tokenInternal {
 			// 例外：域名候选自带 www. 前缀（如 ".www.98T.la@@" 命中 ".www.98T.la@@"）
@@ -187,8 +208,20 @@ func replaceDomainToken(re *regexp.Regexp, s string, strict bool) string {
 		if !validateDomainCandidate(m, strict) {
 			continue
 		}
-		b.WriteString(s[last:loc[0]])
-		last = loc[1]
+		delStart, delEnd := loc[0], loc[1]
+		nGroups := (len(sub) - 2) / 2
+		if nGroups >= 1 {
+			if a, e := sub[2], sub[3]; a >= 0 && !isSepText(s[a:e]) {
+				delStart = e
+			}
+		}
+		if nGroups >= 2 {
+			if a, e := sub[len(sub)-2], sub[len(sub)-1]; a >= 0 && !isSepText(s[a:e]) {
+				delEnd = a
+			}
+		}
+		b.WriteString(s[last:delStart])
+		last = delEnd
 	}
 	if last == 0 {
 		return s
@@ -435,7 +468,9 @@ func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[
 		}
 		// 实体存在性护栏：qB 记录的文件在磁盘上并不存在（与存储脱钩的僵尸任务）时，
 		// renameFile 只会改内部元数据——文件永远洗不掉，还会阻碍日后重新校验找回，必须跳过。
+		// 跳过必须留痕：静默 continue 会让「文件名洗不掉」变成一行日志都查不到的悬案。
 		if _, err := os.Lstat(filepath.Join(savePath, filepath.FromSlash(oldFull))); err != nil {
+			logger.Debug.Printf("文件清洗：磁盘上找不到 %s（%v），跳过该文件", oldFull, err)
 			continue
 		}
 		// 计划内目标去重：同目标第二条起在文件段加 _hash8

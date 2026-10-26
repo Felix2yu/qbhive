@@ -33,6 +33,10 @@ const (
 	// postMaxWaits 白名单文件持续取不到时的最大等待轮数，超过就终结任务：
 	// qB 报出的路径长期不在磁盘上说明它不会再变好，留着只会每轮空转一次 API 调用
 	postMaxWaits = 20
+	// postCleanMaxWaits 转码因「文件名清理未收敛」让路的最大轮数。清理正常一两轮就确认
+	// 落地，连续这么多轮仍未 Done 说明它卡住了（改名反复失败/目标撞名）。
+	// 到点后放行并告警一次：清理故障不能让转码永久停摆，代价是产物可能沿用脏名。
+	postCleanMaxWaits = 8
 	// partialFileSuffix libtorrent 给未下完的文件加的尾缀，去掉它才是最终文件名
 	partialFileSuffix = ".!qB"
 	// postLogTailLines 命令输出写入日志的最大行数（避免转码工具刷屏）
@@ -280,6 +284,24 @@ func (m *Manager) handlePostProcess(t models.QBTorrent) (done bool, retry bool) 
 		m.markPostSettled(t.Hash)
 		return true, false
 	}
+	// 派发前等文件名清理收敛：转码拿到的是路径快照，产物名由外部工具按输入名生成。
+	// 清理还在重试/未确认落地时就派发，产物会带着改名前的脏名落盘——而产物不在 qB 的
+	// 文件列表里，清理只遍历 /torrents/files，之后再也没人洗得掉它。
+	// 先让路，最多 postCleanMaxWaits 轮；到点仍不收敛说明清理卡住了，放行并告警一次，
+	// 宁可产物带脏名也不能让转码永久停摆。
+	if m.cfg.Get().FileManager.CleanEnabled && !m.cleanSettled(t.Hash) {
+		if !m.postCleanWaitExhausted(t.Hash) {
+			logger.Debug.Printf("后处理 [%s] 文件名清理尚未收敛，转码让路（%d 个待派发）", t.Name, len(targets))
+			return false, true
+		}
+		if m.markPostCleanWarned(t.Hash) {
+			logger.Warn.Printf("后处理 [%s] 文件名清理连续 %d 轮未收敛，仍派发转码：产物可能沿用未清洗的文件名",
+				t.Name, postCleanMaxWaits)
+			m.notifyEvent("QBHive 转码前清理未收敛",
+				fmt.Sprintf("任务「%s」的文件名清理连续 %d 轮未完成，已照常派发转码。\n产物可能沿用未清洗的文件名，请查看服务日志里的清理记录。",
+					t.Name, postCleanMaxWaits))
+		}
+	}
 	// 全局串行闸门：转码吃满 CPU 与磁盘带宽，两条命令一起跑只会都变慢，
 	// 在 macOS 上还会互相抢同一个转码工具
 	if !m.tryAcquirePost() {
@@ -347,6 +369,46 @@ func (m *Manager) postWaitExhausted(hash string) bool {
 	}
 	rec.PostWaits++
 	return rec.PostWaits >= postMaxWaits
+}
+
+// cleanSettled 该任务的文件名清理是否已收敛（无待办且改名全部确认落地）。
+// 清理未开启时由调用方自行跳过这项判定——不清理就等于收敛。
+func (m *Manager) cleanSettled(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	return rec != nil && rec.Done
+}
+
+// postCleanWaitExhausted 「清理未收敛」的让路轮数 +1，返回是否已到放行上限
+func (m *Manager) postCleanWaitExhausted(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		rec = &cleanRecord{}
+		m.cleanState[hash] = rec
+	}
+	rec.PostCleanWaits++
+	m.postDirty = true
+	return rec.PostCleanWaits >= postCleanMaxWaits
+}
+
+// markPostCleanWarned 首次放行时返回 true，供调用方只告警/通知一次
+func (m *Manager) markPostCleanWarned(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		rec = &cleanRecord{}
+		m.cleanState[hash] = rec
+	}
+	if rec.PostCleanWarned {
+		return false
+	}
+	rec.PostCleanWarned = true
+	m.postDirty = true
+	return true
 }
 
 // tryAcquirePost / releasePost 全局串行闸门（一次只允许一条后处理命令在跑）。
