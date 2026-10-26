@@ -56,6 +56,9 @@ type Manager struct {
 	// postSkipped 本轮被分类/标签过滤挡掉的任务数（仅 scan goroutine 读写），
 	// 扫描结束时汇成一条 Info 日志，避免一次改动几百个任务时逐条刷屏
 	postSkipped int
+	// cleanAbandoned 本轮「磁盘上长期找不到实体、按脱钩放弃」的任务数（仅 scan goroutine 读写）。
+	// 历史库里僵尸任务可能成百上千，逐条通知会把用户淹掉，扫描结束汇成一条。
+	cleanAbandoned int
 }
 
 // cleanRecord 单个任务的清理进度
@@ -101,6 +104,9 @@ type cleanRecord struct {
 	PostCleanWaits int `json:"postCleanWaits,omitempty"`
 	// PostCleanWarned 已就「清理未收敛仍派发转码」告警过，避免每轮刷通知
 	PostCleanWarned bool `json:"postCleanWarned,omitempty"`
+	// UnresolvedCleans 「qB 报了名字但磁盘上找不到实体」的连续轮数。到上限按脱钩放弃，
+	// 不落盘（只在内存里推进，重启归零），与 PostWaits 同一套思路。
+	UnresolvedCleans int `json:"unresolvedCleans,omitempty"`
 }
 
 const cleanStateFile = "filemgr_clean.json"
@@ -109,6 +115,11 @@ const cleanStateFile = "filemgr_clean.json"
 // 同一卷内移动是元数据操作（秒级），20 轮（默认间隔约 5 分钟）足够；
 // 超过说明移动异常，放弃清理但绝不删除仍有文件的目录。
 const flattenMaxAttempts = 20
+
+// cleanUnresolvedMaxWaits 「qB 报了名字、磁盘上找不到实体」连续多少轮后按存储脱钩放弃。
+// 这些文件下一轮可能就能洗（下载完成去掉 .!qB、转码产物落盘），所以不能立刻判完成；
+// 但真脱钩的任务每轮都找不到，无限重试只会空转，到上限就放弃并告警一次。
+const cleanUnresolvedMaxWaits = 20
 
 // defaultCleanStatePath 推导清理状态文件路径（与 scheduler 的 finished.json 同目录规则）
 func defaultCleanStatePath() string {
@@ -271,6 +282,14 @@ func (m *Manager) scan() {
 		}
 	}
 	m.flushPostState()
+	if m.cleanAbandoned > 0 {
+		n := m.cleanAbandoned
+		m.cleanAbandoned = 0
+		logger.Info.Printf("文件清理：本轮 %d 个任务的文件长期在磁盘上找不到，已按存储脱钩跳过", n)
+		m.notifyEvent("QBHive 文件清理放弃",
+			fmt.Sprintf("本轮有 %d 个任务的文件连续 %d 轮在磁盘上找不到实体，已按存储脱钩跳过。\n常见原因：种子未下完、文件被外部移动或删除、qB 内部路径与磁盘不一致。",
+				n, cleanUnresolvedMaxWaits))
+	}
 }
 
 // handleCompleted 检查并扁平化「savePath 子目录下只含单个普通文件」的 torrent，
@@ -817,7 +836,7 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	}
 
 	// 4) 构建清洗计划（bottom-up 排序 + 计划内去重 + 磁盘冲突兜底，绝不覆盖）
-	plan := buildCleanPlan(files, m.rulesCache, aiNames, t.SavePath, t.Hash)
+	plan, unresolved := buildCleanPlan(files, m.rulesCache, aiNames, t.SavePath, t.Hash)
 	// 已在途的改名不重复提交：files 是本轮开头抓的快照，而 qB 的 renameFile 落地是异步的，
 	// 上一轮提交的路径可能还留在这一轮的快照里 → 同一条 old→new 会被再算出来一次，
 	// 既写重复审计，又让每个副本各自累加 Attempts（三条同名就能撞满「3 轮未落地即放弃」）。
@@ -862,13 +881,38 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	if frozenOut > 0 {
 		logger.Debug.Printf("文件清理 [%s] 让路 %d 条改名：目标文件正在转码", t.Name, frozenOut)
 	}
+	// 磁盘上找不到实体的文件不能判完成：它可能还在下载（qB 内部名不带 .!qB、磁盘带），
+	// 也可能等转码产物落盘后才有。提前钉死 Done 就再也不复查——「升了版本还是洗不掉」正是这么来的。
+	// 真脱钩的僵尸任务每轮都找不到，到上限才按脱钩放弃并告警一次。
+	m.mu.Lock()
+	if unresolved > 0 {
+		rec.UnresolvedCleans++
+	} else if rec.UnresolvedCleans > 0 {
+		rec.UnresolvedCleans = 0
+	}
+	unresolvedWaits := rec.UnresolvedCleans
+	m.mu.Unlock()
+	allowDone := unresolvedWaits == 0 || unresolvedWaits >= cleanUnresolvedMaxWaits
+	switch {
+	case unresolved > 0 && unresolvedWaits < cleanUnresolvedMaxWaits:
+		logger.Debug.Printf("文件清理 [%s] %d 个文件在磁盘上找不到实体，留待下轮（第 %d/%d 轮）",
+			t.Name, unresolved, unresolvedWaits, cleanUnresolvedMaxWaits)
+	case unresolved > 0 && unresolvedWaits == cleanUnresolvedMaxWaits:
+		// 僵尸任务可能成百上千，逐条通知会把用户淹掉：这里只留可检索的日志，
+		// 通知在扫描结束时按「本轮放弃数」汇成一条（见 scan）
+		logger.Warn.Printf("文件清理 [%s] %d 个文件连续 %d 轮在磁盘上找不到，按存储脱钩放弃",
+			t.Name, unresolved, unresolvedWaits)
+		m.cleanAbandoned++
+	}
 	if len(plan) == 0 {
 		m.mu.Lock()
-		// frozenOut > 0 说明本轮有活没干（让给转码），绝不能据此判定 Done
-		if len(rec.Pending) == 0 && !aiPending && frozenOut == 0 {
+		// frozenOut > 0 说明本轮有活没干（让给转码），allowDone=false 说明还有文件等落盘，
+		// 两种情况都绝不能据此判定 Done
+		if len(rec.Pending) == 0 && !aiPending && frozenOut == 0 && allowDone {
 			rec.Done = true
 			rec.PostCleanWaits = 0
 			rec.PostCleanWarned = false
+			rec.UnresolvedCleans = 0
 			m.mu.Unlock()
 			logger.Info.Printf("文件清理 [%s] 已完成（无待清理项）", t.Name)
 			m.saveCleanState()

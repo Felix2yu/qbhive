@@ -145,7 +145,8 @@ func sepPrefix(s string) (int, bool) {
 // cleanBuiltinVersion 内置清洗模式的版本号。
 // 增删改 defaultCleanPatterns 中任意一条都必须 +1：它是清理规则指纹的一部分，
 // 版本变化会让此前判定「已清理完成」的历史任务重新评估一轮。
-const cleanBuiltinVersion = 2
+// v3：磁盘上找不到实体的文件不再判完成（此前会被误判 Done 而永不复查）。
+const cleanBuiltinVersion = 3
 
 var defaultCleanPatterns = []*regexp.Regexp{
 	// 1) 前缀 "www.example.com - " / "example.com - " / "https://a.com — "
@@ -415,13 +416,16 @@ type cleanRename struct {
 //     仍冲突则跳过该条并 Warn
 //
 // aiNames：AI 返回的 base 名映射（post-regex base → AI 新名）；nil 表示 AI 未启用/失败
-func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[string]string, savePath, hash string) []cleanRename {
+//
+// 返回的 unresolved 是「qB 报了名字、磁盘上找不到实体」的条数（含 .!qB 半成品）。
+// 调用方必须据此拒绝判完成：这些文件下一轮可能就能洗（下载完成去掉 .!qB、转码产物落盘），
+// 提前钉死 Done 会让它永不复查。
+func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[string]string, savePath, hash string) (plan []cleanRename, unresolved int) {
 	suffix := hash
 	if len(suffix) > 8 {
 		suffix = suffix[:8]
 	}
 	usedTargets := make(map[string]bool)
-	var plan []cleanRename
 
 	for _, f := range files {
 		if f.Name == "" {
@@ -468,10 +472,17 @@ func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[
 		}
 		// 实体存在性护栏：qB 记录的文件在磁盘上并不存在（与存储脱钩的僵尸任务）时，
 		// renameFile 只会改内部元数据——文件永远洗不掉，还会阻碍日后重新校验找回，必须跳过。
-		// 跳过必须留痕：静默 continue 会让「文件名洗不掉」变成一行日志都查不到的悬案。
-		if _, err := os.Lstat(filepath.Join(savePath, filepath.FromSlash(oldFull))); err != nil {
-			logger.Debug.Printf("文件清洗：磁盘上找不到 %s（%v），跳过该文件", oldFull, err)
-			continue
+		// 未下完的文件在磁盘上带 .!qB 尾缀而 qB 内部名不带，必须认作同一个文件：
+		// 否则半成品永远洗不到，等下完再洗时任务可能已被判 Done。
+		// 跳过要留痕、更要计入 unresolved——静默 continue 会让「文件名洗不掉」变成
+		// 一行日志都查不到的悬案，还会让任务被误判成已完成。
+		oldAbs := filepath.Join(savePath, filepath.FromSlash(oldFull))
+		if _, err := os.Lstat(oldAbs); err != nil {
+			if _, perr := os.Lstat(oldAbs + partialFileSuffix); perr != nil {
+				logger.Debug.Printf("文件清洗：磁盘上找不到 %s（%v），跳过该文件", oldFull, err)
+				unresolved++
+				continue
+			}
 		}
 		// 计划内目标去重：同目标第二条起在文件段加 _hash8
 		if usedTargets[newFull] {
@@ -499,5 +510,5 @@ func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[
 		}
 		plan = append(plan, cleanRename{Old: oldFull, New: newFull, Via: via})
 	}
-	return plan
+	return plan, unresolved
 }
