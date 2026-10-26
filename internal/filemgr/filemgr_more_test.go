@@ -989,6 +989,47 @@ func TestManager_handleClean_FreezesInFlightTranscodePaths(t *testing.T) {
 	}
 }
 
+// 未下完的文件在磁盘上带 .!qB 尾缀，而 qB 内部名不带——必须认作同一个文件，
+// 否则半成品永远洗不到，等下完再洗时任务又已被判 Done。
+func TestManager_handleClean_AcceptsPartialSuffix(t *testing.T) {
+	env := newFilemgrEnv(t, true, 15, "")
+	save := env.saveDir
+	touchCleanSource(t, save, "www.a.com Movie.mkv.!qB")
+	env.setFiles(`[{"name":"www.a.com Movie.mkv","size":1,"progress":0.4}]`)
+
+	env.m.handleClean(models.QBTorrent{Hash: testHash, Name: "n", State: "downloading", SavePath: save, Progress: 0.4})
+
+	var renamed bool
+	for _, c := range env.calls() {
+		if c == "renameFile:"+testHash+":www.a.com Movie.mkv->Movie.mkv" {
+			renamed = true
+		}
+	}
+	if !renamed {
+		t.Fatalf("半成品（.!qB）应照常提交改名: %v", env.calls())
+	}
+}
+
+// qB 报了名字但磁盘上找不到实体时绝不能判完成：文件可能下一轮才落盘（下载完成去掉 .!qB、
+// 转码产物写出），提前钉死 Done 就再也不复查——「升了版本还是洗不掉」正是这么来的。
+// 真脱钩的任务不能无限空转，到上限按脱钩放弃。
+func TestManager_handleClean_MissingFileNotDoneUntilExhausted(t *testing.T) {
+	env := newFilemgrEnv(t, true, 15, "")
+	env.setFiles(`[{"name":"www.a.com Movie.mkv","size":1,"progress":1.0}]`)
+	tor := models.QBTorrent{Hash: testHash, Name: "n", State: "stoppedUP", SavePath: env.saveDir, Progress: 1.0}
+
+	for round := 1; round < cleanUnresolvedMaxWaits; round++ {
+		env.m.handleClean(tor)
+		if rec := env.m.cleanState[testHash]; rec.Done {
+			t.Fatalf("第 %d 轮磁盘上还找不到文件，不该判定清理完成", round)
+		}
+	}
+	env.m.handleClean(tor)
+	if rec := env.m.cleanState[testHash]; !rec.Done {
+		t.Fatal("到上限后应按存储脱钩放弃并判定完成")
+	}
+}
+
 // 清理收敛时必须清零「转码让路」的计数与告警标记，否则下一次未收敛不会重新计时、也不再告警
 func TestManager_handleClean_ResetsPostCleanWaitOnSettle(t *testing.T) {
 	env := newFilemgrEnv(t, true, 15, "")

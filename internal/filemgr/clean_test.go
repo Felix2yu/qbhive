@@ -150,7 +150,7 @@ func TestBuildCleanPlan(t *testing.T) {
 	for _, f := range files {
 		touchCleanSource(t, savePath, f.Name)
 	}
-	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	plan, _ := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	// qB renameFile 不认目录段（409），目录改名必须落成「每个文件一条」的全路径移动
 	if len(plan) != 3 {
 		t.Fatalf("plan length = %d, want 3: %+v", len(plan), plan)
@@ -171,7 +171,7 @@ func TestBuildCleanPlan(t *testing.T) {
 func TestBuildCleanPlanEscapeGuard(t *testing.T) {
 	savePath := t.TempDir()
 	files := []models.QBFile{{Name: "正常名/../../evil.mkv"}}
-	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	plan, _ := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	// "../../evil" 里的 ".." 段：cleanBase 不改动 → newFull 含 ".." → 护栏拒绝
 	for _, r := range plan {
 		if r.New == "../../evil.mkv" {
@@ -189,7 +189,7 @@ func TestBuildCleanPlanDedupAndConflict(t *testing.T) {
 	for _, f := range files {
 		touchCleanSource(t, savePath, f.Name)
 	}
-	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	plan, _ := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	if len(plan) != 2 {
 		t.Fatalf("plan length = %d, want 2: %+v", len(plan), plan)
 	}
@@ -209,7 +209,7 @@ func TestBuildCleanPlanDiskConflict(t *testing.T) {
 	}
 	files := []models.QBFile{{Name: "www.a.com Movie.mkv"}}
 	touchCleanSource(t, savePath, "www.a.com Movie.mkv")
-	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	plan, _ := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	if len(plan) != 1 {
 		t.Fatalf("plan length = %d, want 1: %+v", len(plan), plan)
 	}
@@ -223,7 +223,7 @@ func TestBuildCleanPlanAISkip(t *testing.T) {
 	files := []models.QBFile{{Name: "www.a.com Movie.mkv"}}
 	touchCleanSource(t, savePath, "www.a.com Movie.mkv")
 	aiNames := map[string]string{"Movie": "The Movie (Clean)"} // 以 post-regex base 为键
-	plan := buildCleanPlan(files, nil, aiNames, savePath, "abcdef1234567890")
+	plan, _ := buildCleanPlan(files, nil, aiNames, savePath, "abcdef1234567890")
 	if len(plan) != 1 || plan[0].New != "The Movie (Clean).mkv" || plan[0].Via != "ai" {
 		t.Errorf("plan = %+v, want The Movie (Clean).mkv via ai", plan)
 	}
@@ -234,7 +234,7 @@ func TestBuildCleanPlanAISkip(t *testing.T) {
 func TestBuildCleanPlanSourceMissingSkip(t *testing.T) {
 	savePath := t.TempDir()
 	files := []models.QBFile{{Name: "www.a.com Movie.mkv"}} // 不落盘
-	plan := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
+	plan, _ := buildCleanPlan(files, nil, nil, savePath, "abcdef1234567890")
 	if len(plan) != 0 {
 		t.Fatalf("plan = %+v, want 空（源文件不在磁盘上必须跳过）", plan)
 	}
