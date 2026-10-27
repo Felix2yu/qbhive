@@ -82,6 +82,16 @@ func applyConfigDefaults(cfg *models.AppConfig) {
 		on := true
 		pp.Verify = &on
 	}
+	// 自动分类的「只处理未分类任务」同样是安全闸门：语义上默认开启，
+	// 老配置缺这个键时若落成 false，一轮扫描就会把用户手工整理好的分类全冲掉
+	ac := &cfg.AutoCategory
+	if ac.OnlyIfEmpty == nil {
+		on := true
+		ac.OnlyIfEmpty = &on
+	}
+	if ac.Interval <= 0 {
+		ac.Interval = 60
+	}
 }
 
 func (m *Manager) Save() error {

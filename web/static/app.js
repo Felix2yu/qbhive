@@ -1402,6 +1402,196 @@ function syncFormToCfg() {
     const probe = ($("#fm-pp-probe").value || "").trim();
     pp.probePath = probe === "" ? null : probe;
   }
+  if ($("#ac-enabled")) {
+    const ac = c.autoCategory || (c.autoCategory = {});
+    ac.enabled = $("#ac-enabled").checked;
+    ac.interval = parseInt($("#ac-interval").value || "60", 10) || 60;
+    ac.onlyIfEmpty = $("#ac-only-empty").checked;
+    ac.fallback = ($("#ac-fallback").value || "").trim();
+    ac.rules = collectCategoryRules();
+  }
+}
+
+// ---------- 自动分类 ----------
+
+// 条件类型，与后端 models 里的常量一一对应
+const CAT_COND = { code: "code", latinCount: "latinCount", cjkCount: "cjkCount", regex: "regex" };
+
+const CAT_COND_TYPES = [
+  [CAT_COND.code, "编号式命名（字母-数字）"],
+  [CAT_COND.latinCount, "英文字母数量"],
+  [CAT_COND.cjkCount, "汉字数量"],
+  [CAT_COND.regex, "正则匹配"],
+];
+
+// 从 DOM 收集当前规则。试算与保存共用：试算必须反映表单里还没保存的改动，
+// 否则用户改完规则点「试算」看到的仍是旧结论，比不试算更误导。
+function collectCategoryRules() {
+  const cur = (_settingsCfg && _settingsCfg.autoCategory && _settingsCfg.autoCategory.rules) || [];
+  return $$("[data-cat-name]").map((n) => {
+    const ri = parseInt(n.dataset.catName, 10);
+    const old = cur[ri] || {};
+    const when = $$(`[data-cat-ctype="${ri}"]`).map((sel) => {
+      const ci = parseInt(sel.dataset.catCi, 10);
+      const type = sel.value;
+      const q = (k) => document.querySelector(`[data-cat-c${k}="${ri}:${ci}"]`) || {};
+      if (type === CAT_COND.regex) return { type, pattern: q("pattern").value || "" };
+      if (type === CAT_COND.code) {
+        return {
+          type,
+          minLetters: parseInt(q("letters").value || "0", 10) || 0,
+          minDigits: parseInt(q("digits").value || "0", 10) || 0,
+          anchored: q("anchored").checked !== false,
+        };
+      }
+      return { type, min: parseInt(q("min").value || "0", 10) || 0 };
+    });
+    return {
+      id: old.id || genID(),
+      name: n.value,
+      enabled: (document.querySelector(`[data-cat-enabled="${ri}"]`) || {}).checked !== false,
+      category: (document.querySelector(`[data-cat-cat="${ri}"]`) || {}).value || "",
+      when,
+    };
+  });
+}
+
+// 条件类型对应的参数控件。计数类刻意不翻译成正则：语义相同但慢几十倍且几乎不可读
+function catCondArgs(ri, ci, c) {
+  const at = (k) => `data-cat-c${k}="${ri}:${ci}"`;
+  switch (c.type) {
+    case CAT_COND.code:
+      return `<div class="controls">
+        <span class="unit">字母段≥</span><input type="number" class="w-xs" ${at("letters")} value="${c.minLetters || 2}" min="1">
+        <span class="unit">数字段≥</span><input type="number" class="w-xs" ${at("digits")} value="${c.minDigits || 2}" min="1">
+        <label class="inline-check"><input type="checkbox" ${at("anchored")} ${c.anchored !== false ? "checked" : ""}><span>只在名称开头</span></label>
+      </div>`;
+    case CAT_COND.latinCount:
+    case CAT_COND.cjkCount:
+      return `<div class="controls"><span class="unit">数量≥</span><input type="number" class="w-xs" ${at("min")} value="${c.min || 0}" min="1"></div>`;
+    case CAT_COND.regex:
+      return `<input type="text" class="ctrl mono" ${at("pattern")} value="${escapeHTML(c.pattern || "")}" placeholder="Go/RE2 语法，如 ^\\[字幕组\\]" />`;
+    default:
+      return "";
+  }
+}
+
+function catCondRow(ri, ci, c) {
+  return `<div class="cond-row">
+    <select class="ctrl w-sm" data-cat-ctype="${ri}" data-cat-ci="${ci}">
+      ${CAT_COND_TYPES.map(([v, l]) => `<option value="${v}"${c.type === v ? " selected" : ""}>${l}</option>`).join("")}
+    </select>
+    <div class="cond-args">${catCondArgs(ri, ci, c)}</div>
+    ${UI.iconBtn("trash", { title: "删除条件", variant: "danger", size: "sm", attrs: `data-cat-cond-del="${ri}:${ci}"` })}
+  </div>`;
+}
+
+// 只重渲规则那一块（加/删/改条件时调用，不碰整页）
+function renderCategoryRules() {
+  if (!_settingsCfg) return;
+  const box = $("#cat-rules");
+  if (!box) return;
+  const ac = _settingsCfg.autoCategory || (_settingsCfg.autoCategory = { rules: [] });
+  const rules = ac.rules || [];
+  const count = $("#cat-count");
+  if (count) count.textContent = `共 ${rules.length} 条`;
+  box.innerHTML = rules.length === 0
+    ? `<div class="rule-empty">还没有规则，点上方「添加规则」或「恢复内置三条」。</div>`
+    : rules.map((r, ri) => `
+      <div class="rule-card">
+        <div class="rule-head">
+          <span class="index-badge">${ri + 1}</span>
+          <input type="text" class="control rule-name" data-cat-name="${ri}" value="${escapeHTML(r.name || "")}" placeholder="规则名称" />
+          <span class="text-dim">→</span>
+          <input type="text" class="control w-sm" data-cat-cat="${ri}" value="${escapeHTML(r.category || "")}" placeholder="分类名" />
+          ${toggle(r.enabled !== false, { data: `data-cat-enabled="${ri}"`, sm: true, label: "启用" })}
+          ${UI.iconBtn("chevron-down", { title: "上移", size: "sm", attrs: `data-cat-up="${ri}"` })}
+          ${UI.iconBtn("chevron-down", { title: "下移", size: "sm", attrs: `data-cat-down="${ri}"` })}
+          ${UI.iconBtn("trash", { title: "删除规则", variant: "danger", size: "sm", attrs: `data-cat-del="${ri}"` })}
+        </div>
+        <div class="rule-body">
+          ${catCondSection(ri, r)}
+        </div>
+      </div>`).join("");
+}
+
+// 内置的编号式 → 英文长名 → 中文长名三条。分类名是占位，需按实际使用的分类改
+function catDefaultRules() {
+  return [
+    { id: genID(), name: "编号式命名", enabled: true, category: "编号", when: [{ type: CAT_COND.code, minLetters: 2, minDigits: 2, anchored: true }] },
+    { id: genID(), name: "英文长名", enabled: true, category: "外文", when: [{ type: CAT_COND.latinCount, min: 15 }] },
+    { id: genID(), name: "中文长名", enabled: true, category: "中文", when: [{ type: CAT_COND.cjkCount, min: 10 }] },
+  ];
+}
+
+function catCondSection(ri, r) {
+  const conds = r.when || [];
+  return UI.section({
+    title: "匹配条件",
+    desc: conds.length === 0 ? "无条件时这条规则不会命中任何任务" : "全部满足才算命中",
+    actions: UI.btn("添加条件", { size: "sm", iconName: "plus", attrs: `data-cat-cond-add="${ri}"` }),
+    body: `<div class="cond-list">${conds.map((c, ci) => catCondRow(ri, ci, c)).join("")}</div>`,
+  });
+}
+
+// 规则增删改都走事件委托：规则区会被反复重渲，逐个按钮绑定在重渲后就失效了
+function bindCategoryEvents(root) {
+  const catMutate = (fn) => { syncFormToCfg(); fn(); markDirty("settings"); renderCategoryRules(); };
+  root.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-cat-del],[data-cat-up],[data-cat-down],[data-cat-cond-add],[data-cat-cond-del]");
+    if (!el) return;
+    if (el.dataset.catDel !== undefined) {
+      const i = parseInt(el.dataset.catDel, 10);
+      catMutate(() => _settingsCfg.autoCategory.rules.splice(i, 1));
+      return;
+    }
+    if (el.dataset.catUp !== undefined) {
+      const i = parseInt(el.dataset.catUp, 10);
+      if (i <= 0) return;
+      catMutate(() => {
+        const rs = _settingsCfg.autoCategory.rules;
+        [rs[i - 1], rs[i]] = [rs[i], rs[i - 1]];
+      });
+      return;
+    }
+    if (el.dataset.catDown !== undefined) {
+      const i = parseInt(el.dataset.catDown, 10);
+      catMutate(() => {
+        const rs = _settingsCfg.autoCategory.rules;
+        if (i >= rs.length - 1) return;
+        [rs[i + 1], rs[i]] = [rs[i], rs[i + 1]];
+      });
+      return;
+    }
+    if (el.dataset.catCondAdd !== undefined) {
+      const i = parseInt(el.dataset.catCondAdd, 10);
+      catMutate(() => {
+        const r = _settingsCfg.autoCategory.rules[i];
+        r.when = r.when || [];
+        r.when.push({ type: CAT_COND.latinCount, min: 15 });
+      });
+      return;
+    }
+    if (el.dataset.catCondDel !== undefined) {
+      const [ri, ci] = el.dataset.catCondDel.split(":").map(Number);
+      catMutate(() => { _settingsCfg.autoCategory.rules[ri].when.splice(ci, 1); });
+    }
+  });
+  // 切换条件类型：参数控件完全不同，收集后整块重渲
+  root.addEventListener("change", (e) => {
+    if (!e.target.matches("[data-cat-ctype]")) return;
+    const ri = parseInt(e.target.dataset.catCtype, 10);
+    const ci = parseInt(e.target.dataset.catCi, 10);
+    syncFormToCfg();
+    const cond = ((_settingsCfg.autoCategory.rules[ri] || {}).when || [])[ci];
+    if (!cond) return;
+    // 类型换了就给新类型一套合理默认，避免留下旧类型的残留参数
+    if (cond.type === CAT_COND.code) { cond.minLetters = 2; cond.minDigits = 2; cond.anchored = true; delete cond.min; delete cond.pattern; }
+    else if (cond.type === CAT_COND.regex) { cond.pattern = ""; delete cond.min; delete cond.minLetters; delete cond.minDigits; delete cond.anchored; }
+    else { cond.min = cond.type === CAT_COND.latinCount ? 15 : 10; delete cond.pattern; delete cond.minLetters; delete cond.minDigits; delete cond.anchored; }
+    markDirty("settings");
+    renderCategoryRules();
+  });
 }
 
 // 只重渲 limiter 规则那一块（加/删规则时调用，不碰整页）
@@ -1506,6 +1696,8 @@ async function renderSettings(root) {
   const sNotifyUrl = escapeHTML((cfg.notifier.appriseUrls || []).join("\n"));
   // 转码后处理：后端恒定返回该对象（无 omitempty），这里兜底成空对象免得取属性报错
   const pp = (cfg.fileManager && cfg.fileManager.postProcess) || {};
+  // 自动分类：老配置文件可能还没有这一段，兜底成默认结构
+  const ac = cfg.autoCategory || { enabled: false, interval: 60, onlyIfEmpty: true, fallback: "", rules: [] };
 
   root.innerHTML = `
     ${UI.page({
@@ -1577,6 +1769,42 @@ async function renderSettings(root) {
           desc: `<span id="lim-count"></span>`,
           actions: UI.btn("添加规则", { size: "sm", iconName: "plus", id: "lim-add" }),
           body: `<div id="limiter-rules"></div>`,
+        })}
+      `,
+    })}
+
+    <!-- 自动分类 -->
+    ${UI.panel({
+      title: "自动分类",
+      desc: "按规则给种子任务打上 qB 分类，规则自上而下求值，先命中先得",
+      iconName: "tag",
+      body: `
+        ${field("启用", toggle(ac.enabled, { id: "ac-enabled" }),
+          "每隔一个扫描间隔按规则给任务设置分类。<b>默认只处理尚未分类的任务</b>，不会冲掉你手动整理的结果。")}
+        ${field("扫描间隔",
+          `<div class="controls"><input type="number" id="ac-interval" class="w-xs" value="${ac.interval || 60}" min="1"><span class="unit">秒</span></div>`,
+          "分类是低频动作，60 秒足够；任务多、想更快生效可调小。")}
+        ${field("只处理未分类任务", toggle(ac.onlyIfEmpty !== false, { id: "ac-only-empty" }),
+          "<b>建议保持开启。</b>关掉后，已经打好分类的任务也会被规则重新判定并覆盖——包括你手动设的分类。")}
+        ${field("兜底分类",
+          `<input type="text" id="ac-fallback" class="ctrl w-sm" value="${escapeHTML(ac.fallback || "")}" placeholder="留空表示不动" />`,
+          "所有规则都没命中时归入这个分类，<b>留空则保持不动</b>。qB 里该分类不存在时由 qB 自动创建。")}
+        ${UI.notice("若 qB 端开启了「自动管理种子」，改分类会触发 qB 移动文件，请确认这是你想要的。", "warn")}
+        ${UI.section({
+          title: "规则",
+          desc: `<span id="cat-count"></span> · 自上而下求值，命中即停`,
+          actions: UI.btn("恢复内置三条", { size: "sm", attrs: 'id="cat-default"' }) + UI.btn("添加规则", { size: "sm", iconName: "plus", id: "cat-add" }),
+          body: `<div id="cat-rules"></div>`,
+        })}
+        ${UI.section({
+          title: "试算",
+          desc: "按上面<b>当前填写</b>的规则求值，不会改动任何任务，也不用先保存",
+          body: `
+            ${field("任务名",
+              `<textarea id="cat-preview-names" class="ctrl mono auto-h" placeholder="每行一个任务名；留空则直接取 qB 里未分类的任务试算"></textarea>`)}
+            <div class="controls">${UI.btn("试算", { size: "sm", id: "cat-preview" })}</div>
+            <div id="cat-preview-out"></div>
+          `,
         })}
       `,
     })}
@@ -1697,6 +1925,8 @@ async function renderSettings(root) {
   // 首次渲染 limiter 规则与 AI 通道
   renderLimiterRules();
   renderAIChannels();
+  renderCategoryRules();
+  bindCategoryEvents(root);
   syncDirtyUI(); // 重渲后重建了保存按钮，未保存标记要重新贴一遍
 
   // --- 主题按钮高亮 + 事件 ---
@@ -1738,6 +1968,49 @@ async function renderSettings(root) {
 
   $$("[data-lm-del]").forEach(b => b.addEventListener("click", onLimDel));
 
+  $("#cat-add").onclick = () => {
+    syncFormToCfg();
+    const rs = _settingsCfg.autoCategory.rules;
+    rs.push({ id: genID(), name: `规则 ${rs.length + 1}`, enabled: true, category: "", when: [] });
+    markDirty("settings");
+    renderCategoryRules();
+  };
+
+  $("#cat-default").onclick = () => {
+    syncFormToCfg();
+    _settingsCfg.autoCategory.rules = catDefaultRules();
+    markDirty("settings");
+    renderCategoryRules();
+    toast("已载入内置三条：编号式 → 英文长名 → 中文长名，分类名请改成你在用的分类");
+  };
+
+  $("#cat-preview").onclick = async () => {
+    syncFormToCfg();
+    const names = ($("#cat-preview-names").value || "").split("\n").map(s => s.trim()).filter(Boolean);
+    const out = $("#cat-preview-out");
+    out.innerHTML = UI.loading("试算中…");
+    // 带上 config：让后端按表单里尚未保存的规则求值
+    const r = await api("POST", "/category/preview", { names, limit: 20, config: _settingsCfg.autoCategory });
+    if (!r.success) {
+      out.innerHTML = UI.notice(escapeHTML(r.message || "试算失败"), "warn");
+      return;
+    }
+    const items = r.data || [];
+    out.innerHTML = items.length === 0
+      ? UI.notice("没有可试算的任务", "")
+      : UI.table({
+          className: "cat-preview",
+          head: ["任务名", "当前分类", "命中规则", "将设为", "说明"],
+          rows: items.map(it => `<div class="data-row">
+            <span class="data-cell" title="${escapeHTML(it.name)}">${escapeHTML(it.name)}</span>
+            <span class="data-cell">${escapeHTML(it.current || "-")}</span>
+            <span class="data-cell">${escapeHTML(it.rule || "-")}</span>
+            <span class="data-cell">${it.target ? escapeHTML(it.target) : "-"}</span>
+            <span class="data-cell text-dim">${escapeHTML(it.reason || "")}</span>
+          </div>`),
+        });
+  };
+
   $("#fm-pp-test").onclick = async () => {
     const path = ($("#fm-pp-test-path").value || "").trim();
     if (!path) { toast("请先填写测试文件的绝对路径", "err"); return; }
@@ -1777,7 +2050,7 @@ async function renderSettings(root) {
     const out = _settingsCfg; // 掩码值已在 syncFormToCfg 里被忽略，后端会保留原密码/apiKey
     const vmsg = validateConfigJS(out);
     if (vmsg) { toast("❌ " + vmsg, "err"); return; }
-    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy", out);
+    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy,autoCategory", out);
     if (res.success) clearDirty("settings");
     toast(res.success ? "设置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
     // 保存成功后重新 GET 一次，让密码/API key 回到掩码状态

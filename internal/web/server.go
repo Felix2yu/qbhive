@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Felix2yu/qbhive/internal/categorizer"
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
 	"github.com/Felix2yu/qbhive/internal/limiter"
@@ -53,10 +54,16 @@ type Server struct {
 	// 共享任务快照：由 qbittorrent.TorrentCache 常驻增量维护。
 	// nil 或未就绪时回退到上面的直连缓存路径（启动首秒、qB 尚未全量同步）。
 	torrentCache *qb.TorrentCache
+
+	// 自动分类引擎，仅用于设置页的试算接口（可选）
+	categorizer *categorizer.Manager
 }
 
 // SetTorrentCache 注入共享任务快照（装配层调用一次）。
 func (s *Server) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
+
+// SetCategorizer 注入自动分类引擎（可选；nil 时试算接口返回「未启用」）。
+func (s *Server) SetCategorizer(c *categorizer.Manager) { s.categorizer = c }
 
 type cacheEntry struct {
 	data      interface{}
@@ -226,6 +233,9 @@ func (s *Server) Start(webRoot string) error {
 		api.POST("/filemgr/batch/preview", s.filemgrBatchPreview)
 		api.POST("/filemgr/batch/apply", s.filemgrBatchApply)
 		api.POST("/filemgr/postprocess/test", s.postProcessTest)
+
+		// 自动分类：试算（只读，不写 qB、不落状态）
+		api.POST("/category/preview", s.categoryPreview)
 	}
 
 	if webRoot != "" {
@@ -410,6 +420,18 @@ func validateConfig(in *models.AppConfig) string {
 			return fmt.Sprintf("AI 通道 %s 的提示词超过 4000 字符", ch.Name)
 		}
 	}
+	// 自动分类：间隔下限、规则条件与分类名合法性
+	if in.AutoCategory.Interval < 1 && in.AutoCategory.Enabled {
+		return "自动分类扫描间隔必须 ≥ 1 秒"
+	}
+	if msg := categorizer.ValidateRules(in.AutoCategory.Rules); msg != "" {
+		return msg
+	}
+	if fb := strings.TrimSpace(in.AutoCategory.Fallback); fb != "" {
+		if msg := categorizer.ValidateCategoryName(fb); msg != "" {
+			return "自动分类兜底分类不合法：" + msg
+		}
+	}
 	return ""
 }
 
@@ -427,7 +449,7 @@ func (s *Server) saveConfig(c *gin.Context) {
 	if only := strings.TrimSpace(c.Query("only")); only != "" {
 		known := map[string]bool{
 			"qbittorrent": true, "server": true, "notifier": true, "rss": true,
-			"limiter": true, "fileManager": true, "proxy": true,
+			"limiter": true, "fileManager": true, "proxy": true, "autoCategory": true,
 		}
 		keep := make(map[string]bool, 4)
 		for _, name := range strings.Split(only, ",") {
@@ -461,6 +483,9 @@ func (s *Server) saveConfig(c *gin.Context) {
 		}
 		if !keep["proxy"] {
 			in.Proxy = cur.Proxy
+		}
+		if !keep["autoCategory"] {
+			in.AutoCategory = cur.AutoCategory
 		}
 	}
 	// P1: 后端校验——在任何持久化/热生效之前拦截非法输入
@@ -1173,6 +1198,40 @@ func (s *Server) filemgrBatchApply(c *gin.Context) {
 		return
 	}
 	c.JSON(200, models.APIResponse{Success: true, Message: fmt.Sprintf("已提交 %d 条重命名，稍后可在下方审计日志确认或回退", n), Data: map[string]interface{}{"applied": n}})
+}
+
+// categoryPreview 自动分类试算：把当前规则作用在给定的任务名（或 qB 里的真实任务）上，
+// 返回「会分到哪个分类、命中哪条规则」。纯只读，不调用 qB 的 setCategory、不写状态，
+// 因此可以在规则还没保存时就先看效果。
+func (s *Server) categoryPreview(c *gin.Context) {
+	if s.categorizer == nil {
+		c.JSON(200, models.APIResponse{Success: false, Message: "自动分类引擎未加载"})
+		return
+	}
+	var body struct {
+		Names []string `json:"names"`
+		Limit int      `json:"limit"`
+		// Config 可选：前端把表单里**尚未保存**的规则传过来，试算就用它而不是已保存的配置
+		Config *models.AutoCategoryConfig `json:"config"`
+	}
+	// body 为空是合法用法（此时用 qB 任务列表试算），忽略绑定错误
+	_ = c.ShouldBindJSON(&body)
+	names := make([]string, 0, len(body.Names))
+	for _, n := range body.Names {
+		if n = strings.TrimSpace(n); n != "" {
+			names = append(names, n)
+		}
+	}
+	ac := s.cfg.Get().AutoCategory
+	if body.Config != nil {
+		ac = *body.Config
+	}
+	items, err := s.categorizer.Preview(ac, names, body.Limit)
+	if err != nil {
+		c.JSON(200, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c.JSON(200, models.APIResponse{Success: true, Data: items})
 }
 
 // postProcessTest 手动跑一次后处理命令（设置页「测试运行」），同步执行并返回退出码与输出尾部。

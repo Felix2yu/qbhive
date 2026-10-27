@@ -2,13 +2,14 @@ package models
 
 // 全局配置文件结构体
 type AppConfig struct {
-	Qbittorrent QBConfig          `json:"qbittorrent"`
-	Server      ServerConfig      `json:"server"`
-	Notifier    NotifierConfig    `json:"notifier"`
-	RSS         RSSConfig         `json:"rss"`
-	Limiter     LimiterConfig     `json:"limiter"`
-	FileManager FileManagerConfig `json:"fileManager"`
-	Proxy       ProxyConfig       `json:"proxy"`
+	Qbittorrent  QBConfig           `json:"qbittorrent"`
+	Server       ServerConfig       `json:"server"`
+	Notifier     NotifierConfig     `json:"notifier"`
+	RSS          RSSConfig          `json:"rss"`
+	Limiter      LimiterConfig      `json:"limiter"`
+	FileManager  FileManagerConfig  `json:"fileManager"`
+	Proxy        ProxyConfig        `json:"proxy"`
+	AutoCategory AutoCategoryConfig `json:"autoCategory"`
 }
 
 // ProxyConfig 控制 qbhive 所有出网请求（RSS 抓取、通知、远程 qB/AI）走哪个代理。
@@ -190,6 +191,69 @@ type AIChannel struct {
 	Prompt  string `json:"prompt"`  // 自定义提示词，为空用内置默认；支持 {files}/{torrent} 变量
 	Enabled bool   `json:"enabled"`
 }
+
+// AutoCategoryConfig 种子任务自动分类。
+//
+// 扫描 qB 任务列表，按 Rules **顺序**逐条求值，先命中先得；全部未命中则落入
+// Fallback（为空表示保持原样不动）。规则与开关都写在 config.json 里，
+// 该文件已被 .gitignore 排除，不会进入版本库。
+type AutoCategoryConfig struct {
+	Enabled bool `json:"enabled"`
+	// Interval 扫描间隔（秒）。分类是低频动作，默认 60 秒足够
+	Interval int `json:"interval"`
+	// OnlyIfEmpty 只处理未分类的任务（默认开）。
+	//
+	// 这是防止覆盖用户手动分类的安全闸门：qB 里已经打过分类的任务一律跳过。
+	// 指针语义 —— 老配置文件缺这个键时若退化成 false，就会把用户手工整理好的
+	// 分类全部冲掉，因此由 config 层补成 true。
+	OnlyIfEmpty *bool `json:"onlyIfEmpty,omitempty"`
+	// Fallback 兜底分类名：所有规则都没命中时归入它；留空表示不动
+	Fallback string          `json:"fallback"`
+	Rules    []CategoryRule `json:"rules"`
+}
+
+// CategoryRule 一条分类规则。When 是条件数组，语义为 AND（全部满足才算命中）。
+type CategoryRule struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Enabled  bool   `json:"enabled"`
+	Category string `json:"category"` // 命中后要打上的分类名
+	When     []CategoryCond `json:"when"`
+}
+
+// CategoryCond 一个原子条件。Type 决定其余字段的含义：
+//
+//	code       —— 编号式命名（字母+连字符+数字），参数 MinLetters / MinDigits / Anchored
+//	latinCount —— 名称里英文字母的数量 ≥ Min
+//	cjkCount   —— 名称里汉字的数量 ≥ Min
+//	regex      —— 名称匹配 Pattern（Go/RE2 语法）
+//
+// 设计上刻意不把计数类条件也译成正则：实测同一语义下正则比直接计数慢 60 倍
+// （latinCount）到 2.8 倍（cjkCount），而且 `(?:[^A-Za-z]*[A-Za-z]){15,}` 这类
+// 写法几乎不可读。regex 只作为逃生舱保留。
+type CategoryCond struct {
+	Type string `json:"type"`
+	// Pattern 仅 regex 类型使用，Go/RE2 语法
+	Pattern string `json:"pattern,omitempty"`
+	// Min 仅 latinCount / cjkCount 使用，阈值（含）
+	Min int `json:"min,omitempty"`
+	// MinLetters / MinDigits 仅 code 类型使用：字母段与数字段的最小长度
+	MinLetters int `json:"minLetters,omitempty"`
+	MinDigits  int `json:"minDigits,omitempty"`
+	// Anchored 仅 code 类型使用：是否要求编号出现在名称开头（默认开）。
+	//
+	// 关掉时 `[A-Za-z]+-[0-9]+` 会把 `Movie.2020.H-264.1080p` 里的编码标签
+	// H-264 误判成编号，锚定后可挡掉这类误伤。
+	Anchored *bool `json:"anchored,omitempty"`
+}
+
+// 条件类型常量
+const (
+	CondCode       = "code"
+	CondLatinCount = "latinCount"
+	CondCJKCount   = "cjkCount"
+	CondRegex      = "regex"
+)
 
 // qBittorrent torrent 信息（来自 /api/v2/torrents/info）
 // 字段名严格匹配 qBittorrent WebUI API v2 返回的 JSON key

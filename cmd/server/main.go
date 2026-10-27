@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Felix2yu/qbhive/internal/categorizer"
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
 	"github.com/Felix2yu/qbhive/internal/limiter"
@@ -54,10 +55,14 @@ func main() {
 
 	sch := scheduler.New(cfgMgr, qbCli, notif, lim, fm, rssE)
 	sch.SetTorrentCache(torrents)
+	// 自动分类自带扫描循环，与文件管理互不依赖：关掉归档不影响分类，反之亦然
+	cat := categorizer.New(cfgMgr, qbCli)
+	sch.SetCategorizer(cat)
 	sch.Start()
 
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch, fm)
 	srv.SetTorrentCache(torrents)
+	srv.SetCategorizer(cat)
 
 	go func() {
 		logger.Info.Printf("QBHive 监听地址 %s", cfg.Server.Listen)

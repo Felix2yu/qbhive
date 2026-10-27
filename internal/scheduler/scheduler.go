@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Felix2yu/qbhive/internal/categorizer"
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
 	"github.com/Felix2yu/qbhive/internal/limiter"
@@ -34,10 +35,22 @@ type Scheduler struct {
 
 	// 共享任务快照：就绪后扫描不再拉 qB 全表（7158 条约 20MB / 每 10s）
 	torrentCache *qb.TorrentCache
+
+	// 自动分类：自带 ticker，不挂在上述任何模块的扫描循环里
+	categorizer *categorizer.Manager
 }
 
 // SetTorrentCache 注入共享任务快照（装配层在 Start 之前调用一次）。
 func (s *Scheduler) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
+
+// SetCategorizer 注入自动分类引擎（可选；nil 时跳过该子系统的启停与重载）。
+// 用注入而不是加 New 的参数，是为了不动既有调用点与测试里的构造签名。
+func (s *Scheduler) SetCategorizer(c *categorizer.Manager) {
+	s.categorizer = c
+	if c != nil && s.torrentCache != nil {
+		c.SetTorrentCache(s.torrentCache)
+	}
+}
 
 // allTorrents 优先读共享快照；未就绪时回退到直连 qB。
 func (s *Scheduler) allTorrents() ([]models.QBTorrent, error) {
@@ -89,6 +102,9 @@ func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	s.limiter.Reload(nil)
 	s.fileMgr.Reload(nil)
 	s.rssEngine.Reload(nil)
+	if s.categorizer != nil {
+		s.categorizer.Reload(nil)
+	}
 
 	// 3) notifier 内部已经 Reload，在 web.server.saveConfig 里单独调
 	logger.Info.Println("调度器：ReloadAll 完成（qB 凭据 + 所有子系统）")
@@ -145,6 +161,9 @@ func (s *Scheduler) Start() {
 	s.limiter.Start()
 	s.fileMgr.Start()
 	s.rssEngine.Start()
+	if s.categorizer != nil {
+		s.categorizer.Start()
+	}
 
 	// 启动后先扫一遍历史已完成任务，预填充 finished map，避免重启后给老任务重发通知
 	go s.prefillFinished()
@@ -216,6 +235,9 @@ func (s *Scheduler) Stop() {
 	s.limiter.Stop()
 	s.fileMgr.Stop()
 	s.rssEngine.Stop()
+	if s.categorizer != nil {
+		s.categorizer.Stop()
+	}
 }
 
 func (s *Scheduler) scanCompleted() {
