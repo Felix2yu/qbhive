@@ -728,7 +728,7 @@ code {
 }
 
 .panel-heading-text p {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   font-size: 11.5px;
   line-height: 1.55;
   color: var(--ink-dim);
@@ -815,7 +815,7 @@ code {
 }
 
 .section-heading p {
-  margin: 3px 0 0 14px;
+  margin: 6px 0 0 14px;
   font-size: 11.5px;
   color: var(--ink-faint);
   line-height: 1.55;
@@ -1366,6 +1366,7 @@ input::file-selector-button {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  margin: 12px 0;
   padding: 10px 13px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
@@ -1643,7 +1644,7 @@ input::file-selector-button {
 }
 
 .stat-meta {
-  margin-top: 1px;
+  margin-top: 5px;
   font-size: 10.5px;
   color: var(--ink-faint);
   white-space: nowrap;
