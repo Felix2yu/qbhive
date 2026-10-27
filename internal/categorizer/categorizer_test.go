@@ -116,6 +116,32 @@ func TestEvaluatePriorityAndFallback(t *testing.T) {
 	}
 }
 
+// 用名字特征而非枚举 state 判定「能不能安全分类」。这是 ddc2b109... 误判的根因修复：
+// 排队中的磁链（queuedDL）名字仍是 hex hash 原文，曾经被 latinCount 误判成「外文」。
+func TestReadyForCategory(t *testing.T) {
+	cases := []struct {
+		name string
+		st   string
+		size int64
+		want bool
+	}{
+		{"ddc2b10963e785dc1ef2687ebebf0902ec2ae977", "queuedDL", -1, false},     // 本次 bug：排队中 + hex 名字
+		{"8AC3731AD4B2A2B1C4D5E6F708192A3B4C5D6E7F", "metaDL", -1, false},      // 正在取元数据 + hex 名字
+		{"magnet:?xt=urn:btih:8AC3", "metaDL", -1, false},                      // magnet 链接原文
+		{"ddc2b10963e785dc1ef2687ebebf0902ec2ae977", "downloading", 8589934592, false}, // 名字仍是 hash：还没解析出真实名，不动
+		{"SONE-123 部长与社长", "queuedDL", 8589934592, true},                  // 带 dn 的 magnet，名字已是真实名
+		{"Star.Wars.Episode.1080p.x264", "queuedDL", 8589934592, true},         // 真实英文名 + 排队中
+		{"这是一个相当长的中文名称超过十个汉字", "downloading", 8589934592, true},
+		{"短名", "downloading", 0, true}, // size 字段缺失(=0) 不能拦：否则整个功能静默失效
+	}
+	for _, c := range cases {
+		got := readyForCategory(models.QBTorrent{Name: c.name, State: c.st, Size: c.size})
+		if got != c.want {
+			t.Errorf("readyForCategory(%q,%s,%d) = %v, want %v", c.name, c.st, c.size, got, c.want)
+		}
+	}
+}
+
 // 顺序即优先级：把「英文长名」挪到第一条后，同时满足英文与编号的名字应归外文
 func TestEvaluateOrderMatters(t *testing.T) {
 	rules := testRules()
@@ -365,6 +391,9 @@ func TestScanSkipsMetadataPending(t *testing.T) {
 			State: "forcedMetaDL", Size: -1},
 		{Hash: "m3", Name: "E5C8B1A7D4F2A9B6C3E8D1F4A7B2C5E8D9F1A4B7",
 			State: "metaDL", Size: -1},
+		// 本次 bug 复现：排队中的磁链，名字仍是 hex hash 原文，state=queuedDL
+		{Hash: "q1", Name: "ddc2b10963e785dc1ef2687ebebf0902ec2ae977",
+			State: "queuedDL", Size: -1},
 		// 对照组：元数据已到位的正常任务，必须照常分类
 		{Hash: "ok1", Name: "SONE-123 部长与社长", State: "downloading", Size: 8589934592},
 	}
@@ -390,13 +419,90 @@ func TestScanSkipsMetadataPending(t *testing.T) {
 			seen[h] = true
 		}
 	}
-	for _, h := range []string{"m1", "m2", "m3"} {
+	for _, h := range []string{"m1", "m2", "m3", "q1"} {
 		if seen[h] {
 			t.Errorf("%s 处于待元数据状态，不该被分类", h)
 		}
 	}
 	if !seen["ok1"] {
 		t.Errorf("元数据已到位的 ok1 应被正常分类，实际调用：%+v", st.calls)
+	}
+}
+
+// 存量自愈：曾经在 hex 阶段被误打分类、现在仍未就绪的任务，扫描时应清除错误分类
+// （qB 侧取消分类 + 内存记录删除），且只在 qB 现状仍等于记录值（用户没手动改过）时动 qB。
+func TestScanHealsMisclassifiedPending(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	t.Setenv("QBHIVE_CONFIG", cfgPath)
+
+	hash := "ddc2b10963e785dc1ef2687ebebf0902ec2ae977"
+	srv, st := newMockQBServer(t, []models.QBTorrent{
+		// 真实名字仍是 hash，元数据未就绪；qB 现状分类 W 等于 categorizer 记录值
+		{Hash: hash, Name: hash, State: "queuedDL", Size: -1, Category: "W"},
+	})
+	cli := qb.New(srv.URL, "u", "p", "")
+
+	cfgMgr := config.New(cfgPath)
+	on := true
+	base := cfgMgr.Get()
+	base.AutoCategory = models.AutoCategoryConfig{
+		Enabled: true, Interval: 60, OnlyIfEmpty: &on, Rules: testRules(),
+	}
+	cfgMgr.Set(base)
+
+	m := New(cfgMgr, cli)
+	// 预置历史误打记录（categorizer 之前在 hex 阶段误打成了 W）
+	m.state[hash] = &catRecord{Cat: "W", Sig: "old"}
+
+	m.scan()
+
+	// 应当清掉误打：qB 收到一次空分类调用，且 state 记录被删除
+	st.mu.Lock()
+	cleared := st.calls[""]
+	st.mu.Unlock()
+	if len(cleared) != 1 || cleared[0] != hash {
+		t.Errorf("误打分类应被清除（空分类调用），实际：%+v", st.calls)
+	}
+	if _, ok := m.state[hash]; ok {
+		t.Errorf("清除后 state 记录应被删除")
+	}
+}
+
+// 用户手动改过分类的未就绪任务：categorizer 不应越权清除，只删自己的记录。
+func TestScanRespectsManuallyChangedPending(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	t.Setenv("QBHIVE_CONFIG", cfgPath)
+
+	hash := "ddc2b10963e785dc1ef2687ebebf0902ec2ae977"
+	srv, st := newMockQBServer(t, []models.QBTorrent{
+		// 用户已手动把分类从 W 改成「手动整理」
+		{Hash: hash, Name: hash, State: "queuedDL", Size: -1, Category: "手动整理"},
+	})
+	cli := qb.New(srv.URL, "u", "p", "")
+
+	cfgMgr := config.New(cfgPath)
+	on := true
+	base := cfgMgr.Get()
+	base.AutoCategory = models.AutoCategoryConfig{
+		Enabled: true, Interval: 60, OnlyIfEmpty: &on, Rules: testRules(),
+	}
+	cfgMgr.Set(base)
+
+	m := New(cfgMgr, cli)
+	m.state[hash] = &catRecord{Cat: "W", Sig: "old"} // categorizer 误打记录
+
+	m.scan()
+
+	st.mu.Lock()
+	cleared := st.calls[""]
+	st.mu.Unlock()
+	if len(cleared) != 0 {
+		t.Errorf("用户手动改过的分类不应被清除，实际：%+v", st.calls)
+	}
+	if _, ok := m.state[hash]; ok {
+		t.Errorf("categorizer 自己的误打记录应被删除")
 	}
 }
 
