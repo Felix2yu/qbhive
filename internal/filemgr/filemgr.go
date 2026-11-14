@@ -23,6 +23,9 @@ type Manager struct {
 	client *qb.Client
 	stop   chan struct{}
 
+	// torrentCache 共享任务快照（装配层注入，nil 时回退直连）
+	torrentCache *qb.TorrentCache
+
 	// 运行中的 ticker 控制
 	tickerStop chan struct{}
 
@@ -148,6 +151,21 @@ func (m *Manager) SetClient(c *qb.Client) {
 	m.client = c
 }
 
+// SetTorrentCache 注入共享任务快照（装配层在 Start 之前调用一次）。
+func (m *Manager) SetTorrentCache(c *qb.TorrentCache) { m.torrentCache = c }
+
+// allTorrents 优先读共享快照；未就绪时回退到直连 qB。
+// 扫描是周期性的（默认 15s），直连全表在 7000+ 任务时单次 20MB，
+// 一小时就是十几 GB 内网流量加 qB 侧的反复序列化。
+func (m *Manager) allTorrents() ([]models.QBTorrent, error) {
+	if m.torrentCache != nil {
+		if list, err := m.torrentCache.GetTorrents("all", "", ""); err == nil {
+			return list, nil
+		}
+	}
+	return m.client.GetTorrents("all", "", "")
+}
+
 // SetNotifier 注入通知通道（由装配层传入 notifier.Notify）。
 // filemgr 不直接依赖 notifier 包：这里只留一个函数值，nil 时通知静默跳过。
 func (m *Manager) SetNotifier(fn func(title, body string)) {
@@ -239,7 +257,7 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) scan() {
-	list, err := m.client.GetTorrents()
+	list, err := m.allTorrents()
 	if err != nil {
 		logger.Warn.Printf("文件管理获取任务列表失败：%v", err)
 		return
