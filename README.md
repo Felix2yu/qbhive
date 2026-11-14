@@ -6,7 +6,7 @@ qBittorrent 的 Web 管理面板与自动化工具箱：一个单二进制、零
 - 后端：Go + [Gin](https://github.com/gin-gonic/gin)，`CGO_ENABLED=0` 纯静态二进制
 - 前端：原生 HTML/CSS/JS，构建时随二进制一同打包，无需 Node 工具链；`web/static/ui.js`
   是全站共享的 Hive Console 设计系统组件层
-- 界面：桌面侧栏工作区 + 移动端底部导航，暗色 / 亮色 / 跟随系统三套主题，六个页面共用
+- 界面：桌面侧栏工作区 + 移动端底部导航，暗色 / 亮色 / 跟随系统三套主题，七个页面共用
   同一套间距、字体层级、控件与交互反馈
 - 对接：qBittorrent WebUI API v2，**仅支持 qBittorrent 5.x**（stop/start 端点、`stopped` 状态与 filter；
   不兼容 4.x 的 pause/resume 端点），支持 Cookie 登录与 v5.2.0+ 的 API Key
@@ -140,7 +140,8 @@ exec /usr/bin/shortcuts run "Permute HEVC" -i "$1"
 产物小于原片 5%（疑似半成品）时两边都不删。
 加「同名」这条是因为文件可能散在共享分类根：只按「同目录 + 新文件」认产物，
 会把别的任务刚下完的片子当成产物，进而删掉原片或删掉别人的文件。
-删除会写进「文件」页审计日志（状态 `已删除`，不可回退）。⚠️ 删掉原片会让 qB 认为种子缺文件。
+删除会写进「文件」页审计日志（状态 `已删除`，不可回退）。⚠️ 删掉原片会让 qB 认为种子缺文件，
+留下的任务壳由下文「任务退休与归档账本」清掉。
 
 **删除前校验（默认开启，硬闸门）**：单看体积判断「转码成功」是不够的——转码被中断、
 封装损坏时命令照样返回 0，只留一个同样更小的坏文件，按大小判定就会拿坏文件顶掉完好的
@@ -155,6 +156,58 @@ exec /usr/bin/shortcuts run "Permute HEVC" -i "$1"
 校验器缺失或产物校验不通过时，**一个文件都不删**（原片完整保留，日志里写明原因）。
 未通过校验的产物也保留，不做二次删除——「删不掉的视频」比「多一个占空间的文件」安全。
 关闭该选项（设置页「删除前校验产物」）会退回到纯按大小判定。
+
+### 任务退休与归档账本
+转码清理掉原片后，qB 里留下一个 `missingFiles` 的任务壳。实测那台服务器 **7283 条任务里 7155 条
+是这种壳**：每次启动都要加载它们的 resume 数据，`torrents/info` 全量 **20.60 MB**、
+`sync/maindata` 首次全量 **27.45 MB / 2.38 s**，原生客户端冷启动必须吃下这一整包。
+
+退休扫描（默认 60 s 一轮）把收敛的任务从 qB 移除、**磁盘文件一个不动**，元数据与磁链写进
+`data/archive.jsonl`，网页「历史」页仍可检索。两条判定路径：
+
+| | 失去实体 | 健康完成 |
+| --- | --- | --- |
+| 状态 | `missingFiles`/`error` 且已有完成时间 | `stoppedUP`/`stalledUP`/`uploading`/`queuedUP`/`forcedUP` 且进度 ≥ 99.9% |
+| 做种门槛 | **免**（`exemptLostFiles`，原片已不在） | `minRatio` / `minHours` / `minUploadedMB` 任一达标 |
+
+两条路径都还要求：名单（分类/标签包含排除，与转码后处理同一套语义）不跳过、文件侧已收敛
+——清理与转码都派发完且**命令真的跑完**，再静默 `quietMinutes` 分钟。原有的 `PostDone` 只表示
+「派发完」，最后一条转码命令可能还在后台跑几十分钟，所以收敛判定另外记了命令结束时刻。
+
+- **先建档再删**：账本追加并 `fsync` 成功才进删除批次，写失败一个删除请求都不发
+- `deleteFiles` **恒 false**，一批 `batchSize` 条一次请求；删成功再追加同 hash 修正行填退休时间
+- **`dryRun` 默认 true**：只建档、零删除请求，先在「历史」页切到「退休候选」核对条数与抽样记录
+- 退休与守卫都读**共享快照**（`maindata` 增量 2 s），不额外拉全表；文件管理与限速规则的扫描
+  也已改读同一份快照，不再各自绕过去拉 20 MB 全量
+
+**重复下载守卫**（默认 `off`）：同一 infohash 退休后又被加回来时按档位处置。默认 5 s 一轮读内存
+快照，快照未就绪就跳过本轮（绝不直连兜底）。触发要求账本里已退休、本次 `added_on > retiredAt`
+（排除正在退休的任务）、状态不在校验/移动中。
+
+| 档位 | 动作 |
+| --- | --- |
+| `off` | 不扫 |
+| `notify` | 只告警 + 日志，列出判定依据。**这就是干跑**，用它核对判定准不准 |
+| `remove` | 移除任务，文件留着（会留下孤儿半成品，是刻意的中间档） |
+| `remove-files` | 先清本次重下写出来的文件，再移除任务 |
+
+`remove-files` **不用 qB 的 `deleteFiles`**：qB 按元数据路径删、不看完成度，会把未转码任务的完好
+原片一把删光。它逐个文件过四道闸门——路径不越界（与转码同一套防护）、磁盘上是普通文件（绝不删
+目录）、**`mtime >= added_on`**（证明是本次重下写出来的）、取不到 mtime 就**不删**并降级为只移除
+任务（Docker 没挂存储卷时就是这种情况）。qB 的 `.!qB` 临时名两种写法都试；转码产物与原片同名不同
+扩展名、不在种子元数据里，天然不会被删。每个删除写审计（不可回退）。单轮候选超过 `maxPerRound`
+只告警不动手，同一 hash 的通知按 `notifyCooldownMinutes` 冷却。
+
+**历史页**：搜索名称/保存路径、分类与标签筛选、排序、服务端分页（7000 条不整表下发），行内复制
+磁链；「退休候选」视图给「确认移除 N 条」；单条删除是**「我确实想重下」的逃生口**——删掉账本记录后守卫
+不再拦。接口 `GET /api/archive`、`DELETE /api/archive/:hash`、`POST /api/archive/retire`，
+与其它接口共用 `QBHIVE_TOKEN` 鉴权。不新增添加入口：守卫已覆盖 qB WebUI / 原生客户端 / RSS 全部
+路径，不需要改加磁链的习惯。
+
+**已知限制**：完成时间为 0 的失去实体任务退不掉；检测窗口内会真的下几秒（5 s 轮询 + 2 s 快照
+新鲜度，最坏约 7 s）；删文件要求 qbhive 看得到 qB 的存储；账本不备份 `.torrent`，退休后无法一键
+加回恢复做种；健康完成任务过门槛后退休即**停止做种**——PT 场景把 `minRatio`/`minHours` 调到站点
+要求以上，或只开失去实体那条路径。
 
 ### 运行日志
 - 四把 logger（INFO / WARN / ERROR / DEBUG）在写 stdout/stderr 的同时旁路抄一份进内存环形缓冲，
@@ -290,6 +343,22 @@ go build -o qbhive ./cmd/server
         "enabled": true
       }
     ]
+  },
+  "archive": {
+    "enabled": false,
+    "interval": 60,
+    "dryRun": true,
+    "batchSize": 100,
+    "quietMinutes": 5,
+    "minRatio": 1.0,
+    "minHours": 24,
+    "minUploadedMB": 0,
+    "exemptLostFiles": true,
+    "categoryInclude": "",
+    "categoryExclude": "",
+    "tagInclude": "",
+    "tagExclude": "",
+    "guard": { "mode": "off", "interval": 5, "maxPerRound": 20, "notifyCooldownMinutes": 10 }
   }
 }
 ```
@@ -329,12 +398,24 @@ go build -o qbhive ./cmd/server
 | `fileManager.postProcess.sizePrune` | 命令成功后按大小二选一清理（产物更小则删原片，否则保留原片删产物） |
 | `fileManager.postProcess.verify` | 删原片前用 ffprobe 校验产物是否真能解出视频流（`true`/`false`，缺省按 `true`）。校验不通过或找不到 ffprobe 则不删任何文件 |
 | `fileManager.postProcess.probePath` | ffprobe 绝对路径，留空自动探测（默认按 `PATH → /opt/homebrew/bin → /usr/local/bin → /usr/bin` 找） |
+| `archive.enabled` | 任务退休扫描开关（默认关闭）。开启后把收敛的完成任务从 qB 移除、**磁盘文件一个不动**，元数据与磁链写进账本 |
+| `archive.interval` | 退休扫描间隔（秒），默认 60 |
+| `archive.dryRun` | 只建档、零删除请求，**缺省视为 `true`**（安全闸门：老配置升级不会突然开始删任务）。在「历史」页「退休候选」视图核对完再改 `false` |
+| `archive.batchSize` | 单轮最多提交多少条删除，一批一次请求，默认 100 |
+| `archive.quietMinutes` | 最后一条后处理命令**结束**后再静默多少分钟才允许退休，默认 5（`<=0` 按 5）。派发完不等于跑完 |
+| `archive.minRatio` / `minHours` / `minUploadedMB` | 健康完成任务的做种门槛，三者**任一**达标即可退休；`<=0` 表示该项不启用。失去实体路径不看这三项 |
+| `archive.exemptLostFiles` | 失去实体（原片已被转码清理）的任务免做种门槛，**缺省视为 `true`** |
+| `archive.categoryInclude` / `categoryExclude` / `tagInclude` / `tagExclude` | 退休名单，语义与 `fileManager.postProcess` 的同名字段完全一致（共用同一套实现，不另写一份） |
+| `archive.guard.mode` | 重复下载守卫档位：`off`（默认）/ `notify`（干跑，只告警）/ `remove`（移除任务、文件留着）/ `remove-files`（清掉本次重下写出的文件再移除）。**填错的值一律降为 `off`** |
+| `archive.guard.interval` | 守卫扫描间隔（秒），默认 5。读内存快照，不产生额外 qB 请求；快照未就绪就跳过本轮 |
+| `archive.guard.maxPerRound` | 单轮候选上限，超过则本轮只告警不动手，默认 20 |
+| `archive.guard.notifyCooldownMinutes` | 同一 hash 的告警冷却（分钟），默认 10 |
 
 ### 环境变量
 
 | 变量 | 说明 |
 | --- | --- |
-| `QBHIVE_CONFIG` | 配置文件路径（默认 `config.json`；容器内为 `/app/data/config.json`） |
+| `QBHIVE_CONFIG` | 配置文件路径（默认 `config.json`；容器内为 `/app/data/config.json`）。退休账本 `archive.jsonl` 跟它同目录，未设此变量时为 `data/archive.jsonl`——**只改 `-config` 参数不改这个变量，账本会落到 `data/` 下** |
 | `QBHIVE_WEB` | 静态资源目录（默认 `web/static`；容器内为 `/app/web/static`） |
 | `QBHIVE_TOKEN` | 设置后 Web UI 需要登录，API 走 Bearer Token / Cookie |
 | `TZ` | 时区，例如 `Asia/Shanghai` |
@@ -346,10 +427,12 @@ go build -o qbhive ./cmd/server
 1. **概览** —— 速度、状态计数、最近活跃任务
 2. **任务** —— 全量任务浏览、搜索、排序、单任务限速
 3. **文件** —— 文件名审计日志（时间 / 任务 / 变更 / 方式 / 状态），可一键回退任意自动重命名
-4. **RSS** —— 订阅源与规则管理，查看每个源的抓取状态与最近条目
-5. **日志** —— 服务进程内存里的运行日志（最近 2000 条），可按级别筛选、搜索、导出
-6. **设置** —— 主题、qBittorrent 连接（可测试连接）、监听地址、限速规则、通知、文件管理，
-   改完点「保存全部设置」即热生效
+4. **历史** —— 退休账本检索：搜索、分类/标签筛选、排序、分页，行内复制磁链；
+   「退休候选」视图可「确认移除」，单条删除是「我确实想重下」的逃生口
+5. **RSS** —— 订阅源与规则管理，查看每个源的抓取状态与最近条目
+6. **日志** —— 服务进程内存里的运行日志（最近 2000 条），可按级别筛选、搜索、导出
+7. **设置** —— 主题、qBittorrent 连接（可测试连接）、监听地址、限速规则、通知、文件管理、
+   任务退休与重复下载守卫，改完点「保存全部设置」即热生效
 
 ## 项目结构
 
@@ -359,15 +442,16 @@ internal/
   config/            配置读写与热重载
   logger/            分级日志：stdout/stderr + 内存环形缓冲（供网页「日志」页读取）
   qbittorrent/       qB WebUI API v2 客户端
-  scheduler/         后台调度：完成通知扫描、状态持久化
+  scheduler/         后台调度：完成通知扫描、退休与守卫启停、状态持久化
   notifier/          Apprise-Go 通知
   rss/               RSS 拉取、规则匹配、去重与提交
   limiter/           按规则下发上传限速
-  filemgr/           单文件自动归档、文件名清理（正则 + AI）、审计与回退
+  filemgr/           单文件自动归档、文件名清理（正则 + AI）、转码后处理、审计与回退
+  archive/           退休账本（append-only JSONL）、退休扫描、重复下载守卫
   web/               HTTP API + 鉴权
   models/            配置与数据结构
 web/static/          前端（原生 HTML/CSS/JS）
-data/                运行状态（finished.json / rss_seen.json / filemgr_clean.json / filemgr_audit.jsonl），不入库
+data/                运行状态（finished.json / rss_seen.json / filemgr_clean.json / filemgr_audit.jsonl / archive.jsonl），不入库
 ```
 
 ## CI / 发布
