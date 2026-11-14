@@ -10,6 +10,52 @@ type AppConfig struct {
 	FileManager  FileManagerConfig  `json:"fileManager"`
 	Proxy        ProxyConfig        `json:"proxy"`
 	AutoCategory AutoCategoryConfig `json:"autoCategory"`
+	Archive      ArchiveConfig      `json:"archive"`
+}
+
+// 重复下载守卫的档位，逐级放开不可逆动作。
+// 缺省必须是 off：老 config.json 没有这个键，升级后不能凭空开始删文件。
+const (
+	GuardModeOff         = "off"          // 不扫描
+	GuardModeNotify      = "notify"       // 只告警，任务与文件都不动（干跑）
+	GuardModeRemove      = "remove"       // 移除任务，文件留在磁盘
+	GuardModeRemoveFiles = "remove-files" // 先清掉本次重下写出的文件，再移除任务
+)
+
+// ArchiveConfig 任务退休与归档账本。
+// 退休＝把完成并收敛的任务从 qB 移除（磁盘文件保留），元数据写进账本仍可检索。
+type ArchiveConfig struct {
+	Enabled  bool `json:"enabled"`
+	Interval int  `json:"interval"` // 退休扫描间隔，秒
+	// DryRun 只建档不删任务。安全闸门，缺省视为 true（见 config.applyConfigDefaults）
+	DryRun    *bool `json:"dryRun"`
+	BatchSize int   `json:"batchSize"` // 单轮最多提交多少条删除，一次请求一批
+	// QuietMinutes 最后一条后处理命令结束后再静默多久才允许退休，
+	// 避免转码刚收尾就动任务
+	QuietMinutes int `json:"quietMinutes"`
+	// 做种门槛：三者任一满足即可退休（只对健康完成的任务生效）
+	MinRatio      float64 `json:"minRatio"`
+	MinHours      int     `json:"minHours"`
+	MinUploadedMB int64   `json:"minUploadedMB"`
+	// ExemptLostFiles 失去实体（原片已被转码清理）的任务免做种门槛。
+	// 安全闸门，缺省视为 true
+	ExemptLostFiles *bool       `json:"exemptLostFiles"`
+	CategoryInclude string      `json:"categoryInclude"`
+	CategoryExclude string      `json:"categoryExclude"`
+	TagInclude      string      `json:"tagInclude"`
+	TagExclude      string      `json:"tagExclude"`
+	Guard           GuardConfig `json:"guard"`
+}
+
+// GuardConfig 重复下载守卫：定期比对 qB 现有任务与账本，
+// 发现「退休后又被重新添加」的同一 infohash 就按档位处置。
+type GuardConfig struct {
+	Mode     string `json:"mode"`     // 见 GuardMode* 常量，缺省 off
+	Interval int    `json:"interval"` // 扫描间隔，秒
+	// MaxPerRound 单轮候选上限，超过则本轮只告警不动手，
+	// 防止账本误导入造成批量删文件
+	MaxPerRound           int `json:"maxPerRound"`
+	NotifyCooldownMinutes int `json:"notifyCooldownMinutes"`
 }
 
 // ProxyConfig 控制 qbhive 所有出网请求（RSS 抓取、通知、远程 qB/AI）走哪个代理。
@@ -208,16 +254,16 @@ type AutoCategoryConfig struct {
 	// 分类全部冲掉，因此由 config 层补成 true。
 	OnlyIfEmpty *bool `json:"onlyIfEmpty,omitempty"`
 	// Fallback 兜底分类名：所有规则都没命中时归入它；留空表示不动
-	Fallback string          `json:"fallback"`
+	Fallback string         `json:"fallback"`
 	Rules    []CategoryRule `json:"rules"`
 }
 
 // CategoryRule 一条分类规则。When 是条件数组，语义为 AND（全部满足才算命中）。
 type CategoryRule struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Enabled  bool   `json:"enabled"`
-	Category string `json:"category"` // 命中后要打上的分类名
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	Enabled  bool           `json:"enabled"`
+	Category string         `json:"category"` // 命中后要打上的分类名
 	When     []CategoryCond `json:"when"`
 }
 
@@ -277,6 +323,7 @@ type QBTorrent struct {
 	Ratio         float64 `json:"ratio"`
 	Seeds         int     `json:"num_seeds"`
 	Peers         int     `json:"num_leechs"`
+	Tracker       string  `json:"tracker"` // 当前主 tracker URL；构造磁链用，空表示无 tracker
 }
 
 // torrent 文件列表项（来自 /api/v2/torrents/files）
