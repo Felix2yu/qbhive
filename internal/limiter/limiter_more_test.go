@@ -21,7 +21,8 @@ type limiterEnv struct {
 
 	mu           sync.Mutex
 	torrentsJSON string
-	limitStatus  int // setUploadLimit 返回的状态码，0 视为 200
+	maindataJSON string // 非空时 /sync/maindata 才作答，供共享快照测试用
+	limitStatus  int    // setUploadLimit 返回的状态码，0 视为 200
 	limitCalls   []string
 	infoCalls    int
 }
@@ -40,6 +41,16 @@ func newLimiterEnv(t *testing.T, rules []models.LimitRule, torrentsJSON string) 
 		body := env.torrentsJSON
 		env.mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-bittorrent")
+		_, _ = w.Write([]byte(body))
+	})
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		env.mu.Lock()
+		body := env.maindataJSON
+		env.mu.Unlock()
+		if body == "" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		_, _ = w.Write([]byte(body))
 	})
 	mux.HandleFunc("/api/v2/torrents/setUploadLimit", func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +80,20 @@ func (e *limiterEnv) setTorrents(json string) {
 	e.mu.Lock()
 	e.torrentsJSON = json
 	e.mu.Unlock()
+}
+
+// setMaindata 设定 /sync/maindata 的应答（共享快照用）
+func (e *limiterEnv) setMaindata(json string) {
+	e.mu.Lock()
+	e.maindataJSON = json
+	e.mu.Unlock()
+}
+
+// infoCount 直连 torrents/info 的次数（handler 在别的 goroutine 里累加，读要持锁）
+func (e *limiterEnv) infoCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.infoCalls
 }
 
 func (e *limiterEnv) calls() []string {

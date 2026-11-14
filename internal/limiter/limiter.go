@@ -7,6 +7,7 @@ import (
 
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/logger"
+	"github.com/Felix2yu/qbhive/internal/models"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
 )
 
@@ -45,6 +46,9 @@ type Limiter struct {
 	client *qb.Client
 	stop   chan struct{}
 
+	// torrentCache 共享任务快照（装配层注入，nil 时回退直连）
+	torrentCache *qb.TorrentCache
+
 	// 运行中的 ticker 控制：每次 Reload/Start 时重建
 	tickerStop chan struct{}
 	running    bool
@@ -60,6 +64,21 @@ func New(cfg *config.Manager, client *qb.Client) *Limiter {
 // SetClient 热替换 qb 客户端（配置改了连哪台 qB 都变了）
 func (l *Limiter) SetClient(c *qb.Client) {
 	l.client = c
+}
+
+// SetTorrentCache 注入共享任务快照（装配层在 Start 之前调用一次）。
+func (l *Limiter) SetTorrentCache(c *qb.TorrentCache) { l.torrentCache = c }
+
+// allTorrents 优先读共享快照；未就绪时回退到直连 qB。
+// 轮询默认 10s 一轮，直连全表在 7000+ 任务时单次 20MB。快照最多旧 2s，
+// 而压速本身有 10% 死区，这点新鲜度差异不会改变下发结果。
+func (l *Limiter) allTorrents() ([]models.QBTorrent, error) {
+	if l.torrentCache != nil {
+		if list, err := l.torrentCache.GetTorrents("all", "", ""); err == nil {
+			return list, nil
+		}
+	}
+	return l.client.GetTorrents("all", "", "")
 }
 
 // Reload 根据最新配置重启（或停止）限速轮询。
@@ -129,7 +148,7 @@ func (l *Limiter) Stop() {
 
 func (l *Limiter) apply() {
 	rules := l.cfg.Get().Limiter.Rules
-	torrents, err := l.client.GetTorrents("all")
+	torrents, err := l.allTorrents()
 	if err != nil {
 		logger.Warn.Printf("限速器获取任务列表失败：%v", err)
 		return
