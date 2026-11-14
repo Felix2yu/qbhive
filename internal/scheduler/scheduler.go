@@ -42,6 +42,17 @@ type Scheduler struct {
 
 	// 归档退休：同样自带 ticker，missingFiles 不在 filemgr 的完成态白名单里
 	retirer *archive.Retirer
+
+	// 重复下载守卫：5s 一轮只读快照，与退休扫描互不依赖
+	guard *archive.Guard
+}
+
+// SetGuard 注入重复下载守卫（可选；nil 时跳过启停与重载）
+func (s *Scheduler) SetGuard(g *archive.Guard) {
+	s.guard = g
+	if g != nil && s.torrentCache != nil {
+		g.SetTorrentCache(s.torrentCache)
+	}
 }
 
 // SetRetirer 注入归档退休扫描器（可选；nil 时跳过启停与重载）
@@ -120,6 +131,9 @@ func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	if s.retirer != nil {
 		s.retirer.Reload(nil)
 	}
+	if s.guard != nil {
+		s.guard.Reload(nil)
+	}
 
 	// 3) notifier 内部已经 Reload，在 web.server.saveConfig 里单独调
 	logger.Info.Println("调度器：ReloadAll 完成（qB 凭据 + 所有子系统）")
@@ -181,6 +195,9 @@ func (s *Scheduler) Start() {
 	}
 	if s.retirer != nil {
 		s.retirer.Start()
+	}
+	if s.guard != nil {
+		s.guard.Start()
 	}
 
 	// 启动后先扫一遍历史已完成任务，预填充 finished map，避免重启后给老任务重发通知
@@ -258,6 +275,9 @@ func (s *Scheduler) Stop() {
 	}
 	if s.retirer != nil {
 		s.retirer.Stop()
+	}
+	if s.guard != nil {
+		s.guard.Stop()
 	}
 }
 

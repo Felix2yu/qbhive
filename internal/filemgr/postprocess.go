@@ -37,8 +37,9 @@ const (
 	// 落地，连续这么多轮仍未 Done 说明它卡住了（改名反复失败/目标撞名）。
 	// 到点后放行并告警一次：清理故障不能让转码永久停摆，代价是产物可能沿用脏名。
 	postCleanMaxWaits = 8
-	// partialFileSuffix libtorrent 给未下完的文件加的尾缀，去掉它才是最终文件名
-	partialFileSuffix = ".!qB"
+	// PartialFileSuffix libtorrent 给未下完的文件加的尾缀，去掉它才是最终文件名。
+	// 转码派发与重复守卫都要认它：qB 报告的名字可能带尾缀也可能不带
+	PartialFileSuffix = ".!qB"
 	// postLogTailLines 命令输出写入日志的最大行数（避免转码工具刷屏）
 	postLogTailLines = 15
 	// postTestTimeout 设置页「测试运行」的兜底超时（配置里留 0 或超长时用它收紧，
@@ -460,8 +461,8 @@ func (m *Manager) pendingPostTargets(t models.QBTorrent, pc models.PostProcessCo
 	matched := 0
 	for _, f := range files {
 		name := filepath.ToSlash(f.Name)
-		partial := strings.HasSuffix(name, partialFileSuffix)
-		name = strings.TrimSuffix(name, partialFileSuffix)
+		partial := strings.HasSuffix(name, PartialFileSuffix)
+		name = strings.TrimSuffix(name, PartialFileSuffix)
 		if !matchExt(name, pc.Extensions) {
 			continue
 		}
@@ -957,6 +958,29 @@ func (m *Manager) deletePostFile(t models.QBTorrent, p string) {
 	// 删除文件不可回退，属于必须让用户看见的动作
 	m.notifyEvent("QBHive 后处理删除了文件",
 		fmt.Sprintf("任务「%s」按大小二选一删除了：\n%s", t.Name, p))
+}
+
+// AuditGuardDelete 删除一个由重复下载守卫判定为「本次重下写出来」的文件，
+// 并写一条不可回退的审计记录，返回是否真的删掉了。
+//
+// 判定（路径不越界、是普通文件、mtime 不早于本次添加时刻）全在守卫侧做，
+// 这里只负责落地与留痕：审计日志和通知通道都由 filemgr 持有，不另起一套。
+// 通知由守卫按任务汇总发一条，不在这里逐个文件刷屏。
+func (m *Manager) AuditGuardDelete(t models.QBTorrent, path string) bool {
+	if err := os.Remove(path); err != nil {
+		logger.Warn.Printf("重复守卫 [%s] 删除 %s 失败：%v", t.Name, path, err)
+		return false
+	}
+	logger.Info.Printf("重复守卫 [%s] 已删除本次重下写出的 %s", t.Name, path)
+	m.audit.Append(auditEntry{
+		Hash:    t.Hash,
+		Torrent: t.Name,
+		Old:     path,
+		New:     "（已删除，退休后重复下载）",
+		Via:     auditViaGuard,
+		Status:  AuditPruned,
+	})
+	return true
 }
 
 // matchExt 判断文件是否命中扩展名白名单（白名单为空即放行）。

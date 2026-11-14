@@ -478,7 +478,7 @@ func buildCleanPlan(files []models.QBFile, custom []*regexp.Regexp, aiNames map[
 		// 一行日志都查不到的悬案，还会让任务被误判成已完成。
 		oldAbs := filepath.Join(savePath, filepath.FromSlash(oldFull))
 		if _, err := os.Lstat(oldAbs); err != nil {
-			if _, perr := os.Lstat(oldAbs + partialFileSuffix); perr != nil {
+			if _, perr := os.Lstat(oldAbs + PartialFileSuffix); perr != nil {
 				logger.Debug.Printf("文件清洗：磁盘上找不到 %s（%v），跳过该文件", oldFull, err)
 				unresolved++
 				continue

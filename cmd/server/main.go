@@ -66,6 +66,10 @@ func main() {
 	ret := archive.NewRetirer(cfgMgr, qbCli, archStore, fm)
 	ret.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
 	sch.SetRetirer(ret)
+	// 重复下载守卫：退休后同 infohash 被重新添加时按档位处置，默认 off
+	guard := archive.NewGuard(cfgMgr, qbCli, archStore, fm)
+	guard.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
+	sch.SetGuard(guard)
 	sch.Start()
 
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch, fm)

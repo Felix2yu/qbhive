@@ -2,6 +2,7 @@ package filemgr
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -244,5 +245,42 @@ func TestPostTaskFiltered_DelegatesToMatchLists(t *testing.T) {
 		if a != b || aw != bw {
 			t.Errorf("%+v: 委托后结论不一致 (%v,%q) vs (%v,%q)", tor, a, aw, b, bw)
 		}
+	}
+}
+
+// 守卫删文件复用 filemgr 的审计日志：必须留下不可回退的 pruned 记录，
+// 且 via 与转码二选一区分开
+func TestAuditGuardDelete(t *testing.T) {
+	m := setupPostProcess(t, models.PostProcessConfig{})
+	p := filepath.Join(t.TempDir(), "f.mkv")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tor := models.QBTorrent{Hash: "h", Name: "n"}
+
+	if !m.AuditGuardDelete(tor, p) {
+		t.Fatal("应删除成功")
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Error("文件应已被删除")
+	}
+	list, total := m.AuditList(0, 10)
+	if total != 1 || len(list) != 1 {
+		t.Fatalf("应写一条审计，got total=%d len=%d", total, len(list))
+	}
+	e := list[0]
+	if e.Hash != "h" || e.Torrent != "n" || e.Old != p {
+		t.Errorf("审计字段不符：%+v", e)
+	}
+	if e.Status != AuditPruned || e.Via != "dup-guard" {
+		t.Errorf("应为不可回退的 pruned/dup-guard，got %s/%s", e.Status, e.Via)
+	}
+
+	// 删不掉时返回 false 且不写审计：守卫据此统计真正删掉了几个
+	if m.AuditGuardDelete(tor, p) {
+		t.Error("文件已不存在，应返回 false")
+	}
+	if _, total := m.AuditList(0, 10); total != 1 {
+		t.Errorf("删除失败不该写审计，got %d", total)
 	}
 }

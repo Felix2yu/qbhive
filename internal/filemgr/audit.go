@@ -30,11 +30,15 @@ const (
 	AuditConfirmed  = "confirmed"  // 已确认落地
 	AuditFailed     = "failed"     // 提交失败或连续多轮未确认后放弃
 	AuditRolledback = "rolledback" // 已回退到旧名
-	AuditPruned     = "pruned"     // 后处理按大小二选一删除了文件（不可回退）
+	AuditPruned     = "pruned"     // 文件已被删除（转码二选一 / 重复守卫），不可回退
 )
 
 // auditViaPrune 审计记录 via 字段取值：后处理按大小清理（区别于正则 / AI 改名）
 const auditViaPrune = "prune"
+
+// auditViaGuard 审计记录 via 字段取值：重复下载守卫清掉本次重下写出的文件。
+// 与 prune 分开，便于在审计页区分「转码二选一」和「退休后又被重加」两种删除
+const auditViaGuard = "dup-guard"
 
 // auditViaLocalMove 审计记录 via 字段取值：qB renameFile 失败后由本地移动完成的归档。
 // 移动完成后 qB 元数据已同步到新路径，因此这类记录同样可以回退。
