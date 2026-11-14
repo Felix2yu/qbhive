@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Felix2yu/qbhive/internal/archive"
 	"github.com/Felix2yu/qbhive/internal/categorizer"
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
@@ -60,6 +61,11 @@ func main() {
 	// 自动分类自带扫描循环，与文件管理互不依赖：关掉归档不影响分类，反之亦然
 	cat := categorizer.New(cfgMgr, qbCli)
 	sch.SetCategorizer(cat)
+	// 归档退休：先建档（Sync 落盘）再移除任务，磁盘文件一律保留
+	archStore := archive.NewStore(archive.DefaultPath())
+	ret := archive.NewRetirer(cfgMgr, qbCli, archStore, fm)
+	ret.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
+	sch.SetRetirer(ret)
 	sch.Start()
 
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch, fm)

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Felix2yu/qbhive/internal/archive"
 	"github.com/Felix2yu/qbhive/internal/categorizer"
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
@@ -38,6 +39,17 @@ type Scheduler struct {
 
 	// 自动分类：自带 ticker，不挂在上述任何模块的扫描循环里
 	categorizer *categorizer.Manager
+
+	// 归档退休：同样自带 ticker，missingFiles 不在 filemgr 的完成态白名单里
+	retirer *archive.Retirer
+}
+
+// SetRetirer 注入归档退休扫描器（可选；nil 时跳过启停与重载）
+func (s *Scheduler) SetRetirer(r *archive.Retirer) {
+	s.retirer = r
+	if r != nil && s.torrentCache != nil {
+		r.SetTorrentCache(s.torrentCache)
+	}
 }
 
 // SetTorrentCache 注入共享任务快照（装配层在 Start 之前调用一次）。
@@ -105,6 +117,9 @@ func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	if s.categorizer != nil {
 		s.categorizer.Reload(nil)
 	}
+	if s.retirer != nil {
+		s.retirer.Reload(nil)
+	}
 
 	// 3) notifier 内部已经 Reload，在 web.server.saveConfig 里单独调
 	logger.Info.Println("调度器：ReloadAll 完成（qB 凭据 + 所有子系统）")
@@ -163,6 +178,9 @@ func (s *Scheduler) Start() {
 	s.rssEngine.Start()
 	if s.categorizer != nil {
 		s.categorizer.Start()
+	}
+	if s.retirer != nil {
+		s.retirer.Start()
 	}
 
 	// 启动后先扫一遍历史已完成任务，预填充 finished map，避免重启后给老任务重发通知
@@ -237,6 +255,9 @@ func (s *Scheduler) Stop() {
 	s.rssEngine.Stop()
 	if s.categorizer != nil {
 		s.categorizer.Stop()
+	}
+	if s.retirer != nil {
+		s.retirer.Stop()
 	}
 }
 
