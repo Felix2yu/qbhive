@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Felix2yu/qbhive/internal/archive"
 	"github.com/Felix2yu/qbhive/internal/categorizer"
 	"github.com/Felix2yu/qbhive/internal/config"
 	"github.com/Felix2yu/qbhive/internal/filemgr"
@@ -57,6 +58,10 @@ type Server struct {
 
 	// 自动分类引擎，仅用于设置页的试算接口（可选）
 	categorizer *categorizer.Manager
+
+	// 归档账本与退休扫描器（可选；未注入时归档接口返回「未加载」）
+	archiveStore *archive.Store
+	retirer      *archive.Retirer
 }
 
 // SetTorrentCache 注入共享任务快照（装配层调用一次）。
@@ -64,6 +69,12 @@ func (s *Server) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
 
 // SetCategorizer 注入自动分类引擎（可选；nil 时试算接口返回「未启用」）。
 func (s *Server) SetCategorizer(c *categorizer.Manager) { s.categorizer = c }
+
+// SetArchive 注入归档账本与退休扫描器（装配层调用一次）。
+func (s *Server) SetArchive(store *archive.Store, ret *archive.Retirer) {
+	s.archiveStore = store
+	s.retirer = ret
+}
 
 type cacheEntry struct {
 	data      interface{}
@@ -236,6 +247,11 @@ func (s *Server) Start(webRoot string) error {
 
 		// 自动分类：试算（只读，不写 qB、不落状态）
 		api.POST("/category/preview", s.categoryPreview)
+
+		// 归档：退休后的任务元数据检索、手动退休、以及「我确实想重下」的逃生口
+		api.GET("/archive", s.archiveSearch)
+		api.POST("/archive/retire", s.archiveRetire)
+		api.DELETE("/archive/:hash", s.archiveDelete)
 	}
 
 	if webRoot != "" {
@@ -1275,4 +1291,87 @@ func (s *Server) postProcessTest(c *gin.Context) {
 		Message: "命令执行成功",
 		Data:    map[string]string{"exitCode": "0", "output": res.Output, "filter": filter},
 	})
+}
+
+// archiveSearch 检索归档账本。过滤、排序、分页全在服务端做：
+// 几千条历史记录不整表下发，前端只拿当前页。
+func (s *Server) archiveSearch(c *gin.Context) {
+	if s.archiveStore == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "归档模块未加载"})
+		return
+	}
+	q := archive.Query{
+		Q:        c.Query("q"),
+		Category: c.Query("category"),
+		Tag:      c.Query("tag"),
+		Sort:     c.Query("sort"),
+		Order:    c.Query("order"),
+		Pending:  c.Query("pending") == "1" || c.Query("pending") == "true",
+	}
+	q.From, _ = strconv.ParseInt(c.Query("from"), 10, 64)
+	q.To, _ = strconv.ParseInt(c.Query("to"), 10, 64)
+	q.Offset, _ = strconv.Atoi(c.DefaultQuery("offset", "0"))
+	q.Limit, _ = strconv.Atoi(c.DefaultQuery("limit", "50"))
+	records, total := s.archiveStore.Search(q)
+	c.JSON(200, models.APIResponse{Success: true, Data: map[string]interface{}{
+		"records": records,
+		"total":   total,
+	}})
+}
+
+// archiveRetire 手动批量退休：绕过 dryRun 与做种门槛，直接建档 + 移除任务（磁盘文件保留）。
+// 不可逆（不备份 .torrent），前端必须二次确认。
+func (s *Server) archiveRetire(c *gin.Context) {
+	if s.retirer == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "归档模块未加载"})
+		return
+	}
+	var body struct {
+		Hashes []string `json:"hashes"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: "参数错误"})
+		return
+	}
+	hashes := make([]string, 0, len(body.Hashes))
+	for _, h := range body.Hashes {
+		if h = strings.TrimSpace(h); h != "" {
+			hashes = append(hashes, h)
+		}
+	}
+	if len(hashes) == 0 {
+		c.JSON(400, models.APIResponse{Success: false, Message: "缺少任务 hash"})
+		return
+	}
+	n, err := s.retirer.ManualRetire(hashes)
+	if err != nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	s.invalidateTorrentCache()
+	c.JSON(200, models.APIResponse{
+		Success: true,
+		Message: fmt.Sprintf("已退休 %d 条任务，磁盘文件保留", n),
+		Data:    map[string]int{"retired": n},
+	})
+}
+
+// archiveDelete 从账本移除一条记录——「我确实想重下这个磁链」的逃生口。
+// 记录没了，重复下载守卫就不再拦它；qB 里的任务与磁盘文件都不动。
+func (s *Server) archiveDelete(c *gin.Context) {
+	if s.archiveStore == nil {
+		c.JSON(500, models.APIResponse{Success: false, Message: "归档模块未加载"})
+		return
+	}
+	hash := strings.TrimSpace(c.Param("hash"))
+	if hash == "" {
+		c.JSON(400, models.APIResponse{Success: false, Message: "缺少任务 hash"})
+		return
+	}
+	if err := s.archiveStore.Remove(hash); err != nil {
+		c.JSON(400, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	logger.Info.Printf("归档记录已移除（重复守卫不再拦这条磁链）：%s", hash)
+	c.JSON(200, models.APIResponse{Success: true, Message: "已从归档账本移除，重复守卫不再拦这条磁链"})
 }

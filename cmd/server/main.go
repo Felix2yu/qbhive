@@ -75,6 +75,7 @@ func main() {
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch, fm)
 	srv.SetTorrentCache(torrents)
 	srv.SetCategorizer(cat)
+	srv.SetArchive(archStore, ret)
 
 	go func() {
 		logger.Info.Printf("QBHive 监听地址 %s", cfg.Server.Listen)
