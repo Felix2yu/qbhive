@@ -121,6 +121,28 @@ function downloadText(filename, text) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+// copyText：navigator.clipboard 只在安全上下文（https / localhost）里存在，
+// 而本程序最常见的访问方式是局域网 http://192.168.x.x:8088 —— 那里它是 undefined。
+// 所以必须留 execCommand 兜底，否则「复制磁链」在真实部署下直接失效。
+async function copyText(text) {
+  if (window.isSecureContext && navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* 权限被拒或文档失焦，落到下面的兜底 */ }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
 function chunkRender(items, perFrame, renderItem, container, done) {
   let i = 0; container.innerHTML = "";
   function step() {
@@ -342,6 +364,30 @@ function validateConfigJS(cfg) {
       }
     }
   }
+  // 任务退休与归档：与后端 validateConfig 同一套下限
+  if (c.archive) {
+    const ar = c.archive;
+    if (ar.enabled) {
+      if ((ar.interval || 0) < 1) return "归档退休扫描间隔必须 ≥ 1 秒";
+      if ((ar.batchSize || 0) < 1) return "归档单轮批量必须 ≥ 1";
+    }
+    if ((ar.quietMinutes || 0) < 0) return "归档静默期不能为负数";
+    for (const [label, list] of [
+      ["分类包含", ar.categoryInclude], ["分类排除", ar.categoryExclude],
+      ["标签包含", ar.tagInclude], ["标签排除", ar.tagExclude],
+    ]) {
+      const v = list || "";
+      if (v.length > 256) return `归档${label}名单不能超过 256 字符`;
+      if (v.split(LIST_SEP).filter(t => t.trim()).length > 32) return `归档${label}名单不能超过 32 项`;
+    }
+    const g = ar.guard || {};
+    if (!["", "off", "notify", "remove", "remove-files"].includes(g.mode)) return "重复守卫档位非法";
+    if (g.mode && g.mode !== "off") {
+      if ((g.interval || 0) < 1) return "重复守卫扫描间隔必须 ≥ 1 秒";
+      if ((g.maxPerRound || 0) < 1) return "重复守卫单轮上限必须 ≥ 1";
+    }
+    if ((g.notifyCooldownMinutes || 0) < 0) return "重复守卫通知冷却不能为负数";
+  }
   return "";
 }
 
@@ -350,6 +396,7 @@ const views = {
   dashboard: renderDashboard,
   torrents: renderTorrents,
   files: renderFiles,
+  archive: renderArchive,
   rss: renderRSS,
   logs: renderLogs,
   settings: renderSettings,
@@ -360,6 +407,7 @@ const NAV_ITEMS = [
   { view: "dashboard", label: "概览", iconName: "overview", group: "工作区" },
   { view: "torrents", label: "任务", iconName: "torrents" },
   { view: "files", label: "文件", iconName: "files" },
+  { view: "archive", label: "历史", iconName: "database" },
   { view: "rss", label: "RSS", iconName: "rss", group: "自动化" },
   { view: "logs", label: "日志", iconName: "logs", group: "系统" },
   { view: "settings", label: "设置", iconName: "settings" },
@@ -1410,6 +1458,29 @@ function syncFormToCfg() {
     ac.fallback = ($("#ac-fallback").value || "").trim();
     ac.rules = collectCategoryRules();
   }
+  if ($("#ar-enabled")) {
+    const ar = c.archive || (c.archive = {});
+    ar.enabled = $("#ar-enabled").checked;
+    // 刻意不做「|| 默认值」兜底：填 0 或留空要落成 0 交给校验报错，
+    // 静默改回 60/100 会让人以为自己关掉了，实际按默认值在跑
+    ar.interval = parseInt($("#ar-interval").value, 10) || 0;
+    ar.dryRun = $("#ar-dryrun").checked;
+    ar.batchSize = parseInt($("#ar-batch").value, 10) || 0;
+    ar.quietMinutes = parseInt($("#ar-quiet").value, 10) || 0;
+    ar.exemptLostFiles = $("#ar-exempt").checked;
+    ar.minRatio = parseFloat($("#ar-ratio").value) || 0;
+    ar.minHours = parseInt($("#ar-hours").value, 10) || 0;
+    ar.minUploadedMB = parseInt($("#ar-uploaded").value, 10) || 0;
+    ar.categoryInclude = ($("#ar-cat-inc").value || "").trim();
+    ar.categoryExclude = ($("#ar-cat-exc").value || "").trim();
+    ar.tagInclude = ($("#ar-tag-inc").value || "").trim();
+    ar.tagExclude = ($("#ar-tag-exc").value || "").trim();
+    const ag = ar.guard || (ar.guard = {});
+    ag.mode = $("#ar-guard-mode").value;
+    ag.interval = parseInt($("#ar-guard-interval").value, 10) || 0;
+    ag.maxPerRound = parseInt($("#ar-guard-max").value, 10) || 0;
+    ag.notifyCooldownMinutes = parseInt($("#ar-guard-cool").value, 10) || 0;
+  }
 }
 
 // ---------- 自动分类 ----------
@@ -1698,6 +1769,9 @@ async function renderSettings(root) {
   const pp = (cfg.fileManager && cfg.fileManager.postProcess) || {};
   // 自动分类：老配置文件可能还没有这一段，兜底成默认结构
   const ac = cfg.autoCategory || { enabled: false, interval: 60, onlyIfEmpty: true, fallback: "", rules: [] };
+  // 归档：同上。两个安全闸门（dryRun / exemptLostFiles）缺键视为开启，与后端一致
+  const ar = cfg.archive || { enabled: false, interval: 60, batchSize: 100, quietMinutes: 5, minRatio: 0, minHours: 0, minUploadedMB: 0 };
+  const ag = ar.guard || { mode: "off", interval: 5, maxPerRound: 20, notifyCooldownMinutes: 10 };
 
   root.innerHTML = `
     ${UI.page({
@@ -1915,6 +1989,84 @@ async function renderSettings(root) {
       `,
     })}
 
+    <!-- 任务退休与归档 -->
+    ${UI.panel({
+      title: "任务退休与归档",
+      desc: "完成并收敛的任务从 qB 移除、磁盘文件保留，元数据写进账本，在「历史」页仍可检索",
+      iconName: "database",
+      body: `
+        ${field("启用", toggle(!!ar.enabled, { id: "ar-enabled" }),
+          "每隔一个扫描间隔判定一轮：失去实体的空壳任务（原片已被转码清理）与过了做种门槛的健康完成任务。两类都要求文件侧已收敛——清理、转码命令都跑完并过了静默期。")}
+        ${field("扫描间隔",
+          `<div class="controls"><input type="number" id="ar-interval" class="w-xs" value="${ar.interval || 60}" min="1"><span class="unit">秒</span></div>`,
+          "读的是共享任务快照，一轮扫描不产生额外 qB 请求；只有真要移除时才发一次批量删除。")}
+        ${field("干跑（只建档不移除）", toggle(ar.dryRun !== false, { id: "ar-dryrun" }),
+          "<b>建议先开着跑一轮。</b>候选只写进账本、一个删除请求都不发，去「历史」页切到「退休候选」核对条数与抽样记录，确认无误再关掉。关掉后也可以在候选视图点「确认移除 N 条」手动排空。")}
+        ${field("单轮批量",
+          `<div class="controls"><input type="number" id="ar-batch" class="w-xs" value="${ar.batchSize || 100}" min="1"><span class="unit">条</span></div>`,
+          "一轮最多提交多少条移除，一批一次请求。首次真删建议先填 5 核对一轮。")}
+        ${field("静默期",
+          `<div class="controls"><input type="number" id="ar-quiet" class="w-xs" value="${ar.quietMinutes ?? 5}" min="0"><span class="unit">分钟</span></div>`,
+          "最后一条转码命令结束后再静默这么久才允许退休。「派发完」不等于「跑完」，最后一条命令可能还在后台跑几十分钟。")}
+        ${field("失去实体免做种门槛", toggle(ar.exemptLostFiles !== false, { id: "ar-exempt" }),
+          "<b>建议保持开启。</b>原片已被转码清理的任务只剩空壳，做种比率与时长对它们没有意义；关掉后这批任务也要过下面的门槛才退。")}
+        ${UI.section({
+          title: "做种门槛",
+          desc: "只对健康完成的任务生效，三者<b>任一</b>满足即可退休；填 0 表示不启用该判据",
+          body: `
+            ${field("分享比率",
+              `<div class="controls"><input type="number" id="ar-ratio" class="w-xs" value="${ar.minRatio ?? 0}" min="0" step="0.1"><span class="unit">倍</span></div>`)}
+            ${field("做种时长",
+              `<div class="controls"><input type="number" id="ar-hours" class="w-xs" value="${ar.minHours ?? 0}" min="0"><span class="unit">小时（自完成起算）</span></div>`)}
+            ${field("上传量",
+              `<div class="controls"><input type="number" id="ar-uploaded" class="w-xs" value="${ar.minUploadedMB ?? 0}" min="0"><span class="unit">MB</span></div>`)}
+            ${UI.notice("退休即停止做种，这是真实代价。PT 场景把比率/时长调到站点要求以上，或只留「失去实体」这条路径（三个门槛全填 0）。", "warn")}
+          `,
+        })}
+        ${UI.section({
+          title: "名单过滤",
+          desc: "语义与转码后处理一致：左框只退、右框不退，<b>右框优先</b>；未分类/无标签的任务不命中左框",
+          body: `
+            ${field("分类过滤",
+              `<div class="split">
+                <input type="text" id="ar-cat-inc" value="${escapeHTML(ar.categoryInclude || "")}" placeholder="只退这些分类，例：动漫, 剧集">
+                <input type="text" id="ar-cat-exc" value="${escapeHTML(ar.categoryExclude || "")}" placeholder="这些分类不退，例：电影">
+              </div>`,
+              "多条用逗号分隔（<code>, ， 、 ; ； |</code> 与换行都算分隔符），分类要逐字符对上；两边都留空即不过滤。")}
+            ${field("标签过滤",
+              `<div class="split">
+                <input type="text" id="ar-tag-inc" value="${escapeHTML(ar.tagInclude || "")}" placeholder="只退带这些标签的，例：转码">
+                <input type="text" id="ar-tag-exc" value="${escapeHTML(ar.tagExclude || "")}" placeholder="带这些标签的不退，例：真人">
+              </div>`,
+              "任务带多个标签时命中任意一个即算。典型用法是反向 opt-in：左框填 <code>转码</code>，只退手动打过该标签的任务。")}
+          `,
+        })}
+        ${UI.section({
+          title: "重复下载守卫",
+          desc: "定期比对 qB 现有任务与账本，发现「退休后又被重新添加」的同一 infohash 就按档位处置",
+          body: `
+            ${field("档位", `<select id="ar-guard-mode" class="ctrl">
+              <option value="off"${ag.mode === "off" || !ag.mode ? " selected" : ""}>关闭（不扫描）</option>
+              <option value="notify"${ag.mode === "notify" ? " selected" : ""}>只告警（干跑）</option>
+              <option value="remove"${ag.mode === "remove" ? " selected" : ""}>移除任务，文件留着</option>
+              <option value="remove-files"${ag.mode === "remove-files" ? " selected" : ""}>移除任务并清掉本次重下的文件</option>
+            </select>`)}
+            <div class="hint" id="ar-guard-desc"></div>
+            ${field("扫描间隔",
+              `<div class="controls"><input type="number" id="ar-guard-interval" class="w-xs" value="${ag.interval || 5}" min="1"><span class="unit">秒</span></div>`,
+              "只读内存快照，不产生额外 qB 请求。检测窗口内会真的下几秒：间隔 5 秒 + 快照新鲜度 2 秒，最坏约 7 秒后才被掐掉。")}
+            ${field("单轮上限",
+              `<div class="controls"><input type="number" id="ar-guard-max" class="w-xs" value="${ag.maxPerRound || 20}" min="1"><span class="unit">条</span></div>`,
+              "本轮候选超过这个数就只告警不动手，防止账本被误导入后批量删文件。")}
+            ${field("通知冷却",
+              `<div class="controls"><input type="number" id="ar-guard-cool" class="w-xs" value="${ag.notifyCooldownMinutes || 10}" min="0"><span class="unit">分钟</span></div>`,
+              "同一 hash 的告警冷却，避免反复添加/删除刷屏。只影响通知，不影响处置。")}
+          `,
+        })}
+        ${UI.notice("退休不备份 .torrent，移除后无法一键加回做种。想重下同一磁链，先在「历史」页删掉那条账本记录解除守卫。", "warn")}
+      `,
+    })}
+
     <!-- 保存 -->
     ${UI.saveBar(
       "保存前会先做一次本地校验（URL 协议、正则、间隔下限等）。",
@@ -1958,6 +2110,18 @@ async function renderSettings(root) {
   };
   proxyMode.addEventListener("change", syncProxyUI);
   syncProxyUI();
+
+  // 守卫四档的动作边界差别很大（最高档会删文件），选完立刻说清当前档到底做什么
+  const guardMode = $("#ar-guard-mode"), guardDesc = $("#ar-guard-desc");
+  const GUARD_DESC = {
+    off: "关闭：不扫描。退休后的磁链被重新添加时不做任何处置。",
+    notify: "只告警：任务与文件都不动，只发通知与日志并列出判定依据。用这一档核对判定准不准。",
+    remove: "移除任务：从 qB 移除重复任务，本次重下写出的半成品文件留在磁盘（刻意的中间档）。",
+    "remove-files": "移除任务并清文件：只删「本次重下写出来的」文件——磁盘 mtime 不早于任务添加时刻才算，早于添加时刻的完好原片一个都不动；取不到 mtime（qbhive 看不到该路径）时降级为只移除任务。转码产物不在种子文件列表里，天然不会被删。",
+  };
+  const syncGuardDesc = () => { guardDesc.textContent = GUARD_DESC[guardMode.value] || GUARD_DESC.off; };
+  guardMode.addEventListener("change", syncGuardDesc);
+  syncGuardDesc();
 
   $("#lim-add").onclick = () => {
     syncFormToCfg();
@@ -2050,7 +2214,7 @@ async function renderSettings(root) {
     const out = _settingsCfg; // 掩码值已在 syncFormToCfg 里被忽略，后端会保留原密码/apiKey
     const vmsg = validateConfigJS(out);
     if (vmsg) { toast("❌ " + vmsg, "err"); return; }
-    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy,autoCategory", out);
+    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy,autoCategory,archive", out);
     if (res.success) clearDirty("settings");
     toast(res.success ? "设置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
     // 保存成功后重新 GET 一次，让密码/API key 回到掩码状态
@@ -2266,6 +2430,229 @@ async function renderAudit(root) {
       renderAudit(root);
     };
   });
+}
+
+// ---------- 历史（退休账本）----------
+// 账本可能几千上万条，过滤/排序/分页全在服务端做，这里只渲染当前页。
+const _archiveState = {
+  page: 1,
+  pageSize: 50,
+  q: "",
+  category: "",
+  tag: "",
+  scope: "all", // all=全部记录；pending=已建档未移除的退休候选
+  sort: "completedOn",
+  order: "desc",
+};
+
+// 当前页的记录：行操作要拿磁链与退休状态，不把几百字节的磁链塞进 data 属性
+let _archiveRows = [];
+
+const ARCHIVE_SORTS = [
+  ["completedOn:desc", "完成时间 ↓"],
+  ["completedOn:asc", "完成时间 ↑"],
+  ["retiredAt:desc", "退休时间 ↓"],
+  ["addedOn:desc", "添加时间 ↓"],
+  ["name:asc", "名称 A→Z"],
+  ["size:desc", "大小 ↓"],
+  ["size:asc", "大小 ↑"],
+];
+
+function archiveQuery() {
+  const s = _archiveState;
+  const p = new URLSearchParams();
+  if (s.q) p.set("q", s.q);
+  if (s.category) p.set("category", s.category);
+  if (s.tag) p.set("tag", s.tag);
+  if (s.scope === "pending") p.set("pending", "1");
+  p.set("sort", s.sort);
+  p.set("order", s.order);
+  return p;
+}
+
+async function renderArchive(root) {
+  const s = _archiveState;
+  root.innerHTML = `
+    ${UI.page({
+      eyebrow: "Archive",
+      title: "历史",
+      desc: "已从 qB 退休的任务元数据：磁盘文件保留，磁链可复制，重复下载守卫按这本账拦同一条磁链。",
+      actions: UI.btn("刷新", { size: "sm", iconName: "refresh", id: "ar-reload" }),
+    })}
+    ${UI.panel({
+      title: "退休账本",
+      iconName: "database",
+      actions: `<span class="meta-text" id="ar-count"></span><span id="ar-retire-slot"></span>`,
+      body: `
+        ${UI.toolbar([
+          UI.toolField("范围", `<select id="ar-scope" class="control">
+            <option value="all"${s.scope === "all" ? " selected" : ""}>全部记录</option>
+            <option value="pending"${s.scope === "pending" ? " selected" : ""}>退休候选</option>
+          </select>`),
+          UI.toolField("排序", `<select id="ar-sort" class="control">
+            ${ARCHIVE_SORTS.map(([v, label]) =>
+              `<option value="${v}"${`${s.sort}:${s.order}` === v ? " selected" : ""}>${label}</option>`).join("")}
+          </select>`),
+          UI.toolField("分类", `<input type="text" id="ar-cat" class="control w-sm" value="${escapeHTML(s.category)}" placeholder="精确匹配" />`),
+          UI.toolField("标签", `<input type="text" id="ar-tag" class="control w-sm" value="${escapeHTML(s.tag)}" placeholder="命中任一标签" />`),
+          UI.toolField("搜索", `<input type="text" id="ar-q" class="control" value="${escapeHTML(s.q)}" placeholder="名称 / 保存路径" />`, { grow: true }),
+        ])}
+        <div id="ar-body">${UI.loading("检索账本…")}</div>
+      `,
+    })}
+  `;
+
+  const refilter = () => { _archiveState.page = 1; fetchArchive(); };
+  $("#ar-scope", root).onchange = e => { _archiveState.scope = e.target.value; refilter(); };
+  $("#ar-sort", root).onchange = e => {
+    const [sort, order] = e.target.value.split(":");
+    _archiveState.sort = sort;
+    _archiveState.order = order;
+    refilter();
+  };
+  $("#ar-cat", root).oninput = debounce(e => { _archiveState.category = e.target.value.trim(); refilter(); }, 300);
+  $("#ar-tag", root).oninput = debounce(e => { _archiveState.tag = e.target.value.trim(); refilter(); }, 300);
+  $("#ar-q", root).oninput = debounce(e => { _archiveState.q = e.target.value.trim(); refilter(); }, 300);
+  $("#ar-reload", root).onclick = () => fetchArchive();
+
+  await fetchArchive();
+}
+
+async function fetchArchive() {
+  const p = archiveQuery();
+  p.set("offset", String((_archiveState.page - 1) * _archiveState.pageSize));
+  p.set("limit", String(_archiveState.pageSize));
+  const r = await api("GET", `/archive?${p}`);
+  // 请求期间可能已经切到别的页，DOM 没了就直接丢弃这次结果
+  const body = $("#ar-body");
+  if (!body) return;
+  const count = $("#ar-count");
+  const slot = $("#ar-retire-slot");
+
+  if (!r.success) {
+    body.innerHTML = notice(`检索失败：${escapeHTML(r.message || "未知错误")}`, "danger");
+    if (count) count.textContent = "";
+    if (slot) slot.innerHTML = "";
+    return;
+  }
+  const data = r.data || {};
+  const records = Array.isArray(data.records) ? data.records : [];
+  const total = Number.isFinite(data.total) ? data.total : 0;
+  _archiveRows = records;
+  if (count) count.textContent = `共 ${total} 条`;
+
+  // 候选视图才给排空按钮：N 是当前筛选下的候选总数，不是本页条数
+  if (slot) {
+    slot.innerHTML = (_archiveState.scope === "pending" && total > 0)
+      ? UI.btn(`确认移除 ${total} 条`, { size: "sm", variant: "danger", iconName: "trash", id: "ar-retire" })
+      : "";
+    const btn = $("#ar-retire");
+    if (btn) btn.onclick = () => retireCandidates(total);
+  }
+
+  if (records.length === 0) {
+    const filtered = _archiveState.q || _archiveState.category || _archiveState.tag;
+    body.innerHTML = UI.empty(
+      filtered ? "没有匹配的记录" : _archiveState.scope === "pending" ? "暂无退休候选" : "账本暂无记录",
+      { iconName: filtered ? "search" : "database" },
+    );
+    return;
+  }
+
+  const rows = records.map(rec => {
+    const retired = rec.retiredAt > 0;
+    return `
+      <div class="data-row archive-row">
+        <span class="data-cell torrent-name" title="${escapeHTML(rec.name)}">${escapeHTML(rec.name)}</span>
+        <span class="data-cell data-cell--size">${rec.size ? humanSize(rec.size) : ""}</span>
+        <span class="data-cell data-cell--cat">${rec.category ? UI.tag(escapeHTML(rec.category)) : ""}</span>
+        <span class="data-cell data-cell--time">${rec.completedOn ? fmtTime(rec.completedOn) : ""}</span>
+        <span class="data-cell data-cell--path mono" title="${escapeHTML(rec.savePath)}">${escapeHTML(rec.savePath)}</span>
+        <span class="data-cell data-cell--state">${retired ? UI.tag("已退休", "muted") : UI.tag("候选", "warn")}</span>
+        <span class="data-cell data-cell--actions">
+          ${UI.btn("磁链", { size: "xs", iconName: "link", title: "复制磁链", attrs: `data-ar-magnet="${escapeHTML(rec.hash)}"` })}
+          ${UI.btn("删除", { size: "xs", variant: "danger", title: retired ? "删除账本记录，解除重复守卫" : "删除候选记录", attrs: `data-ar-del="${escapeHTML(rec.hash)}"` })}
+        </span>
+      </div>`;
+  });
+
+  body.innerHTML = UI.table({
+    head: [
+      { label: "名称" },
+      { label: "大小", cls: "data-cell--size" },
+      { label: "分类", cls: "data-cell--cat" },
+      { label: "完成时间", cls: "data-cell--time" },
+      { label: "保存路径", cls: "data-cell--path" },
+      { label: "状态", cls: "data-cell--state" },
+      { label: "", cls: "data-cell--actions" },
+    ],
+    rows,
+    className: "table--archive",
+  }) + pageNav(total, _archiveState.page, _archiveState.pageSize);
+
+  bindPageNav(pg => { _archiveState.page = pg; fetchArchive(); });
+  $$("[data-ar-magnet]", body).forEach(b => {
+    b.onclick = async () => {
+      const rec = _archiveRows.find(x => x.hash === b.dataset.arMagnet);
+      if (!rec) return;
+      const ok = await copyText(rec.magnet);
+      toast(ok ? "磁链已复制 ✓" : "复制失败，请手动选择磁链", ok ? "ok" : "err");
+    };
+  });
+  $$("[data-ar-del]", body).forEach(b => {
+    b.onclick = async () => {
+      const rec = _archiveRows.find(x => x.hash === b.dataset.arDel);
+      if (!rec) return;
+      const retired = rec.retiredAt > 0;
+      const ok = await confirmDialog(retired ? "解除重复守卫" : "删除候选记录",
+        `「${rec.name}」\n` + (retired
+          ? "账本记录删除后，重复下载守卫不再拦这条磁链。"
+          : "删除后这条不再出现在退休候选里。") + "\nqB 里的任务与磁盘文件都不动。",
+        { danger: true, okText: "删除记录" });
+      if (!ok) return;
+      b.disabled = true;
+      const res = await api("DELETE", `/archive/${encodeURIComponent(rec.hash)}`);
+      toast(res.message || (res.success ? "已删除 ✓" : "删除失败"), res.success ? "ok" : "err");
+      fetchArchive();
+    };
+  });
+}
+
+// 排空当前筛选下的候选：账本单页上限 1000 条，按 total 逐页取回 hash 再一次性提交。
+// 只提交本页那几十条会让「移除 7000 条」变成点 140 次。
+async function retireCandidates(total) {
+  const ok = await confirmDialog("移除退休候选",
+    `将把当前筛选出的 ${total} 条候选任务从 qB 移除，磁盘文件保留。\n` +
+    "此操作绕过干跑与做种门槛，且不备份 .torrent —— 移除后无法一键加回做种。",
+    { danger: true, okText: `移除 ${total} 条` });
+  if (!ok) return;
+
+  const hashes = [];
+  while (hashes.length < total) {
+    const p = archiveQuery();
+    p.set("pending", "1");
+    p.set("offset", String(hashes.length));
+    p.set("limit", "1000");
+    const r = await api("GET", `/archive?${p}`);
+    const slot = $("#ar-retire-slot");
+    if (!slot) return; // 已切页，放弃本次排空
+    if (!r.success) {
+      slot.innerHTML = "";
+      toast(r.message || "读取候选失败", "err");
+      fetchArchive();
+      return;
+    }
+    const recs = Array.isArray(r.data?.records) ? r.data.records : [];
+    if (recs.length === 0) break;
+    for (const rec of recs) hashes.push(rec.hash);
+    slot.innerHTML = `<span class="meta-text">读取候选 ${hashes.length}/${total}…</span>`;
+  }
+  if (hashes.length === 0) { fetchArchive(); return; }
+
+  const res = await api("POST", "/archive/retire", { hashes });
+  toast(res.message || (res.success ? "已移除 ✓" : "移除失败"), res.success ? "ok" : "err");
+  _archiveState.page = 1;
+  fetchArchive();
 }
 
 // ---------- 日志 ----------

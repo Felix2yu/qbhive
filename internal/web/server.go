@@ -448,6 +448,38 @@ func validateConfig(in *models.AppConfig) string {
 			return "自动分类兜底分类不合法：" + msg
 		}
 	}
+	// 归档退休与重复守卫：这几个数值在运行时会被静默兜底成默认值
+	// （interval/batchSize/maxPerRound ≤0 → 60/100/20），填 0 的人以为关掉了，
+	// 实际是按默认值在跑，所以在入口就拦下来。
+	// 一律按「该子系统是否启用」来判：整段缺省（零值）的老客户端与局部保存
+	// 请求不该因为没填归档而被拒。
+	if in.Archive.Enabled {
+		if in.Archive.Interval < 1 {
+			return "归档退休扫描间隔必须 ≥ 1 秒"
+		}
+		if in.Archive.BatchSize < 1 {
+			return "归档单轮批量必须 ≥ 1"
+		}
+	}
+	if in.Archive.QuietMinutes < 0 {
+		return "归档静默期不能为负数"
+	}
+	switch in.Archive.Guard.Mode {
+	case "", models.GuardModeOff, models.GuardModeNotify, models.GuardModeRemove, models.GuardModeRemoveFiles:
+	default:
+		return "重复守卫档位只能是 关闭 / 只告警 / 移除任务 / 移除任务与文件"
+	}
+	if in.Archive.Guard.Mode != "" && in.Archive.Guard.Mode != models.GuardModeOff {
+		if in.Archive.Guard.Interval < 1 {
+			return "重复守卫扫描间隔必须 ≥ 1 秒"
+		}
+		if in.Archive.Guard.MaxPerRound < 1 {
+			return "重复守卫单轮上限必须 ≥ 1"
+		}
+	}
+	if in.Archive.Guard.NotifyCooldownMinutes < 0 {
+		return "重复守卫通知冷却不能为负数"
+	}
 	return ""
 }
 
@@ -466,6 +498,7 @@ func (s *Server) saveConfig(c *gin.Context) {
 		known := map[string]bool{
 			"qbittorrent": true, "server": true, "notifier": true, "rss": true,
 			"limiter": true, "fileManager": true, "proxy": true, "autoCategory": true,
+			"archive": true,
 		}
 		keep := make(map[string]bool, 4)
 		for _, name := range strings.Split(only, ",") {
@@ -502,6 +535,9 @@ func (s *Server) saveConfig(c *gin.Context) {
 		}
 		if !keep["autoCategory"] {
 			in.AutoCategory = cur.AutoCategory
+		}
+		if !keep["archive"] {
+			in.Archive = cur.Archive
 		}
 	}
 	// P1: 后端校验——在任何持久化/热生效之前拦截非法输入

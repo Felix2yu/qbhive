@@ -1930,6 +1930,45 @@ input::file-selector-button {
   margin: 0 3px;
 }
 
+/* 历史（退休账本）：名称与保存路径保留最小可读宽度，窄屏由外层横向滚动 */
+.table--archive {
+  min-width: 994px;
+}
+
+.table--archive .data-row {
+  grid-template-columns: minmax(190px, 1fr) 82px 104px 150px minmax(160px, 1.1fr) 76px 128px;
+}
+
+.table--archive .data-cell--size {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table--archive .data-cell--cat,
+.table--archive .data-cell--state {
+  text-align: center;
+}
+
+.table--archive .data-cell--time {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.table--archive .data-cell--path {
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+
+.table--archive .data-cell--actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  overflow: visible;
+}
+
 /* ---------- 分页 ---------- */
 .pager {
   display: flex;
@@ -2726,7 +2765,9 @@ input::file-selector-button {
     bottom: 0;
     z-index: 50;
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    /* 按子元素个数均分，不写死列数：导航加一项就该自动收窄，而不是掉到第二行 */
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
     gap: 2px;
     padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--line);

@@ -569,3 +569,161 @@ func TestArchiveRoutesRegisteredInStart(t *testing.T) {
 		t.Errorf("带令牌手动退休应退休 1 条，got %d %s", code, body)
 	}
 }
+
+// =============== 归档配置段：局部保存与校验 ===============
+
+func postArchiveConfig(t *testing.T, s *Server, query string, cfg models.AppConfig) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/api/config", s.saveConfig)
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/config"+query, strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// archiveCfgBase 归档已启用、各字段合法的配置。校验用例在它上面做单点破坏，
+// 这样「哪一条护栏拦下的」不会被别的非法字段掩盖。
+func archiveCfgBase() models.AppConfig {
+	return models.AppConfig{
+		Qbittorrent: models.QBConfig{URL: "http://127.0.0.1:8080"},
+		Limiter:     models.LimiterConfig{Enabled: true, Interval: 10},
+		Archive: models.ArchiveConfig{
+			Enabled: true, Interval: 60, DryRun: archBoolPtr(true), BatchSize: 100,
+			QuietMinutes: 5, ExemptLostFiles: archBoolPtr(true),
+			Guard: models.GuardConfig{
+				Mode: models.GuardModeNotify, Interval: 5, MaxPerRound: 20, NotifyCooldownMinutes: 10,
+			},
+		},
+	}
+}
+
+func TestArchiveConfig_OnlySectionKeepsOtherSections(t *testing.T) {
+	t.Run("only=archive 不覆盖 limiter", func(t *testing.T) {
+		s := newArchiveEnv(t, "", "").srv
+		s.cfg.Set(archiveCfgBase())
+
+		settings := archiveCfgBase()
+		settings.Limiter.Interval = 30
+		if w := postArchiveConfig(t, s, "", settings); w.Code != 200 {
+			t.Fatalf("设置页保存失败：%d %s", w.Code, w.Body.String())
+		}
+
+		// 归档页用的是它打开时 GET 到的旧快照（limiter 仍为 10），只提交 archive 段
+		page := archiveCfgBase()
+		page.Limiter.Interval = 10
+		page.Archive.Interval = 120
+		page.Archive.Guard.Mode = models.GuardModeRemoveFiles
+		if w := postArchiveConfig(t, s, "?only=archive", page); w.Code != 200 {
+			t.Fatalf("归档段保存失败：%d %s", w.Code, w.Body.String())
+		}
+
+		got := s.cfg.Get()
+		if got.Archive.Interval != 120 || got.Archive.Guard.Mode != models.GuardModeRemoveFiles {
+			t.Errorf("archive 段应被写入，got interval=%d mode=%q", got.Archive.Interval, got.Archive.Guard.Mode)
+		}
+		if got.Limiter.Interval != 30 {
+			t.Errorf("未声明的 limiter 段必须保留服务端当前值 30，got %d", got.Limiter.Interval)
+		}
+	})
+
+	t.Run("only=rss 不覆盖归档段", func(t *testing.T) {
+		s := newArchiveEnv(t, "", "").srv
+		base := archiveCfgBase()
+		base.Archive.Interval = 120
+		s.cfg.Set(base)
+
+		stale := archiveCfgBase() // 旧快照里 interval 还是 60
+		stale.RSS.Enabled = true
+		stale.RSS.Interval = 15
+		if w := postArchiveConfig(t, s, "?only=rss", stale); w.Code != 200 {
+			t.Fatalf("RSS 页保存失败：%d %s", w.Code, w.Body.String())
+		}
+		got := s.cfg.Get()
+		if got.Archive.Interval != 120 {
+			t.Errorf("未声明的 archive 段必须保留 120，got %d", got.Archive.Interval)
+		}
+		if !got.RSS.Enabled {
+			t.Error("rss 段应被写入")
+		}
+	})
+
+	// 老客户端与局部保存请求可能整段不带 archive：零值必须能存下去，
+	// 否则「设置页保存」会被一个用户根本没填的段拦住
+	t.Run("整段零值不拦保存", func(t *testing.T) {
+		s := newArchiveEnv(t, "", "").srv
+		s.cfg.Set(archiveCfgBase())
+		cfg := archiveCfgBase()
+		cfg.Archive = models.ArchiveConfig{}
+		if w := postArchiveConfig(t, s, "", cfg); w.Code != 200 {
+			t.Errorf("零值归档段应可保存，got %d %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+func TestArchiveConfig_Validation(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*models.AppConfig)
+		want   string
+	}{
+		{"退休间隔 0", func(c *models.AppConfig) { c.Archive.Interval = 0 }, "归档退休扫描间隔"},
+		{"单轮批量 0", func(c *models.AppConfig) { c.Archive.BatchSize = 0 }, "归档单轮批量"},
+		{"静默期负数", func(c *models.AppConfig) { c.Archive.QuietMinutes = -1 }, "归档静默期"},
+		{"守卫档位打错字", func(c *models.AppConfig) { c.Archive.Guard.Mode = "remove-file" }, "重复守卫档位"},
+		{"守卫间隔 0", func(c *models.AppConfig) { c.Archive.Guard.Interval = 0 }, "重复守卫扫描间隔"},
+		{"守卫单轮上限 0", func(c *models.AppConfig) { c.Archive.Guard.MaxPerRound = 0 }, "重复守卫单轮上限"},
+		{"守卫冷却负数", func(c *models.AppConfig) { c.Archive.Guard.NotifyCooldownMinutes = -1 }, "重复守卫通知冷却"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newArchiveEnv(t, "", "").srv
+			s.cfg.Set(archiveCfgBase())
+			cfg := archiveCfgBase()
+			tc.mutate(&cfg)
+			w := postArchiveConfig(t, s, "?only=archive", cfg)
+			if w.Code != 400 || !strings.Contains(w.Body.String(), tc.want) {
+				t.Fatalf("应 400 并提示 %q，got %d %s", tc.want, w.Code, w.Body.String())
+			}
+			if got := s.cfg.Get().Archive; got.Interval != 60 || got.Guard.Mode != models.GuardModeNotify {
+				t.Errorf("被拒绝的请求不应写入任何改动，got %+v", got)
+			}
+		})
+	}
+
+	// 停用的子系统不该被下限拦住：零值 interval/batchSize 在运行时会被兜底成默认值，
+	// 但既然没启用，就不该逼用户先填一遍
+	for _, tc := range []struct {
+		name   string
+		mutate func(*models.AppConfig)
+	}{
+		{"合法基线", func(*models.AppConfig) {}},
+		{"退休停用时的零值", func(c *models.AppConfig) {
+			c.Archive.Enabled = false
+			c.Archive.Interval = 0
+			c.Archive.BatchSize = 0
+		}},
+		{"守卫关闭时的零值", func(c *models.AppConfig) {
+			c.Archive.Guard = models.GuardConfig{Mode: models.GuardModeOff}
+		}},
+		{"守卫档位空串等价关闭", func(c *models.AppConfig) {
+			c.Archive.Guard = models.GuardConfig{}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newArchiveEnv(t, "", "").srv
+			s.cfg.Set(archiveCfgBase())
+			cfg := archiveCfgBase()
+			tc.mutate(&cfg)
+			if w := postArchiveConfig(t, s, "?only=archive", cfg); w.Code != 200 {
+				t.Errorf("应可保存，got %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
