@@ -610,7 +610,7 @@ func TestPendingPostTargets(t *testing.T) {
 	}
 }
 
-// postTargetPath：拼接后必须仍在 save_path 之内
+// SafeTargetPath：拼接后必须仍在 save_path 之内
 func TestPostTargetPath(t *testing.T) {
 	cases := []struct {
 		save, name, want string
@@ -624,9 +624,9 @@ func TestPostTargetPath(t *testing.T) {
 		{"/dl/日本", "", "", false},
 	}
 	for _, c := range cases {
-		got, ok := postTargetPath(c.save, c.name)
+		got, ok := SafeTargetPath(c.save, c.name)
 		if ok != c.ok || got != c.want {
-			t.Errorf("postTargetPath(%q, %q) = (%q, %v)，want (%q, %v)", c.save, c.name, got, ok, c.want, c.ok)
+			t.Errorf("SafeTargetPath(%q, %q) = (%q, %v)，want (%q, %v)", c.save, c.name, got, ok, c.want, c.ok)
 		}
 	}
 }

@@ -94,6 +94,12 @@ type cleanRecord struct {
 	// PostDispatched 已交给 shell 的目标文件绝对路径（含失败的），文件级去重用：
 	// 一个种子里多个视频逐个派发，重启也不会把跑到一半的那个再转一遍
 	PostDispatched []string `json:"postDispatched,omitempty"`
+	// PostFinished 已收尾的命令数（成功或重试耗尽都算）。
+	// PostDone 只表示「派发完了」，最后一条命令可能还在后台跑几十分钟；
+	// 退休判定要看这个数追平 PostDispatched，否则会在转码途中把任务移走。
+	PostFinished int `json:"postFinished,omitempty"`
+	// PostLastDone 最近一条命令收尾的时刻（Unix 秒），供退休前的静默期判定
+	PostLastDone int64 `json:"postLastDone,omitempty"`
 	// PostWaits 命中白名单的文件连续几轮都取不到（qB 临时名 / 磁盘上还没有），
 	// 超过 postMaxWaits 才认定这个任务确实没有可转的文件
 	PostWaits int `json:"postWaits,omitempty"`
@@ -1102,6 +1108,56 @@ func (m *Manager) AuditList(offset, limit int) ([]auditEntry, int) {
 	return m.audit.List(offset, limit)
 }
 
+// Settled 报告某任务的文件侧处理是否已全部收敛，供退休扫描判定能否安全移除任务。
+//
+// 每项要求按对应 pass 是否开启来判：Done 只在清理 pass 里置位、PostDone 只在
+// 后处理 pass 里置位，无条件要求会在开关关闭时永远不收敛（自锁）。
+// 没有记录＝filemgr 还没处理过它＝未收敛：刚完成的任务要等清理/转码跑完再退休。
+func (m *Manager) Settled(hash string, quiet time.Duration) bool {
+	if !m.scanEnabled() {
+		return true
+	}
+	c := m.cfg.Get().FileManager
+	m.mu.Lock()
+	rec := m.cleanState[hash]
+	m.mu.Unlock()
+	if rec == nil {
+		return false
+	}
+	// 归档移动还没落地：文件尚未到最终落点，此时移除任务会让后续确认找不到它
+	if rec.FlattenDir != "" {
+		return false
+	}
+	if c.CleanEnabled && !rec.Done {
+		return false
+	}
+	if c.PostProcess.Enabled {
+		// PostDone 只是「派发完」，还要等命令真的收尾
+		if !rec.PostDone || rec.PostFinished < len(rec.PostDispatched) {
+			return false
+		}
+		if rec.PostLastDone > 0 && time.Since(time.Unix(rec.PostLastDone, 0)) < quiet {
+			return false
+		}
+	}
+	return true
+}
+
+// Idle 报告 filemgr 对该任务有没有待落地或在跑的文件操作。
+//
+// 与 Settled 的区别是「没有记录」的解读：这里视为空闲（filemgr 从没碰过它）。
+// 失去实体的任务进不了 filemgr 的完成态白名单，永远不会有记录，用 Settled 判
+// 就一条都退不掉；但它们仍可能有在跑的转码命令，所以退休前要看 Idle。
+func (m *Manager) Idle(hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec := m.cleanState[hash]
+	if rec == nil {
+		return true
+	}
+	return rec.FlattenDir == "" && rec.PostFinished >= len(rec.PostDispatched)
+}
+
 // loadCleanState 从 data/filemgr_clean.json 加载清理进度
 func (m *Manager) loadCleanState() {
 	data, err := os.ReadFile(m.statePath)
@@ -1114,6 +1170,14 @@ func (m *Manager) loadCleanState() {
 	if err := json.Unmarshal(data, &m.cleanState); err != nil {
 		logger.Warn.Printf("文件管理解析清理状态失败：%v", err)
 		return
+	}
+	// 存量记录里没有 postFinished 这个键，解析进来是 0。进程刚启动，
+	// 上一进程派发的命令不可能还在跑，所以把计数追平已派发数。
+	// 不追平的话历史任务永远满足不了退休的收敛判定，一条都退不掉。
+	for _, rec := range m.cleanState {
+		if rec != nil {
+			rec.PostFinished = len(rec.PostDispatched)
+		}
 	}
 	logger.Info.Printf("文件管理已加载 %d 条清理状态", len(m.cleanState))
 }

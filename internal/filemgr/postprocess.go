@@ -79,26 +79,33 @@ func (m *Manager) postEnabled() bool {
 // 四个名单全留空即不过滤。判定只用 qB 报出的 category/tags，不发任何请求，所以它排在
 // 取文件列表之前——被过滤掉的任务不该为它花掉一次 /torrents/files。
 func postTaskFiltered(t models.QBTorrent, pc models.PostProcessConfig) (bool, string) {
-	// 名单一律先拆项：只写了逗号空格的「空名单」等价于没配，不能当成白名单把所有任务挡掉
-	catInc := splitNameList(pc.CategoryInclude)
-	catExc := splitNameList(pc.CategoryExclude)
-	tagInc := splitNameList(pc.TagInclude)
-	tagExc := splitNameList(pc.TagExclude)
+	return MatchLists(t.Category, t.Tags, pc.CategoryInclude, pc.CategoryExclude, pc.TagInclude, pc.TagExclude)
+}
 
-	if nameListHit(t.Category, catExc) {
-		return true, fmt.Sprintf("分类 %q 命中排除名单（%s）", strings.TrimSpace(t.Category), strings.Join(catExc, ","))
+// MatchLists 分类/标签名单判定，返回 (是否跳过, 原因)。
+// 四个名单全留空即不过滤；排除优先于包含；包含名单非空时未分类/无标签不命中。
+// 转码过滤与任务退休共用这一套语义，不各写一份。
+func MatchLists(category, tags, catInclude, catExclude, tagInclude, tagExclude string) (bool, string) {
+	// 名单一律先拆项：只写了逗号空格的「空名单」等价于没配，不能当成白名单把所有任务挡掉
+	catInc := splitNameList(catInclude)
+	catExc := splitNameList(catExclude)
+	tagInc := splitNameList(tagInclude)
+	tagExc := splitNameList(tagExclude)
+
+	if nameListHit(category, catExc) {
+		return true, fmt.Sprintf("分类 %q 命中排除名单（%s）", strings.TrimSpace(category), strings.Join(catExc, ","))
 	}
-	if len(catInc) > 0 && !nameListHit(t.Category, catInc) {
-		return true, fmt.Sprintf("分类 %q 不在包含名单（%s）", strings.TrimSpace(t.Category), strings.Join(catInc, ","))
+	if len(catInc) > 0 && !nameListHit(category, catInc) {
+		return true, fmt.Sprintf("分类 %q 不在包含名单（%s）", strings.TrimSpace(category), strings.Join(catInc, ","))
 	}
-	tags := splitNameList(t.Tags)
-	for _, tag := range tags {
+	tagList := splitNameList(tags)
+	for _, tag := range tagList {
 		if nameListHit(tag, tagExc) {
 			return true, fmt.Sprintf("标签 %q 命中排除名单（%s）", tag, strings.Join(tagExc, ","))
 		}
 	}
-	if len(tagInc) > 0 && !anyNameListHit(tags, tagInc) {
-		return true, fmt.Sprintf("标签 %q 不在包含名单（%s）", strings.Join(tags, ","), strings.Join(tagInc, ","))
+	if len(tagInc) > 0 && !anyNameListHit(tagList, tagInc) {
+		return true, fmt.Sprintf("标签 %q 不在包含名单（%s）", strings.Join(tagList, ","), strings.Join(tagInc, ","))
 	}
 	return false, ""
 }
@@ -459,7 +466,7 @@ func (m *Manager) pendingPostTargets(t models.QBTorrent, pc models.PostProcessCo
 			continue
 		}
 		matched++
-		p, ok := postTargetPath(t.SavePath, name)
+		p, ok := SafeTargetPath(t.SavePath, name)
 		if !ok {
 			continue // 文件名越界：永久忽略，不参与等待
 		}
@@ -484,17 +491,18 @@ func (m *Manager) pendingPostTargets(t models.QBTorrent, pc models.PostProcessCo
 	return out, waiting, nil
 }
 
-// postTargetPath 把 qB 报告的文件内部路径（相对 save_path、用正斜杠）换成磁盘绝对路径。
-// 种子可以自带上跳的文件名（"../../x.mp4"），拼完必须仍在 save_path 之内，
-// 否则忽略——命令拿到的是用户自己配的 shell 模板，绝不能让它顺着一个越界路径跑出去。
-func postTargetPath(savePath, name string) (string, bool) {
+// SafeTargetPath 把 qB 报告的文件内部路径（相对 save_path、用正斜杠）换成磁盘绝对路径。
+// 种子可以自带上跳的文件名（"../../x.mp4"），拼完必须仍在 save_path 之内，否则忽略。
+// 转码派发与重复守卫删文件共用这道防护：前者不能顺着越界路径跑 shell，
+// 后者不能顺着越界路径删到保存目录之外。
+func SafeTargetPath(savePath, name string) (string, bool) {
 	if savePath == "" || name == "" {
 		return "", false
 	}
 	p := filepath.Join(savePath, filepath.FromSlash(name))
 	rel, err := filepath.Rel(savePath, p)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		logger.Warn.Printf("后处理：任务文件 %q 落在保存路径 %s 之外，忽略", name, savePath)
+		logger.Warn.Printf("任务文件 %q 落在保存路径 %s 之外，忽略", name, savePath)
 		return "", false
 	}
 	return p, true
@@ -505,6 +513,22 @@ func (m *Manager) runPostProcess(t models.QBTorrent, file string, pc models.Post
 	runPostCommandWithRetry(t, file, pc, func(tt models.QBTorrent, src string, started time.Time) {
 		m.postPrune(tt, src, started, pc)
 	})
+	// 成功与重试耗尽都算收尾：退休判定等的是「没有在跑的命令」，
+	// 不是「命令成功」，失败放弃的任务同样该能退休
+	m.markPostFinished(t.Hash)
+}
+
+// markPostFinished 记一条命令收尾并落盘。
+// 命令全局串行，所以这里最多每次转码完成落一次盘，不是每轮扫描都写。
+func (m *Manager) markPostFinished(hash string) {
+	m.mu.Lock()
+	rec := m.cleanState[hash]
+	if rec != nil {
+		rec.PostFinished++
+		rec.PostLastDone = time.Now().Unix()
+	}
+	m.mu.Unlock()
+	m.saveCleanState()
 }
 
 // postPruneFunc 命令成功后的清理回调，签名与 Manager.postPrune 一致，
