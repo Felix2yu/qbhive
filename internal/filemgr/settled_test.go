@@ -24,11 +24,11 @@ func settledMgr(t *testing.T, cleanEnabled, postEnabled bool, rec *cleanRecord) 
 }
 
 // 两个 pass 都关掉时不能自锁：Done / PostDone 只在各自的 pass 里置位，
-// 无条件要求它们会让退休判定永远不通过。
+// 无条件要求它们会让移除判定永远不通过。
 func TestSettled_BothPassesDisabled(t *testing.T) {
 	m := settledMgr(t, false, false, &cleanRecord{})
 	if !m.Settled("h", 0) {
-		t.Error("清理与转码都关闭时应视为收敛")
+		t.Error("清理与转码都关闭时应视为结束")
 	}
 }
 
@@ -38,37 +38,37 @@ func TestSettled_ScanDisabled(t *testing.T) {
 	cfg.FileManager.Enabled = false
 	m.cfg.Set(cfg)
 	if !m.Settled("h", 0) {
-		t.Error("扫描未启用时应视为收敛")
+		t.Error("扫描未启用时应视为结束")
 	}
 }
 
 func TestSettled_CleanOnly(t *testing.T) {
 	if m := settledMgr(t, true, false, &cleanRecord{Done: false}); m.Settled("h", 0) {
-		t.Error("清理开启但未 Done 时不该收敛")
+		t.Error("清理开启但未 Done 时不该结束")
 	}
 	if m := settledMgr(t, true, false, &cleanRecord{Done: true}); !m.Settled("h", 0) {
-		t.Error("清理开启且已 Done 时应收敛（PostDone 为 false 不该拖累）")
+		t.Error("清理开启且已 Done 时应结束（PostDone 为 false 不该拖累）")
 	}
 }
 
 func TestSettled_PostOnly(t *testing.T) {
-	// 清理关闭：rec.Done 永远是 false，不该因此判不收敛
+	// 清理关闭：rec.Done 永远是 false，不该因此判不结束
 	rec := &cleanRecord{PostDone: true, PostDispatched: []string{"/a.mov"}, PostFinished: 1}
 	if m := settledMgr(t, false, true, rec); !m.Settled("h", 0) {
-		t.Error("转码开启且命令已收尾时应收敛（Done 为 false 不该拖累）")
+		t.Error("转码开启且命令已收尾时应结束（Done 为 false 不该拖累）")
 	}
 }
 
-// PostDone 只是「派发完」：命令还在跑就不能退休
+// PostDone 只是「派发完」：命令还在跑就不能移除
 func TestSettled_WaitsForCommandFinish(t *testing.T) {
 	rec := &cleanRecord{PostDone: true, PostDispatched: []string{"/a.mov", "/b.mov"}, PostFinished: 1}
 	m := settledMgr(t, false, true, rec)
 	if m.Settled("h", 0) {
-		t.Error("还有命令在跑时不该收敛")
+		t.Error("还有命令在跑时不该结束")
 	}
 	rec.PostFinished = 2
 	if !m.Settled("h", 0) {
-		t.Error("命令全部收尾后应收敛")
+		t.Error("命令全部收尾后应结束")
 	}
 }
 
@@ -79,28 +79,28 @@ func TestSettled_QuietPeriod(t *testing.T) {
 	}
 	m := settledMgr(t, false, true, rec)
 	if m.Settled("h", 5*time.Minute) {
-		t.Error("刚收尾就退休违反静默期")
+		t.Error("刚收尾就移除违反冷却时间")
 	}
 	if !m.Settled("h", 0) {
-		t.Error("静默期为 0 时应立即收敛")
+		t.Error("冷却时间为 0 时应立即结束")
 	}
 	rec.PostLastDone = time.Now().Add(-10 * time.Minute).Unix()
 	if !m.Settled("h", 5*time.Minute) {
-		t.Error("静默期已过应收敛")
+		t.Error("冷却时间已过应结束")
 	}
 }
 
 func TestSettled_FlattenPendingBlocks(t *testing.T) {
 	rec := &cleanRecord{Done: true, PostDone: true, FlattenDir: "/data/old"}
 	if m := settledMgr(t, true, true, rec); m.Settled("h", 0) {
-		t.Error("归档移动未落地时不该收敛")
+		t.Error("归档移动未落地时不该结束")
 	}
 }
 
 func TestSettled_NoRecordIsNotSettled(t *testing.T) {
 	m := settledMgr(t, true, true, nil)
 	if m.Settled("h", 0) {
-		t.Error("filemgr 还没处理过的任务不该判收敛（刚完成要等清理/转码）")
+		t.Error("filemgr 还没处理过的任务不该判结束（刚完成要等清理/转码）")
 	}
 }
 
@@ -128,7 +128,7 @@ func TestIdle_BlocksOnInFlightWork(t *testing.T) {
 	}
 }
 
-// 存量状态文件没有 postFinished 键：不追平计数，历史任务一条都退不掉。
+// 存量状态文件没有 postFinished 键：不追平计数，历史任务一条都移除不了。
 // 去掉 loadCleanState 里的归一循环，这条测试就会红。
 func TestLoadCleanState_NormalizesLegacyPostFinished(t *testing.T) {
 	m := setupPostProcess(t, models.PostProcessConfig{Enabled: true, Command: "echo hi"})
@@ -150,7 +150,7 @@ func TestLoadCleanState_NormalizesLegacyPostFinished(t *testing.T) {
 	cfg.FileManager.CleanEnabled = true
 	m.cfg.Set(cfg)
 	if !m.Settled("h", 5*time.Minute) {
-		t.Error("存量任务归一后应能收敛（PostLastDone 为 0 表示不是在跑的命令）")
+		t.Error("存量任务归一后应能结束（PostLastDone 为 0 表示不是在跑的命令）")
 	}
 	if !m.Idle("h") {
 		t.Error("存量任务归一后应判空闲")
@@ -177,7 +177,7 @@ func TestMarkPostFinished(t *testing.T) {
 	}
 }
 
-// 命令失败放弃也算收尾：退休等的是「没有在跑的命令」，不是「命令成功」
+// 命令失败放弃也算收尾：移除等的是「没有在跑的命令」，不是「命令成功」
 func TestRunPostProcess_FailureStillCountsFinished(t *testing.T) {
 	// 不动 postRetryDelay：那是包级变量，别的用例的后台 goroutine 还在读它。
 	// 用 1s 总预算裁掉退避等待即可
@@ -231,7 +231,7 @@ func TestMatchLists(t *testing.T) {
 	}
 }
 
-// 转码过滤必须与退休名单判定同源：委托之后两者结论一致
+// 转码过滤必须与移除名单判定同源：委托之后两者结论一致
 func TestPostTaskFiltered_DelegatesToMatchLists(t *testing.T) {
 	pc := models.PostProcessConfig{CategoryInclude: "动漫,电影", TagExclude: "跳过"}
 	for _, tor := range []models.QBTorrent{

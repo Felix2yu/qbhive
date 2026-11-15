@@ -59,9 +59,9 @@ type Server struct {
 	// 自动分类引擎，仅用于设置页的试算接口（可选）
 	categorizer *categorizer.Manager
 
-	// 归档账本与退休扫描器（可选；未注入时归档接口返回「未加载」）
+	// 留存账本与移除扫描器（可选；未注入时归档接口返回「未加载」）
 	archiveStore *archive.Store
-	retirer      *archive.Retirer
+	remover      *archive.Remover
 }
 
 // SetTorrentCache 注入共享任务快照（装配层调用一次）。
@@ -70,10 +70,10 @@ func (s *Server) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
 // SetCategorizer 注入自动分类引擎（可选；nil 时试算接口返回「未启用」）。
 func (s *Server) SetCategorizer(c *categorizer.Manager) { s.categorizer = c }
 
-// SetArchive 注入归档账本与退休扫描器（装配层调用一次）。
-func (s *Server) SetArchive(store *archive.Store, ret *archive.Retirer) {
+// SetArchive 注入留存账本与移除扫描器（装配层调用一次）。
+func (s *Server) SetArchive(store *archive.Store, ret *archive.Remover) {
 	s.archiveStore = store
-	s.retirer = ret
+	s.remover = ret
 }
 
 type cacheEntry struct {
@@ -248,9 +248,9 @@ func (s *Server) Start(webRoot string) error {
 		// 自动分类：试算（只读，不写 qB、不落状态）
 		api.POST("/category/preview", s.categoryPreview)
 
-		// 归档：退休后的任务元数据检索、手动退休、以及「我确实想重下」的逃生口
+		// 归档：移除后的任务元数据检索、手动移除、以及「我确实想重下」的逃生口
 		api.GET("/archive", s.archiveSearch)
-		api.POST("/archive/retire", s.archiveRetire)
+		api.POST("/archive/remove", s.archiveRemove)
 		api.DELETE("/archive/:hash", s.archiveDelete)
 	}
 
@@ -448,21 +448,21 @@ func validateConfig(in *models.AppConfig) string {
 			return "自动分类兜底分类不合法：" + msg
 		}
 	}
-	// 归档退休与重复守卫：这几个数值在运行时会被静默兜底成默认值
+	// 归档移除与重复守卫：这几个数值在运行时会被静默兜底成默认值
 	// （interval/batchSize/maxPerRound ≤0 → 60/100/20），填 0 的人以为关掉了，
 	// 实际是按默认值在跑，所以在入口就拦下来。
 	// 一律按「该子系统是否启用」来判：整段缺省（零值）的老客户端与局部保存
 	// 请求不该因为没填归档而被拒。
 	if in.Archive.Enabled {
 		if in.Archive.Interval < 1 {
-			return "归档退休扫描间隔必须 ≥ 1 秒"
+			return "移除扫描间隔必须 ≥ 1 秒"
 		}
 		if in.Archive.BatchSize < 1 {
 			return "归档单轮批量必须 ≥ 1"
 		}
 	}
 	if in.Archive.QuietMinutes < 0 {
-		return "归档静默期不能为负数"
+		return "归档冷却时间不能为负数"
 	}
 	switch in.Archive.Guard.Mode {
 	case "", models.GuardModeOff, models.GuardModeNotify, models.GuardModeRemove, models.GuardModeRemoveFiles:
@@ -1329,7 +1329,7 @@ func (s *Server) postProcessTest(c *gin.Context) {
 	})
 }
 
-// archiveSearch 检索归档账本。过滤、排序、分页全在服务端做：
+// archiveSearch 检索留存账本。过滤、排序、分页全在服务端做：
 // 几千条历史记录不整表下发，前端只拿当前页。
 func (s *Server) archiveSearch(c *gin.Context) {
 	if s.archiveStore == nil {
@@ -1355,10 +1355,10 @@ func (s *Server) archiveSearch(c *gin.Context) {
 	}})
 }
 
-// archiveRetire 手动批量退休：绕过 dryRun 与做种门槛，直接建档 + 移除任务（磁盘文件保留）。
+// archiveRemove 手动批量移除：绕过 dryRun 与做种门槛，直接建档 + 移除任务（磁盘文件保留）。
 // 不可逆（不备份 .torrent），前端必须二次确认。
-func (s *Server) archiveRetire(c *gin.Context) {
-	if s.retirer == nil {
+func (s *Server) archiveRemove(c *gin.Context) {
+	if s.remover == nil {
 		c.JSON(500, models.APIResponse{Success: false, Message: "归档模块未加载"})
 		return
 	}
@@ -1379,7 +1379,7 @@ func (s *Server) archiveRetire(c *gin.Context) {
 		c.JSON(400, models.APIResponse{Success: false, Message: "缺少任务 hash"})
 		return
 	}
-	n, err := s.retirer.ManualRetire(hashes)
+	n, err := s.remover.ManualRemove(hashes)
 	if err != nil {
 		c.JSON(500, models.APIResponse{Success: false, Message: err.Error()})
 		return
@@ -1387,8 +1387,8 @@ func (s *Server) archiveRetire(c *gin.Context) {
 	s.invalidateTorrentCache()
 	c.JSON(200, models.APIResponse{
 		Success: true,
-		Message: fmt.Sprintf("已退休 %d 条任务，磁盘文件保留", n),
-		Data:    map[string]int{"retired": n},
+		Message: fmt.Sprintf("已移除 %d 条任务，磁盘文件保留", n),
+		Data:    map[string]int{"removed": n},
 	})
 }
 
@@ -1409,5 +1409,5 @@ func (s *Server) archiveDelete(c *gin.Context) {
 		return
 	}
 	logger.Info.Printf("归档记录已移除（重复守卫不再拦这条磁链）：%s", hash)
-	c.JSON(200, models.APIResponse{Success: true, Message: "已从归档账本移除，重复守卫不再拦这条磁链"})
+	c.JSON(200, models.APIResponse{Success: true, Message: "已从留存账本移除，重复守卫不再拦这条磁链"})
 }

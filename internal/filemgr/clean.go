@@ -146,7 +146,13 @@ func sepPrefix(s string) (int, bool) {
 // 增删改 defaultCleanPatterns 中任意一条都必须 +1：它是清理规则指纹的一部分，
 // 版本变化会让此前判定「已清理完成」的历史任务重新评估一轮。
 // v3：磁盘上找不到实体的文件不再判完成（此前会被误判 Done 而永不复查）。
-const cleanBuiltinVersion = 3
+// v4：补发 30cc1a0「域名清洗认紧贴中文/全角标点」行为改进时遗漏的版本号提升。
+//     该提交让「最 新 位 址 獲 取：489155.com」「489155.com@…」等水印可被清掉，
+//     但当时没 +1，导致已被旧逻辑判 Done 的任务签名不变、永久不再复查，水印遗留。
+// v5：修正「内容.域名水印」被 sepPrefix 误判为 token 内部而整条丢弃的缺陷
+//     （如 "电影.489155.com@" 残留下 "电影.489155.com@精品推荐"）。
+//     改为只有「起点前紧邻字符也是域名字符」才认作 token 内部。
+const cleanBuiltinVersion = 5
 
 var defaultCleanPatterns = []*regexp.Regexp{
 	// 1) 前缀 "www.example.com - " / "example.com - " / "https://a.com — "
@@ -179,8 +185,8 @@ var defaultCleanPatterns = []*regexp.Regexp{
 // replaceDomainToken 供「后缀模式」「独立 token 模式」「域名+@ 尾巴模式」共用。
 // 这几类模式的匹配都可能从域名 token 内部开始（"www.example.com" 命中成
 // ".example.com"、"xyz.a.b.com" 命中成 ".b.com"），因此不按前一个字符判边界，
-// 而是看匹配开头连续分隔符的构成：仅由 . / - 组成即为 token 内部，整条作废；
-// 否则（含空格、@、括号等真实边界分隔符）放行。
+// 而是看匹配开头连续分隔符的构成：仅由 . / - 组成「且起点前一个字符也是域名字符」才视为
+// token 内部、整条作废；否则（含空格/@/括号等真实边界，或 ./- 前是中文等真实边界）放行。
 //
 // 边界类放开到「任意非 ASCII 字母数字」之后，捕获组 (1)/(2) 里的文本可能是中文或全角
 // 标点，只有分隔符才允许随域名一起删——否则 "最新地址489155.com" 会连 "址" 一起吃掉。
@@ -188,7 +194,10 @@ var defaultCleanPatterns = []*regexp.Regexp{
 // 旧实现里 replaceWithBoundary 额外检查 s[loc[0]-1] 是否为边界，与模式自身
 // 已把前置分隔符吃进匹配的事实重复，导致 "某视频 489155.com@ 1080p" 这类
 // 单空格前缀的 token 一律被判无效——这是域名+@ 水印清不掉的第二个原因。
-func replaceDomainToken(re *regexp.Regexp, s string, strict bool) string {
+// relaxSep=true 时（仅「域名+@ 尾巴」水印模式）放宽 sepPrefix 判定：起点前的字符是
+// 中文/空格等真实边界就视为「内容.水印」之间的分隔符、照常删除水印；否则（独立域名
+// token / 后缀模式，无 @ 锚定）保持原严格行为，避免误删 "S01E01.top" 这类剧集码。
+func replaceDomainToken(re *regexp.Regexp, s string, strict, relaxSep bool) string {
 	subs := re.FindAllStringSubmatchIndex(s, -1)
 	if len(subs) == 0 {
 		return s
@@ -198,11 +207,18 @@ func replaceDomainToken(re *regexp.Regexp, s string, strict bool) string {
 	for _, sub := range subs {
 		loc := sub[0:2]
 		m := s[loc[0]:loc[1]]
-		if _, tokenInternal := sepPrefix(m); tokenInternal {
-			// 例外：域名候选自带 www. 前缀（如 ".www.98T.la@@" 命中 ".www.98T.la@@"）
-			// 说明前面的点只是水印分隔符，域名起点在 www.，删掉不会留下残段。
-			// 而 "www.example.com" 被命中成 ".example.com" 时候选不带 www.，仍须作废。
-			if !strings.HasPrefix(strings.ToLower(domainCandidateRe.FindString(m)), "www.") {
+		// 判定「匹配起点落在更长域名 token 内部」（如 "xyz.a.b.com" 误命中 ".b.com"）：
+		// 默认（严格）把「以 ./- 开头」一律当 token 内部、整条作废，避免把真域名削成残段。
+		// relaxSep（仅 @ 水印模式）下进一步看起点前一个字符：若它是域名字符（字母/数字/./-）
+		// 才当 token 内部；若前一个是中文/空格等真实边界，那个 ./- 只是「内容.水印」之间的
+		// 分隔符（如 "电影.489155.com@"），水印应照常删除，不能作废。
+		if _, onlySep := sepPrefix(m); onlySep {
+			atTokenInternal := true
+			if relaxSep && loc[0] > 0 {
+				p := s[loc[0]-1]
+				atTokenInternal = p == '.' || p == '-' || (p >= 'a' && p <= 'z') || (p >= '0' && p <= '9')
+			}
+			if atTokenInternal && !strings.HasPrefix(strings.ToLower(domainCandidateRe.FindString(m)), "www.") {
 				continue
 			}
 		}
@@ -290,10 +306,12 @@ func cleanBase(base string, custom []*regexp.Regexp) string {
 		for i, re := range defaultCleanPatterns {
 			strict := i >= 2 // 模式 3 起无位置锚定，须严格 TLD 校验
 			switch i {
-			case 2, 4, 5:
-				// 后缀 / 独立 token / 域名+@ 尾巴：三类都可能从域名 token 内部开始匹配，
-				// 边界判定统一看「匹配开头的分隔符构成」
-				next = replaceDomainToken(re, next, strict)
+			case 4:
+				// 域名+@ 尾巴：@ 是水印的可靠锚定，放宽 sepPrefix（前置点分隔符也照删）
+				next = replaceDomainToken(re, next, strict, true)
+			case 2, 5:
+				// 后缀 / 独立 token：无 @ 锚定，保持严格（避免误删 "S01E01.top" 等剧集码）
+				next = replaceDomainToken(re, next, strict, false)
 			default:
 				next = re.ReplaceAllStringFunc(next, func(m string) string {
 					if !validateDomainCandidate(m, strict) {

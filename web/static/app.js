@@ -19,7 +19,7 @@ const LIST_SEP = /[,，、;；｜|\r\n]+/;
 const NOTIFY_FIELDS = [
   ["name", "任务名"], ["size", "文件大小"], ["category", "分类"],
   ["addedOn", "添加时间"], ["completedOn", "完成时间"],
-  ["savePath", "保存路径"], ["tags", "标签"], ["hash", "Hash"],
+  ["savePath", "保存路径"], ["tags", "标签"], ["hash", "哈希"],
 ];
 
 // 渲染通知字段复选框组；未配置（空）时默认全选
@@ -364,14 +364,14 @@ function validateConfigJS(cfg) {
       }
     }
   }
-  // 任务退休与归档：与后端 validateConfig 同一套下限
+  // 任务移除与留存：与后端 validateConfig 同一套下限
   if (c.archive) {
     const ar = c.archive;
     if (ar.enabled) {
-      if ((ar.interval || 0) < 1) return "归档退休扫描间隔必须 ≥ 1 秒";
-      if ((ar.batchSize || 0) < 1) return "归档单轮批量必须 ≥ 1";
+      if ((ar.interval || 0) < 1) return "移除扫描间隔必须 ≥ 1 秒";
+      if ((ar.batchSize || 0) < 1) return "移除单轮批量必须 ≥ 1";
     }
-    if ((ar.quietMinutes || 0) < 0) return "归档静默期不能为负数";
+    if ((ar.quietMinutes || 0) < 0) return "移除冷却时间不能为负数";
     for (const [label, list] of [
       ["分类包含", ar.categoryInclude], ["分类排除", ar.categoryExclude],
       ["标签包含", ar.tagInclude], ["标签排除", ar.tagExclude],
@@ -1946,10 +1946,10 @@ async function renderSettings(root) {
           title: "转码后处理",
           body: `
             ${field("启用", toggle(!!(pp.enabled), { id: "fm-pp-enabled" }),
-              `下载完成后按 qB 报告的任务文件列表逐个转码：命中扩展名白名单的<b>每个</b>视频文件都会跑一次命令（多文件种子、文件散在共享分类根也一样）。全服务同时<b>只跑一条</b>命令，其余文件等下一轮扫描排队；已派发过的文件不会重复跑，重启也不会。归档关掉也照常触发——只要本项开着就会扫描。`)}
+              `下载完成后按 qB 报告的任务文件列表逐个转码：命中扩展名白名单的<b>每个</b>视频文件都会跑一次命令（多文件种子、文件分散在共享分类根目录也一样）。全服务同时<b>只跑一条</b>命令，其余文件等下一轮扫描排队；已提交过的文件不会重复跑，重启也不会。归档关掉也照常触发——只要本项开着就会扫描。`)}
             ${field("命令",
               `<textarea id="fm-pp-cmd" class="ctrl mono auto-h" placeholder="/usr/bin/shortcuts run &#34;Permute HEVC 50%缩放&#34; -i &#34;$FILE&#34;">${escapeHTML(pp.command || "")}</textarea>`,
-              `单行 shell 命令（走 <code>sh -c</code>），可以自己写引号、管道。占位符 <code>{file}</code> <code>{dir}</code> <code>{name}</code> <code>{category}</code> <code>{tags}</code> <code>{savepath}</code> 会被替换成自动加好单引号的字面量；也可以直接用环境变量 <code>$FILE</code> <code>$DIR</code> <code>$NAME</code> <code>$CATEGORY</code> <code>$TAGS</code> <code>$SAVEPATH</code>。<code>$TAGS</code> 是任务在 qB 里的逗号分隔标签原值（无标签时为空串），脚本里可自行按标签挑快捷指令。示例中的 <code>$FILE</code> 一定要带双引号，路径含空格时才能拆开。<b>快捷指令名必须与 <code>shortcuts list</code> 输出逐字符一致</b>，差一个空格就会「找不到快捷指令」。首次接入建议先用下面的「测试运行」验证快捷指令名与参数能不能跑通。`)}
+              `单行 shell 命令（走 <code>sh -c</code>），可以自己写引号、管道。占位符 <code>{file}</code> <code>{dir}</code> <code>{name}</code> <code>{category}</code> <code>{tags}</code> <code>{savepath}</code> 会被替换成自动加好单引号的字面量；也可以直接用环境变量 <code>$FILE</code> <code>$DIR</code> <code>$NAME</code> <code>$CATEGORY</code> <code>$TAGS</code> <code>$SAVEPATH</code>。<code>$TAGS</code> 是任务在 qB 里的逗号分隔标签原值（无标签时为空串），脚本里可自行按标签挑快捷指令。示例中的 <code>$FILE</code> 一定要带双引号，路径含空格时才能拆开。<b>快捷指令名必须与 <code>shortcuts list</code> 命令的输出逐字符一致</b>，差一个空格就会「找不到快捷指令」。首次接入建议先用下面的「测试运行」验证快捷指令名与参数能不能跑通。`)}
             ${field("扩展名白名单",
               `<input type="text" id="fm-pp-exts" class="ctrl w-sm" value="${escapeHTML(pp.extensions || "")}" placeholder="mov,m4v,mkv,mp4">`,
               "多条用逗号分隔、不写点（<code>, ， 、 ; ； |</code> 与换行都当分隔符）；只有命中这些扩展名的文件才执行，留空表示不过滤（非视频也会跑命令）。")}
@@ -1958,7 +1958,7 @@ async function renderSettings(root) {
                 <input type="text" id="fm-pp-cat-inc" value="${escapeHTML(pp.categoryInclude || "")}" placeholder="只转这些分类，例：动漫, 剧集">
                 <input type="text" id="fm-pp-cat-exc" value="${escapeHTML(pp.categoryExclude || "")}" placeholder="这些分类不转，例：电影">
               </div>`,
-              "<b>左框只转、右框不转</b>。按<b>整个任务</b>的 qB 分类判定，不区分大小写；多条之间用逗号分隔（<code>, ， 、 ; ； |</code> 与换行都算分隔符）；两边都留空即不过滤。包含名单里<b>分类要逐字符对上</b>（<code>动漫</code> 与 <code>动漫组</code> 是两条不同分类）。<b>未分类的任务永远不命中包含名单</b>——要连没打分类的一起转，就把左框留空、只用右框排除。同时命中左右两框时<b>右框优先</b>（不转）。判定结果会持久化，但<b>改了名单就会重扫历史任务</b>：之前被挡掉、漏转的会补转，已经转过的不会重转（按文件去重），不用重启也不用清状态。")}
+              "<b>左框只转、右框不转</b>。按<b>整个任务</b>的 qB 分类判定，不区分大小写；多条之间用逗号分隔（<code>, ， 、 ; ； |</code> 与换行都算分隔符）；两边都留空即不过滤。包含名单里<b>分类需逐字符匹配</b>（<code>动漫</code> 与 <code>动漫组</code> 是两条不同分类）。<b>未分类的任务永远不命中包含名单</b>——要连没打分类的一起转，就把左框留空、只用右框排除。同时命中左右两框时<b>右框优先</b>（不转）。判定结果会持久化，但<b>改了名单就会重扫历史任务</b>：之前被拦截、漏转的会补转，已经转过的不会重转（按文件去重），不用重启也不用清状态。")}
             ${field("标签过滤",
               `<div class="split">
                 <input type="text" id="fm-pp-tag-inc" value="${escapeHTML(pp.tagInclude || "")}" placeholder="只转带这些标签的，例：转码">
@@ -1969,9 +1969,9 @@ async function renderSettings(root) {
               `<div class="controls"><input type="number" id="fm-pp-timeout" class="w-xs" value="${pp.timeout || 0}" min="0"><span class="unit">秒</span></div>`,
               "0 表示不限。转码动辄几十分钟，默认不限即可；命令失败会退避重试 2 次后放弃。")}
             ${field("按大小清理产物", toggle(!!(pp.sizePrune), { id: "fm-pp-prune" }),
-              "命令成功后：产物比原片<b>小</b>就删掉原片保留产物，产物比原片<b>大</b>就保留原片、删掉产物。产物必须同时满足「同目录、与原片<b>同名</b>（只换扩展名）、且不早于命令开始时刻」才算数——文件散在共享分类根时，只按「同目录新文件」认产物会把别的任务刚下完的片子当成产物删掉。找不到产物就不动任何文件。删除会写进「文件」页审计日志，<b>不可回退</b>；删掉原片会让 qB 认为种子缺文件。")}
+              "命令成功后：产物比原片<b>小</b>就删掉原片保留产物，产物比原片<b>大</b>就保留原片、删掉产物。产物必须同时满足「同目录、与原片<b>同名</b>（只换扩展名）、且不早于命令开始时刻」才算数——文件分散在共享分类根目录时，只按「同目录新文件」认产物会把别的任务刚下完的片子当成产物删掉。找不到产物就不动任何文件。删除会写进「文件」页审计日志，<b>不可回退</b>；删掉原片会让 qB 认为种子缺文件。")}
             ${field("删除前校验产物", toggle(pp.verify !== false, { id: "fm-pp-verify" }),
-              "开启后（默认），删原片之前先用 <code>ffprobe</code> 确认产物真能解出视频流：<b>命令返回 0 不等于产物可用</b>——转码被中断、封装损坏留下的小文件照样会被当成成功。校验不通过、或本机找不到 ffprobe，就一个文件都不删。关掉则退回纯按大小判定。")}
+              "开启后（默认），删原片之前先用 <code>ffprobe</code> 确认产物确实能解析出视频流：<b>命令返回 0 不等于产物可用</b>——转码被中断、封装损坏留下的小文件照样会被当成成功。校验不通过、或本机找不到 ffprobe，就一个文件都不删。关掉则退回纯按大小判定。")}
             ${field("ffprobe 路径",
               `<input type="text" id="fm-pp-probe" class="ctrl mono" value="${escapeHTML(pp.probePath || "")}" placeholder="/opt/homebrew/bin/ffprobe">`,
               "留空则按 <code>PATH → /opt/homebrew/bin → /usr/local/bin → /usr/bin</code> 的顺序自动探测。Homebrew 装的 ffmpeg 若不在你启动本程序的 shell 的 PATH 里，就把绝对路径填在这里。")}
@@ -1989,30 +1989,30 @@ async function renderSettings(root) {
       `,
     })}
 
-    <!-- 任务退休与归档 -->
+    <!-- 任务移除与留存 -->
     ${UI.panel({
-      title: "任务退休与归档",
-      desc: "完成并收敛的任务从 qB 移除、磁盘文件保留，元数据写进账本，在「历史」页仍可检索",
+      title: "已完结任务移除与留存",
+      desc: "已完成且文件处理完毕的任务从 qB 移除、磁盘文件保留，元数据写进账本，在「历史」页仍可检索",
       iconName: "database",
       body: `
         ${field("启用", toggle(!!ar.enabled, { id: "ar-enabled" }),
-          "每隔一个扫描间隔判定一轮：失去实体的空壳任务（原片已被转码清理）与过了做种门槛的健康完成任务。两类都要求文件侧已收敛——清理、转码命令都跑完并过了静默期。")}
+          "每隔一个扫描间隔判定一轮：实体文件已丢失的空壳任务（原片已被转码清理）与过了做种门槛的文件完好已完成任务。两类都要求文件侧操作已结束——清理、转码命令都跑完并过了冷却时间。")}
         ${field("扫描间隔",
           `<div class="controls"><input type="number" id="ar-interval" class="w-xs" value="${ar.interval || 60}" min="1"><span class="unit">秒</span></div>`,
           "读的是共享任务快照，一轮扫描不产生额外 qB 请求；只有真要移除时才发一次批量删除。")}
-        ${field("干跑（只建档不移除）", toggle(ar.dryRun !== false, { id: "ar-dryrun" }),
-          "<b>建议先开着跑一轮。</b>候选只写进账本、一个删除请求都不发，去「历史」页切到「退休候选」核对条数与抽样记录，确认无误再关掉。关掉后也可以在候选视图点「确认移除 N 条」手动排空。")}
+        ${field("试运行（只建档不移除）", toggle(ar.dryRun !== false, { id: "ar-dryrun" }),
+          "<b>建议先开着跑一轮。</b>候选只写进账本、一个删除请求都不发，去「历史」页切到「待移除候选」核对条数与抽样记录，确认无误再关掉。关掉后也可以在候选视图点「确认移除 N 条」手动排空。")}
         ${field("单轮批量",
           `<div class="controls"><input type="number" id="ar-batch" class="w-xs" value="${ar.batchSize || 100}" min="1"><span class="unit">条</span></div>`,
           "一轮最多提交多少条移除，一批一次请求。首次真删建议先填 5 核对一轮。")}
-        ${field("静默期",
+        ${field("冷却时间",
           `<div class="controls"><input type="number" id="ar-quiet" class="w-xs" value="${ar.quietMinutes ?? 5}" min="0"><span class="unit">分钟</span></div>`,
-          "最后一条转码命令结束后再静默这么久才允许退休。「派发完」不等于「跑完」，最后一条命令可能还在后台跑几十分钟。")}
-        ${field("失去实体免做种门槛", toggle(ar.exemptLostFiles !== false, { id: "ar-exempt" }),
-          "<b>建议保持开启。</b>原片已被转码清理的任务只剩空壳，做种比率与时长对它们没有意义；关掉后这批任务也要过下面的门槛才退。")}
+          "最后一条转码命令结束后再等待这么久才允许移除。命令已提交不等于执行完毕，最后一条命令可能还在后台跑几十分钟。")}
+        ${field("实体缺失免做种门槛", toggle(ar.exemptLostFiles !== false, { id: "ar-exempt" }),
+          "<b>建议保持开启。</b>原片已被转码清理的任务只剩空壳，做种比率与时长对它们没有意义；关掉后这批任务也要过下面的门槛才被移除。")}
         ${UI.section({
           title: "做种门槛",
-          desc: "只对健康完成的任务生效，三者<b>任一</b>满足即可退休；填 0 表示不启用该判据",
+          desc: "只对文件完好的已完成任务生效，三者<b>任一</b>满足即可移除；填 0 表示不启用该判据",
           body: `
             ${field("分享比率",
               `<div class="controls"><input type="number" id="ar-ratio" class="w-xs" value="${ar.minRatio ?? 0}" min="0" step="0.1"><span class="unit">倍</span></div>`)}
@@ -2020,50 +2020,50 @@ async function renderSettings(root) {
               `<div class="controls"><input type="number" id="ar-hours" class="w-xs" value="${ar.minHours ?? 0}" min="0"><span class="unit">小时（自完成起算）</span></div>`)}
             ${field("上传量",
               `<div class="controls"><input type="number" id="ar-uploaded" class="w-xs" value="${ar.minUploadedMB ?? 0}" min="0"><span class="unit">MB</span></div>`)}
-            ${UI.notice("退休即停止做种，这是真实代价。PT 场景把比率/时长调到站点要求以上，或只留「失去实体」这条路径（三个门槛全填 0）。", "warn")}
+            ${UI.notice("移除即停止做种，这是真实代价。PT 场景把比率/时长调到站点要求以上，或只留「实体缺失」这条路径（三个门槛全填 0）。", "warn")}
           `,
         })}
         ${UI.section({
           title: "名单过滤",
-          desc: "语义与转码后处理一致：左框只退、右框不退，<b>右框优先</b>；未分类/无标签的任务不命中左框",
+          desc: "语义与转码后处理一致：左框只移除、右框不移除，<b>右框优先</b>；未分类/无标签的任务不命中左框",
           body: `
             ${field("分类过滤",
               `<div class="split">
-                <input type="text" id="ar-cat-inc" value="${escapeHTML(ar.categoryInclude || "")}" placeholder="只退这些分类，例：动漫, 剧集">
-                <input type="text" id="ar-cat-exc" value="${escapeHTML(ar.categoryExclude || "")}" placeholder="这些分类不退，例：电影">
+                <input type="text" id="ar-cat-inc" value="${escapeHTML(ar.categoryInclude || "")}" placeholder="只移除这些分类，例：动漫, 剧集">
+                <input type="text" id="ar-cat-exc" value="${escapeHTML(ar.categoryExclude || "")}" placeholder="这些分类不移除，例：电影">
               </div>`,
-              "多条用逗号分隔（<code>, ， 、 ; ； |</code> 与换行都算分隔符），分类要逐字符对上；两边都留空即不过滤。")}
+              "多条用逗号分隔（<code>, ， 、 ; ； |</code> 与换行都算分隔符），分类需逐字符匹配；两边都留空即不过滤。")}
             ${field("标签过滤",
               `<div class="split">
-                <input type="text" id="ar-tag-inc" value="${escapeHTML(ar.tagInclude || "")}" placeholder="只退带这些标签的，例：转码">
-                <input type="text" id="ar-tag-exc" value="${escapeHTML(ar.tagExclude || "")}" placeholder="带这些标签的不退，例：真人">
+                <input type="text" id="ar-tag-inc" value="${escapeHTML(ar.tagInclude || "")}" placeholder="只移除带这些标签的，例：转码">
+                <input type="text" id="ar-tag-exc" value="${escapeHTML(ar.tagExclude || "")}" placeholder="带这些标签的不移除，例：真人">
               </div>`,
-              "任务带多个标签时命中任意一个即算。典型用法是反向 opt-in：左框填 <code>转码</code>，只退手动打过该标签的任务。")}
+              "任务带多个标签时命中任意一个即算。典型用法是反向 opt-in：左框填 <code>转码</code>，只移除手动打过该标签的任务。")}
           `,
         })}
         ${UI.section({
           title: "重复下载守卫",
-          desc: "定期比对 qB 现有任务与账本，发现「退休后又被重新添加」的同一 infohash 就按档位处置",
+          desc: "定期比对 qB 现有任务与账本，发现「移除后又被重新添加」的同一信息哈希就按档位处置",
           body: `
             ${field("档位", `<select id="ar-guard-mode" class="ctrl">
               <option value="off"${ag.mode === "off" || !ag.mode ? " selected" : ""}>关闭（不扫描）</option>
-              <option value="notify"${ag.mode === "notify" ? " selected" : ""}>只告警（干跑）</option>
+              <option value="notify"${ag.mode === "notify" ? " selected" : ""}>只告警（试运行）</option>
               <option value="remove"${ag.mode === "remove" ? " selected" : ""}>移除任务，文件留着</option>
-              <option value="remove-files"${ag.mode === "remove-files" ? " selected" : ""}>移除任务并清掉本次重下的文件</option>
+              <option value="remove-files"${ag.mode === "remove-files" ? " selected" : ""}>移除任务并删除本次重新下载的文件</option>
             </select>`)}
             <div class="hint" id="ar-guard-desc"></div>
             ${field("扫描间隔",
               `<div class="controls"><input type="number" id="ar-guard-interval" class="w-xs" value="${ag.interval || 5}" min="1"><span class="unit">秒</span></div>`,
-              "只读内存快照，不产生额外 qB 请求。检测窗口内会真的下几秒：间隔 5 秒 + 快照新鲜度 2 秒，最坏约 7 秒后才被掐掉。")}
+              "只读内存快照，不产生额外 qB 请求。检测窗口内会真的下几秒：间隔 5 秒 + 快照新鲜度 2 秒，最坏约 7 秒后才会被终止。")}
             ${field("单轮上限",
               `<div class="controls"><input type="number" id="ar-guard-max" class="w-xs" value="${ag.maxPerRound || 20}" min="1"><span class="unit">条</span></div>`,
               "本轮候选超过这个数就只告警不动手，防止账本被误导入后批量删文件。")}
             ${field("通知冷却",
               `<div class="controls"><input type="number" id="ar-guard-cool" class="w-xs" value="${ag.notifyCooldownMinutes || 10}" min="0"><span class="unit">分钟</span></div>`,
-              "同一 hash 的告警冷却，避免反复添加/删除刷屏。只影响通知，不影响处置。")}
+              "同一哈希的告警冷却，避免反复添加/删除刷屏。只影响通知，不影响处置。")}
           `,
         })}
-        ${UI.notice("退休不备份 .torrent，移除后无法一键加回做种。想重下同一磁链，先在「历史」页删掉那条账本记录解除守卫。", "warn")}
+        ${UI.notice("移除不备份 .torrent，移除后无法一键加回做种。想重下同一磁链，先在「历史」页删掉那条账本记录解除守卫。", "warn")}
       `,
     })}
 
@@ -2114,10 +2114,10 @@ async function renderSettings(root) {
   // 守卫四档的动作边界差别很大（最高档会删文件），选完立刻说清当前档到底做什么
   const guardMode = $("#ar-guard-mode"), guardDesc = $("#ar-guard-desc");
   const GUARD_DESC = {
-    off: "关闭：不扫描。退休后的磁链被重新添加时不做任何处置。",
-    notify: "只告警：任务与文件都不动，只发通知与日志并列出判定依据。用这一档核对判定准不准。",
+    off: "关闭：不扫描。移除后的磁链被重新添加时不做任何处置。",
+    notify: "只告警：任务与文件都不动，只发通知与日志并列出判定依据。用这一档核对判定是否准确。",
     remove: "移除任务：从 qB 移除重复任务，本次重下写出的半成品文件留在磁盘（刻意的中间档）。",
-    "remove-files": "移除任务并清文件：只删「本次重下写出来的」文件——磁盘 mtime 不早于任务添加时刻才算，早于添加时刻的完好原片一个都不动；取不到 mtime（qbhive 看不到该路径）时降级为只移除任务。转码产物不在种子文件列表里，天然不会被删。",
+    "remove-files": "移除任务并删除文件：只删「本次重新下载写出的」文件——磁盘 mtime 不早于任务添加时刻才算，早于添加时刻的完好原片一个都不动；读不到 mtime（qbhive 无法访问该路径）时降级为只移除任务。转码产物不在种子文件列表里，默认不会被误删。",
   };
   const syncGuardDesc = () => { guardDesc.textContent = GUARD_DESC[guardMode.value] || GUARD_DESC.off; };
   guardMode.addEventListener("change", syncGuardDesc);
@@ -2432,7 +2432,7 @@ async function renderAudit(root) {
   });
 }
 
-// ---------- 历史（退休账本）----------
+// ---------- 历史（留存账本）----------
 // 账本可能几千上万条，过滤/排序/分页全在服务端做，这里只渲染当前页。
 const _archiveState = {
   page: 1,
@@ -2440,18 +2440,18 @@ const _archiveState = {
   q: "",
   category: "",
   tag: "",
-  scope: "all", // all=全部记录；pending=已建档未移除的退休候选
+  scope: "all", // all=全部记录；pending=已建档未移除的待移除候选
   sort: "completedOn",
   order: "desc",
 };
 
-// 当前页的记录：行操作要拿磁链与退休状态，不把几百字节的磁链塞进 data 属性
+// 当前页的记录：行操作要拿磁链与移除状态，不把几百字节的磁链塞进 data 属性
 let _archiveRows = [];
 
 const ARCHIVE_SORTS = [
   ["completedOn:desc", "完成时间 ↓"],
   ["completedOn:asc", "完成时间 ↑"],
-  ["retiredAt:desc", "退休时间 ↓"],
+  ["removedAt:desc", "移除时间 ↓"],
   ["addedOn:desc", "添加时间 ↓"],
   ["name:asc", "名称 A→Z"],
   ["size:desc", "大小 ↓"],
@@ -2476,18 +2476,18 @@ async function renderArchive(root) {
     ${UI.page({
       eyebrow: "Archive",
       title: "历史",
-      desc: "已从 qB 退休的任务元数据：磁盘文件保留，磁链可复制，重复下载守卫按这本账拦同一条磁链。",
+      desc: "已从 qB 移除的任务元数据：磁盘文件保留，磁链可复制，重复下载守卫按这本账本拦截同一条磁链。",
       actions: UI.btn("刷新", { size: "sm", iconName: "refresh", id: "ar-reload" }),
     })}
     ${UI.panel({
-      title: "退休账本",
+      title: "留存账本",
       iconName: "database",
-      actions: `<span class="meta-text" id="ar-count"></span><span id="ar-retire-slot"></span>`,
+      actions: `<span class="meta-text" id="ar-count"></span><span id="ar-remove-slot"></span>`,
       body: `
         ${UI.toolbar([
           UI.toolField("范围", `<select id="ar-scope" class="control">
             <option value="all"${s.scope === "all" ? " selected" : ""}>全部记录</option>
-            <option value="pending"${s.scope === "pending" ? " selected" : ""}>退休候选</option>
+            <option value="pending"${s.scope === "pending" ? " selected" : ""}>待移除候选</option>
           </select>`),
           UI.toolField("排序", `<select id="ar-sort" class="control">
             ${ARCHIVE_SORTS.map(([v, label]) =>
@@ -2527,7 +2527,7 @@ async function fetchArchive() {
   const body = $("#ar-body");
   if (!body) return;
   const count = $("#ar-count");
-  const slot = $("#ar-retire-slot");
+  const slot = $("#ar-remove-slot");
 
   if (!r.success) {
     body.innerHTML = notice(`检索失败：${escapeHTML(r.message || "未知错误")}`, "danger");
@@ -2544,23 +2544,23 @@ async function fetchArchive() {
   // 候选视图才给排空按钮：N 是当前筛选下的候选总数，不是本页条数
   if (slot) {
     slot.innerHTML = (_archiveState.scope === "pending" && total > 0)
-      ? UI.btn(`确认移除 ${total} 条`, { size: "sm", variant: "danger", iconName: "trash", id: "ar-retire" })
+      ? UI.btn(`确认移除 ${total} 条`, { size: "sm", variant: "danger", iconName: "trash", id: "ar-remove" })
       : "";
-    const btn = $("#ar-retire");
-    if (btn) btn.onclick = () => retireCandidates(total);
+    const btn = $("#ar-remove");
+    if (btn) btn.onclick = () => removeCandidates(total);
   }
 
   if (records.length === 0) {
     const filtered = _archiveState.q || _archiveState.category || _archiveState.tag;
     body.innerHTML = UI.empty(
-      filtered ? "没有匹配的记录" : _archiveState.scope === "pending" ? "暂无退休候选" : "账本暂无记录",
+      filtered ? "没有匹配的记录" : _archiveState.scope === "pending" ? "暂无待移除候选" : "账本暂无记录",
       { iconName: filtered ? "search" : "database" },
     );
     return;
   }
 
   const rows = records.map(rec => {
-    const retired = rec.retiredAt > 0;
+    const removed = rec.removedAt > 0;
     return `
       <div class="data-row archive-row">
         <span class="data-cell torrent-name" title="${escapeHTML(rec.name)}">${escapeHTML(rec.name)}</span>
@@ -2568,10 +2568,10 @@ async function fetchArchive() {
         <span class="data-cell data-cell--cat">${rec.category ? UI.tag(escapeHTML(rec.category)) : ""}</span>
         <span class="data-cell data-cell--time">${rec.completedOn ? fmtTime(rec.completedOn) : ""}</span>
         <span class="data-cell data-cell--path mono" title="${escapeHTML(rec.savePath)}">${escapeHTML(rec.savePath)}</span>
-        <span class="data-cell data-cell--state">${retired ? UI.tag("已退休", "muted") : UI.tag("候选", "warn")}</span>
+        <span class="data-cell data-cell--state">${removed ? UI.tag("已移除", "muted") : UI.tag("待移除候选", "warn")}</span>
         <span class="data-cell data-cell--actions">
           ${UI.btn("磁链", { size: "xs", iconName: "link", title: "复制磁链", attrs: `data-ar-magnet="${escapeHTML(rec.hash)}"` })}
-          ${UI.btn("删除", { size: "xs", variant: "danger", title: retired ? "删除账本记录，解除重复守卫" : "删除候选记录", attrs: `data-ar-del="${escapeHTML(rec.hash)}"` })}
+          ${UI.btn("删除", { size: "xs", variant: "danger", title: removed ? "删除账本记录，解除重复守卫" : "删除候选记录", attrs: `data-ar-del="${escapeHTML(rec.hash)}"` })}
         </span>
       </div>`;
   });
@@ -2603,11 +2603,11 @@ async function fetchArchive() {
     b.onclick = async () => {
       const rec = _archiveRows.find(x => x.hash === b.dataset.arDel);
       if (!rec) return;
-      const retired = rec.retiredAt > 0;
-      const ok = await confirmDialog(retired ? "解除重复守卫" : "删除候选记录",
-        `「${rec.name}」\n` + (retired
+      const removed = rec.removedAt > 0;
+      const ok = await confirmDialog(removed ? "解除重复守卫" : "删除候选记录",
+        `「${rec.name}」\n` + (removed
           ? "账本记录删除后，重复下载守卫不再拦这条磁链。"
-          : "删除后这条不再出现在退休候选里。") + "\nqB 里的任务与磁盘文件都不动。",
+          : "删除后这条不再出现在待移除候选里。") + "\nqB 里的任务与磁盘文件都不动。",
         { danger: true, okText: "删除记录" });
       if (!ok) return;
       b.disabled = true;
@@ -2618,12 +2618,12 @@ async function fetchArchive() {
   });
 }
 
-// 排空当前筛选下的候选：账本单页上限 1000 条，按 total 逐页取回 hash 再一次性提交。
+// 排空当前筛选下的候选：账本单页上限 1000 条，按 total 逐页取回哈希再一次性提交。
 // 只提交本页那几十条会让「移除 7000 条」变成点 140 次。
-async function retireCandidates(total) {
-  const ok = await confirmDialog("移除退休候选",
+async function removeCandidates(total) {
+  const ok = await confirmDialog("确认移除候选",
     `将把当前筛选出的 ${total} 条候选任务从 qB 移除，磁盘文件保留。\n` +
-    "此操作绕过干跑与做种门槛，且不备份 .torrent —— 移除后无法一键加回做种。",
+    "此操作绕过试运行与做种门槛，且不备份 .torrent —— 移除后无法一键加回做种。",
     { danger: true, okText: `移除 ${total} 条` });
   if (!ok) return;
 
@@ -2634,7 +2634,7 @@ async function retireCandidates(total) {
     p.set("offset", String(hashes.length));
     p.set("limit", "1000");
     const r = await api("GET", `/archive?${p}`);
-    const slot = $("#ar-retire-slot");
+    const slot = $("#ar-remove-slot");
     if (!slot) return; // 已切页，放弃本次排空
     if (!r.success) {
       slot.innerHTML = "";
@@ -2649,7 +2649,7 @@ async function retireCandidates(total) {
   }
   if (hashes.length === 0) { fetchArchive(); return; }
 
-  const res = await api("POST", "/archive/retire", { hashes });
+  const res = await api("POST", "/archive/remove", { hashes });
   toast(res.message || (res.success ? "已移除 ✓" : "移除失败"), res.success ? "ok" : "err");
   _archiveState.page = 1;
   fetchArchive();

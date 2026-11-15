@@ -40,10 +40,10 @@ type Scheduler struct {
 	// 自动分类：自带 ticker，不挂在上述任何模块的扫描循环里
 	categorizer *categorizer.Manager
 
-	// 归档退休：同样自带 ticker，missingFiles 不在 filemgr 的完成态白名单里
-	retirer *archive.Retirer
+	// 归档移除：同样自带 ticker，missingFiles 不在 filemgr 的完成态白名单里
+	remover *archive.Remover
 
-	// 重复下载守卫：5s 一轮只读快照，与退休扫描互不依赖
+	// 重复下载守卫：5s 一轮只读快照，与移除扫描互不依赖
 	guard *archive.Guard
 }
 
@@ -55,9 +55,9 @@ func (s *Scheduler) SetGuard(g *archive.Guard) {
 	}
 }
 
-// SetRetirer 注入归档退休扫描器（可选；nil 时跳过启停与重载）
-func (s *Scheduler) SetRetirer(r *archive.Retirer) {
-	s.retirer = r
+// SetRemover 注入移除扫描器（可选；nil 时跳过启停与重载）
+func (s *Scheduler) SetRemover(r *archive.Remover) {
+	s.remover = r
 	if r != nil && s.torrentCache != nil {
 		r.SetTorrentCache(s.torrentCache)
 	}
@@ -128,8 +128,8 @@ func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	if s.categorizer != nil {
 		s.categorizer.Reload(nil)
 	}
-	if s.retirer != nil {
-		s.retirer.Reload(nil)
+	if s.remover != nil {
+		s.remover.Reload(nil)
 	}
 	if s.guard != nil {
 		s.guard.Reload(nil)
@@ -193,8 +193,8 @@ func (s *Scheduler) Start() {
 	if s.categorizer != nil {
 		s.categorizer.Start()
 	}
-	if s.retirer != nil {
-		s.retirer.Start()
+	if s.remover != nil {
+		s.remover.Start()
 	}
 	if s.guard != nil {
 		s.guard.Start()
@@ -273,8 +273,8 @@ func (s *Scheduler) Stop() {
 	if s.categorizer != nil {
 		s.categorizer.Stop()
 	}
-	if s.retirer != nil {
-		s.retirer.Stop()
+	if s.remover != nil {
+		s.remover.Stop()
 	}
 	if s.guard != nil {
 		s.guard.Stop()

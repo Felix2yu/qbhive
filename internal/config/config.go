@@ -116,7 +116,7 @@ func applyConfigDefaults(cfg *models.AppConfig) {
 // 一升级就开始真删任务；ExemptLostFiles 落成 false 只是少退一批，方向也安全。
 //
 // 做种门槛刻意不在这里补默认值：三个判据都是「<=0 表示不启用」，
-// 老配置全为 0 时健康完成任务一条都不会退休，只有失去实体的那批会退——
+// 老配置全为 0 时文件完好已完成任务一条都不会移除，只有实体缺失的那批会移除——
 // 这是升级后最安全的方向。新装的默认值由 defaultConfig 给。
 func applyArchiveDefaults(a *models.ArchiveConfig) {
 	if a.DryRun == nil {

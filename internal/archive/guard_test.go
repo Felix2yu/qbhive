@@ -199,16 +199,16 @@ func newGuardEnv(t *testing.T, ac models.ArchiveConfig) *guardEnv {
 	return e
 }
 
-// retiredRecord 一条已退休的账本记录
-func retiredRecord(hash string, retiredAt int64) Record {
+// removedRecord 一条已移除的账本记录
+func removedRecord(hash string, removedAt int64) Record {
 	return Record{
 		Hash: hash, Name: "影片." + hash, SavePath: "/data/电影",
-		CompletedOn: retiredAt - 100, RetiredAt: retiredAt, Reason: ReasonLostFiles,
+		CompletedOn: removedAt - 100, RemovedAt: removedAt, Reason: ReasonLostFiles,
 		Magnet: BuildMagnet(hash, "影片."+hash, ""),
 	}
 }
 
-// readded 退休后又被重新添加的任务
+// readded 移除后又被重新添加的任务
 func readded(hash string, addedOn int64, savePath string) models.QBTorrent {
 	return models.QBTorrent{
 		Hash: hash, Name: "影片." + hash, State: "downloading", Progress: 0.1,
@@ -251,7 +251,7 @@ func filesJSON(names ...string) string {
 
 func TestGuard_OffDoesNothing(t *testing.T) {
 	e := newGuardEnv(t, guardCfg(models.GuardModeOff))
-	if err := e.store.Append(retiredRecord("a", 1000)); err != nil {
+	if err := e.store.Append(removedRecord("a", 1000)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", 2000, "/data")})
@@ -265,7 +265,7 @@ func TestGuard_OffDoesNothing(t *testing.T) {
 func TestGuard_NoDirectFallback(t *testing.T) {
 	// 快照未就绪
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", 1000)); err != nil {
+	if err := e.store.Append(removedRecord("a", 1000)); err != nil {
 		t.Fatal(err)
 	}
 	e.g.scan()
@@ -275,7 +275,7 @@ func TestGuard_NoDirectFallback(t *testing.T) {
 
 	// 完全没注入快照
 	e2 := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e2.store.Append(retiredRecord("a", 1000)); err != nil {
+	if err := e2.store.Append(removedRecord("a", 1000)); err != nil {
 		t.Fatal(err)
 	}
 	e2.g.SetTorrentCache(nil)
@@ -290,7 +290,7 @@ func TestGuard_NotifyOnlyTouchesNothing(t *testing.T) {
 	added := time.Now()
 	writeAged(t, filepath.Join(dir, "new.mkv"), added.Add(10*time.Second))
 	e := newGuardEnv(t, guardCfg(models.GuardModeNotify))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -310,8 +310,8 @@ func TestGuard_NotifyOnlyTouchesNothing(t *testing.T) {
 	if len(notices) != 1 {
 		t.Fatalf("应发一条告警，got %v", notices)
 	}
-	// 告警必须带判定依据，供干跑核对
-	for _, want := range []string{"影片.a", "归档完成时间", "归档退休时间", "本次添加时间", dir} {
+	// 告警必须带判定依据，供试运行核对
+	for _, want := range []string{"影片.a", "归档完成时间", "移除时间", "本次添加时间", dir} {
 		if !strings.Contains(notices[0], want) {
 			t.Errorf("告警缺少判定依据 %q：%s", want, notices[0])
 		}
@@ -323,7 +323,7 @@ func TestGuard_RemoveKeepsFiles(t *testing.T) {
 	added := time.Now()
 	writeAged(t, filepath.Join(dir, "new.mkv"), added.Add(10*time.Second))
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemove))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -354,7 +354,7 @@ func TestGuard_RemoveFilesSparesOldOriginalAndProduct(t *testing.T) {
 	writeAged(t, product, added.Add(10*time.Second))
 
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -388,7 +388,7 @@ func TestGuard_MtimeBoundary(t *testing.T) {
 		p := filepath.Join(dir, "f.mkv")
 		writeAged(t, p, added.Add(delta))
 		e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-		if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+		if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 			t.Fatal(err)
 		}
 		e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -418,7 +418,7 @@ func TestGuard_PartialSuffixCandidates(t *testing.T) {
 		p := filepath.Join(dir, c.onDisk)
 		writeAged(t, p, added.Add(10*time.Second))
 		e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-		if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+		if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 			t.Fatal(err)
 		}
 		e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -437,7 +437,7 @@ func TestGuard_PartialSuffixStillChecksMtime(t *testing.T) {
 	p := filepath.Join(dir, "f.mkv")
 	writeAged(t, p, added.Add(-time.Hour))
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -458,7 +458,7 @@ func TestGuard_OutOfBoundsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -483,7 +483,7 @@ func TestGuard_NeverRemovesDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -498,7 +498,7 @@ func TestGuard_NeverRemovesDirectory(t *testing.T) {
 func TestGuard_StorageInvisibleDegrades(t *testing.T) {
 	added := time.Now().Truncate(time.Second)
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), "/nonexistent/qbhive-test")})
@@ -523,7 +523,7 @@ func TestGuard_FilesAPIFailureDegrades(t *testing.T) {
 	p := filepath.Join(dir, "f.mkv")
 	writeAged(t, p, added.Add(10*time.Second))
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-	if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+	if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", added.Unix(), dir)})
@@ -542,12 +542,12 @@ func TestGuard_FilesAPIFailureDegrades(t *testing.T) {
 	}
 }
 
-// 坑 3：正在退休 / 刚退休的任务不能被守卫当成重复下载。
-// added_on 与 RetiredAt 都是秒刻度，相等时必须放过。
-func TestGuard_AddedOnMustBeAfterRetiredAt(t *testing.T) {
+// 坑 3：正在移除 / 刚移除的任务不能被守卫当成重复下载。
+// added_on 与 RemovedAt 都是秒刻度，相等时必须放过。
+func TestGuard_AddedOnMustBeAfterRemovedAt(t *testing.T) {
 	for _, delta := range []int64{-100, -1, 0, 1, 100} {
 		e := newGuardEnv(t, guardCfg(models.GuardModeRemove))
-		if err := e.store.Append(retiredRecord("a", 1000)); err != nil {
+		if err := e.store.Append(removedRecord("a", 1000)); err != nil {
 			t.Fatal(err)
 		}
 		e.setTorrents(t, []models.QBTorrent{readded("a", 1000+delta, "/data")})
@@ -559,18 +559,18 @@ func TestGuard_AddedOnMustBeAfterRetiredAt(t *testing.T) {
 	}
 }
 
-// RetiredAt==0 是干跑候选或正在退休，任务本来就该在 qB 里
+// RemovedAt==0 是试运行候选或正在移除，任务本来就该在 qB 里
 func TestGuard_PendingRecordIsNotAHit(t *testing.T) {
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemove))
-	rec := retiredRecord("a", 1000)
-	rec.RetiredAt = 0
+	rec := removedRecord("a", 1000)
+	rec.RemovedAt = 0
 	if err := e.store.Append(rec); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", 2000, "/data")})
 	e.g.scan()
 	if len(e.deleteCalls()) != 0 {
-		t.Error("未退休的记录不该触发守卫")
+		t.Error("未移除的记录不该触发守卫")
 	}
 }
 
@@ -590,7 +590,7 @@ func TestGuard_VolatileStatesSkipped(t *testing.T) {
 		p := filepath.Join(dir, "f.mkv")
 		writeAged(t, p, added.Add(10*time.Second))
 		e := newGuardEnv(t, guardCfg(models.GuardModeRemoveFiles))
-		if err := e.store.Append(retiredRecord("a", added.Unix()-100)); err != nil {
+		if err := e.store.Append(removedRecord("a", added.Unix()-100)); err != nil {
 			t.Fatal(err)
 		}
 		tor := readded("a", added.Unix(), dir)
@@ -617,7 +617,7 @@ func TestGuard_MaxPerRoundBreaker(t *testing.T) {
 	var list []models.QBTorrent
 	for i := 0; i < 21; i++ {
 		h := "h" + strconv.Itoa(i)
-		if err := e.store.Append(retiredRecord(h, added.Unix()-100)); err != nil {
+		if err := e.store.Append(removedRecord(h, added.Unix()-100)); err != nil {
 			t.Fatal(err)
 		}
 		list = append(list, readded(h, added.Unix(), dir))
@@ -642,7 +642,7 @@ func TestGuard_MaxPerRoundBreaker(t *testing.T) {
 	var list2 []models.QBTorrent
 	for i := 0; i < 20; i++ {
 		h := "k" + strconv.Itoa(i)
-		if err := e2.store.Append(retiredRecord(h, added.Unix()-100)); err != nil {
+		if err := e2.store.Append(removedRecord(h, added.Unix()-100)); err != nil {
 			t.Fatal(err)
 		}
 		list2 = append(list2, readded(h, added.Unix(), dir))
@@ -658,7 +658,7 @@ func TestGuard_NotifyCooldown(t *testing.T) {
 	ac := guardCfg(models.GuardModeNotify)
 	ac.Guard.NotifyCooldownMinutes = 10
 	e := newGuardEnv(t, ac)
-	if err := e.store.Append(retiredRecord("a", 1000)); err != nil {
+	if err := e.store.Append(removedRecord("a", 1000)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", 2000, "/data")})
@@ -683,7 +683,7 @@ func TestGuard_NotifyCooldown(t *testing.T) {
 // 冷却只压制通知，不压制处置动作：否则冷却期内的重下就漏过去了
 func TestGuard_CooldownDoesNotSuppressAction(t *testing.T) {
 	e := newGuardEnv(t, guardCfg(models.GuardModeRemove))
-	if err := e.store.Append(retiredRecord("a", 1000)); err != nil {
+	if err := e.store.Append(removedRecord("a", 1000)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", 2000, "/data")})
@@ -703,7 +703,7 @@ func TestGuard_BurstCooldown(t *testing.T) {
 	e := newGuardEnv(t, ac)
 	var list []models.QBTorrent
 	for _, h := range []string{"a", "b"} {
-		if err := e.store.Append(retiredRecord(h, 1000)); err != nil {
+		if err := e.store.Append(removedRecord(h, 1000)); err != nil {
 			t.Fatal(err)
 		}
 		list = append(list, readded(h, 2000, "/data"))
@@ -718,7 +718,7 @@ func TestGuard_BurstCooldown(t *testing.T) {
 
 func TestGuard_UnknownModeIsInert(t *testing.T) {
 	e := newGuardEnv(t, guardCfg("bogus"))
-	if err := e.store.Append(retiredRecord("a", 1000)); err != nil {
+	if err := e.store.Append(removedRecord("a", 1000)); err != nil {
 		t.Fatal(err)
 	}
 	e.setTorrents(t, []models.QBTorrent{readded("a", 2000, "/data")})

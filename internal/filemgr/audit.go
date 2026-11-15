@@ -37,7 +37,7 @@ const (
 const auditViaPrune = "prune"
 
 // auditViaGuard 审计记录 via 字段取值：重复下载守卫清掉本次重下写出的文件。
-// 与 prune 分开，便于在审计页区分「转码二选一」和「退休后又被重加」两种删除
+// 与 prune 分开，便于在审计页区分「转码二选一」和「移除后又被重加」两种删除
 const auditViaGuard = "dup-guard"
 
 // auditViaLocalMove 审计记录 via 字段取值：qB renameFile 失败后由本地移动完成的归档。

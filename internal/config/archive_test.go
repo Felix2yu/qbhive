@@ -75,7 +75,7 @@ func TestArchiveDefaults_ValidGuardModesPreserved(t *testing.T) {
 }
 
 // 做种门槛刻意不补默认值：三个判据都是「<=0 表示不启用」。
-// 老配置全为 0 时健康完成任务一条都不退，只有失去实体的那批会退——
+// 老配置全为 0 时文件完好已完成任务一条都不移除，只有实体缺失的那批会移除——
 // 这是升级后最安全的方向。若在这里补上 1.0/24，等于替用户决定了做种门槛。
 func TestArchiveDefaults_SeedingGatesStayDisabled(t *testing.T) {
 	a := loadArchive(t, `{"server":{"listen":":8088"}}`)
@@ -91,7 +91,7 @@ func TestArchiveDefaults_NewInstallHasStarterGates(t *testing.T) {
 		t.Errorf("新装应带起步门槛，got ratio=%v hours=%v", a.MinRatio, a.MinHours)
 	}
 	if a.Enabled {
-		t.Error("新装不该默认启用退休")
+		t.Error("新装不该默认启用移除")
 	}
 	if a.Guard.Mode != models.GuardModeOff {
 		t.Errorf("新装守卫应为 off，got %q", a.Guard.Mode)

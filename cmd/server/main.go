@@ -61,12 +61,12 @@ func main() {
 	// 自动分类自带扫描循环，与文件管理互不依赖：关掉归档不影响分类，反之亦然
 	cat := categorizer.New(cfgMgr, qbCli)
 	sch.SetCategorizer(cat)
-	// 归档退休：先建档（Sync 落盘）再移除任务，磁盘文件一律保留
+	// 移除扫描：先建档（Sync 落盘）再移除任务，磁盘文件一律保留
 	archStore := archive.NewStore(archive.DefaultPath())
-	ret := archive.NewRetirer(cfgMgr, qbCli, archStore, fm)
+	ret := archive.NewRemover(cfgMgr, qbCli, archStore, fm)
 	ret.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
-	sch.SetRetirer(ret)
-	// 重复下载守卫：退休后同 infohash 被重新添加时按档位处置，默认 off
+	sch.SetRemover(ret)
+	// 重复下载守卫：移除后同 信息哈希 被重新添加时按档位处置，默认 off
 	guard := archive.NewGuard(cfgMgr, qbCli, archStore, fm)
 	guard.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
 	sch.SetGuard(guard)

@@ -338,7 +338,7 @@ func (m *Manager) ensureRules(ac models.AutoCategoryConfig) ([]compiledRule, err
 	return compiled, nil
 }
 
-// unreadyNameRe 匹配「元数据尚未就绪」时 qB 返回的名字：40 位十六进制 infohash
+// unreadyNameRe 匹配「元数据尚未就绪」时 qB 返回的名字：40 位十六进制 信息哈希
 // 原文，或以 magnet: 开头的 magnet 链接。这两类名字的拉丁字母数在 17~42，必然
 // 越过任何 latinCount 阈值而被判成「外文」。更麻烦的是：一旦在这个阶段打上分类，
 // 后续轮次就会被「只处理未分类任务」的闸门挡住，永远等不到用真实名字重新评估
@@ -352,7 +352,7 @@ var unreadyNameRe = regexp.MustCompile(`^(?:magnet:|[0-9a-fA-F]{40}$)`)
 
 // readyForCategory 判断一个任务现在能不能安全地定分类。
 //
-// 磁链刚添加时 qB 手上只有 infohash，还没有种子元数据，所以 info 接口返回的
+// 磁链刚添加时 qB 手上只有 信息哈希，还没有种子元数据，所以 info 接口返回的
 // 名字是 40 位十六进制 hash 或 magnet 链接原文。元数据到位之前一律不动，
 // 等名字变成真实种子名后再说。
 func readyForCategory(t models.QBTorrent) bool {

@@ -96,9 +96,9 @@ type cleanRecord struct {
 	PostDispatched []string `json:"postDispatched,omitempty"`
 	// PostFinished 已收尾的命令数（成功或重试耗尽都算）。
 	// PostDone 只表示「派发完了」，最后一条命令可能还在后台跑几十分钟；
-	// 退休判定要看这个数追平 PostDispatched，否则会在转码途中把任务移走。
+	// 移除判定要看这个数追平 PostDispatched，否则会在转码途中把任务移走。
 	PostFinished int `json:"postFinished,omitempty"`
-	// PostLastDone 最近一条命令收尾的时刻（Unix 秒），供退休前的静默期判定
+	// PostLastDone 最近一条命令收尾的时刻（Unix 秒），供移除前的冷却时间判定
 	PostLastDone int64 `json:"postLastDone,omitempty"`
 	// PostWaits 命中白名单的文件连续几轮都取不到（qB 临时名 / 磁盘上还没有），
 	// 超过 postMaxWaits 才认定这个任务确实没有可转的文件
@@ -746,7 +746,9 @@ func (m *Manager) handleClean(t models.QBTorrent) {
 	}
 	// 清理规则变了（新增自定义正则、启用/关闭 AI、内置规则升级）→ 解除此前判 Done 的任务。
 	// rec.Done 一旦置位本进程就不再回头看，不重置的话用户新加的正则对历史任务永远不生效。
-	if rec.Done && rec.CleanSig != "" && rec.CleanSig != sig {
+	// 注意：不能加 rec.CleanSig != "" 守卫——旧版本遗留的 done 条目 cleanSig 为空串，
+	// 加守卫会让它们永远不被解除，水印改名就此卡死（cleanBuiltinVersion 升到 v4 也救不回）。
+	if rec.Done && rec.CleanSig != sig {
 		logger.Info.Printf("文件清理 [%s] 清理规则已变更，重新评估该任务", t.Name)
 		rec.Done = false
 		// 顺带解除 AI 熔断：规则都改了，AI 通道可能也是刚配好的
@@ -1108,11 +1110,11 @@ func (m *Manager) AuditList(offset, limit int) ([]auditEntry, int) {
 	return m.audit.List(offset, limit)
 }
 
-// Settled 报告某任务的文件侧处理是否已全部收敛，供退休扫描判定能否安全移除任务。
+// Settled 报告某任务的文件侧处理是否已全部结束，供移除扫描判定能否安全移除任务。
 //
 // 每项要求按对应 pass 是否开启来判：Done 只在清理 pass 里置位、PostDone 只在
 // 后处理 pass 里置位，无条件要求会在开关关闭时永远不收敛（自锁）。
-// 没有记录＝filemgr 还没处理过它＝未收敛：刚完成的任务要等清理/转码跑完再退休。
+// 没有记录＝filemgr 还没处理过它＝未结束：刚完成的任务要等清理/转码跑完再移除。
 func (m *Manager) Settled(hash string, quiet time.Duration) bool {
 	if !m.scanEnabled() {
 		return true
@@ -1146,8 +1148,8 @@ func (m *Manager) Settled(hash string, quiet time.Duration) bool {
 // Idle 报告 filemgr 对该任务有没有待落地或在跑的文件操作。
 //
 // 与 Settled 的区别是「没有记录」的解读：这里视为空闲（filemgr 从没碰过它）。
-// 失去实体的任务进不了 filemgr 的完成态白名单，永远不会有记录，用 Settled 判
-// 就一条都退不掉；但它们仍可能有在跑的转码命令，所以退休前要看 Idle。
+// 实体缺失的任务进不了 filemgr 的完成态白名单，永远不会有记录，用 Settled 判
+// 就一条都移除不了；但它们仍可能有在跑的转码命令，所以移除前要看 Idle。
 func (m *Manager) Idle(hash string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1173,7 +1175,7 @@ func (m *Manager) loadCleanState() {
 	}
 	// 存量记录里没有 postFinished 这个键，解析进来是 0。进程刚启动，
 	// 上一进程派发的命令不可能还在跑，所以把计数追平已派发数。
-	// 不追平的话历史任务永远满足不了退休的收敛判定，一条都退不掉。
+	// 不追平的话历史任务永远满足不了移除的结束判定，一条都移除不了。
 	for _, rec := range m.cleanState {
 		if rec != nil {
 			rec.PostFinished = len(rec.PostDispatched)

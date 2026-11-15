@@ -2,7 +2,7 @@ package web
 
 // 归档接口测试。账本自身的过滤/排序/分页语义在 internal/archive/store_test.go 里覆盖，
 // 这里只验证 web 层该做的事：查询参数有没有真的传进 Query、鉴权是否挡住写操作、
-// 逃生口是否只动账本不动 qB、手动退休是否绕过 dryRun 且 deleteFiles 恒 false。
+// 逃生口是否只动账本不动 qB、手动移除是否绕过 dryRun 且 deleteFiles 恒 false。
 
 import (
 	"encoding/json"
@@ -38,7 +38,7 @@ func newArchiveEnv(t *testing.T, token, torrentsBody string) *archiveEnv {
 	dir := t.TempDir()
 	s := setupTestServerFull(t, dir, m.URL(), token)
 	store := archive.NewStore(filepath.Join(dir, "archive.jsonl"))
-	s.SetArchive(store, archive.NewRetirer(s.cfg, s.qbClient, store, s.fileMgr))
+	s.SetArchive(store, archive.NewRemover(s.cfg, s.qbClient, store, s.fileMgr))
 	return &archiveEnv{srv: s, store: store, qb: m, dir: dir}
 }
 
@@ -58,24 +58,24 @@ func archiveRouter(s *Server) *gin.Engine {
 	r.Use(s.authMiddleware())
 	api := r.Group("/api")
 	api.GET("/archive", s.archiveSearch)
-	api.POST("/archive/retire", s.archiveRetire)
+	api.POST("/archive/remove", s.archiveRemove)
 	api.DELETE("/archive/:hash", s.archiveDelete)
 	return r
 }
 
-func archRecord(hash, name, category, tags, savePath string, size, completedOn, retiredAt int64) archive.Record {
+func archRecord(hash, name, category, tags, savePath string, size, completedOn, removedAt int64) archive.Record {
 	return archive.Record{
 		Hash: hash, Name: name, Category: category, Tags: tags,
 		SavePath: savePath, ContentPath: savePath + "/" + name,
 		Tracker: "http://tr.example/announce",
 		Magnet:  "magnet:?xt=urn:btih:" + hash,
 		Size:    size, Uploaded: size * 2, AddedOn: completedOn - 100,
-		CompletedOn: completedOn, Ratio: 2, RetiredAt: retiredAt,
+		CompletedOn: completedOn, Ratio: 2, RemovedAt: removedAt,
 		Reason: archive.ReasonLostFiles,
 	}
 }
 
-// seedThree 三条记录，每个过滤维度都能单独区分出来；h3 是已建档未退休的候选。
+// seedThree 三条记录，每个过滤维度都能单独区分出来；h3 是已建档未移除的候选。
 // size 刻意与 name/completedOn 不同序：否则「sort 参数没接上」也会因为
 // 默认 completedOn 排序恰好同序而测不出来。
 func (e *archiveEnv) seedThree(t *testing.T) {
@@ -171,7 +171,7 @@ func TestArchiveSearch_QueryParams(t *testing.T) {
 		{"sort=size 升序", url.Values{"sort": {"size"}, "order": {"asc"}}, "h2,h3,h1"},
 		{"sort=size 降序", url.Values{"sort": {"size"}, "order": {"desc"}}, "h1,h3,h2"},
 		{"sort=addedOn 升序", url.Values{"sort": {"addedOn"}, "order": {"asc"}}, "h1,h2,h3"},
-		{"sort=retiredAt 升序", url.Values{"sort": {"retiredAt"}, "order": {"asc"}}, "h3,h1,h2"},
+		{"sort=removedAt 升序", url.Values{"sort": {"removedAt"}, "order": {"asc"}}, "h3,h1,h2"},
 		{"sort=completedOn 显式降序", url.Values{"sort": {"completedOn"}, "order": {"desc"}}, "h3,h2,h1"},
 		{"offset+limit 翻页", url.Values{"sort": {"name"}, "order": {"asc"}, "offset": {"1"}, "limit": {"1"}}, "h2"},
 		{"非法 limit/offset 走默认值", url.Values{"limit": {"abc"}, "offset": {"abc"}}, "h3,h2,h1"},
@@ -233,8 +233,8 @@ func TestArchiveSearch_RecordCarriesMagnetAndPaths(t *testing.T) {
 	if r.SavePath != "/media/alpha" || r.ContentPath != "/media/alpha/Alpha.mkv" {
 		t.Errorf("路径字段丢失：%+v", r)
 	}
-	if r.RetiredAt != 1100 || r.Reason != archive.ReasonLostFiles {
-		t.Errorf("退休时刻/理由丢失：%+v", r)
+	if r.RemovedAt != 1100 || r.Reason != archive.ReasonLostFiles {
+		t.Errorf("移除时刻/理由丢失：%+v", r)
 	}
 }
 
@@ -317,25 +317,25 @@ func TestArchiveDelete_ModuleNotLoaded(t *testing.T) {
 	}
 }
 
-// =============== POST /api/archive/retire：手动退休 ===============
+// =============== POST /api/archive/remove：手动移除 ===============
 
-func TestArchiveRetire_BypassesDryRunAndKeepsFiles(t *testing.T) {
+func TestArchiveRemove_BypassesDryRunAndKeepsFiles(t *testing.T) {
 	e := newArchiveEnv(t, "", twoTasksJSON)
 	cfg := e.srv.cfg.Get()
 	cfg.Archive.Enabled = true
-	cfg.Archive.DryRun = archBoolPtr(true) // 手动退休必须绕过它
+	cfg.Archive.DryRun = archBoolPtr(true) // 手动移除必须绕过它
 	e.srv.cfg.Set(cfg)
 
-	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/retire", `{"hashes":["aaa","bbb"]}`)
+	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/remove", `{"hashes":["aaa","bbb"]}`)
 	if w.Code != 200 {
-		t.Fatalf("手动退休应返回 200，got %d body=%s", w.Code, w.Body.String())
+		t.Fatalf("手动移除应返回 200，got %d body=%s", w.Code, w.Body.String())
 	}
 	var data struct {
-		Retired int `json:"retired"`
+		Removed int `json:"removed"`
 	}
 	decodeAPI(t, w).bindData(t, &data)
-	if data.Retired != 2 {
-		t.Errorf("应退休 2 条，got %d", data.Retired)
+	if data.Removed != 2 {
+		t.Errorf("应移除 2 条，got %d", data.Removed)
 	}
 
 	dels := mockDeletes(e.qb)
@@ -353,11 +353,11 @@ func TestArchiveRetire_BypassesDryRunAndKeepsFiles(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s 应已建档", h)
 		}
-		if rec.RetiredAt <= 0 {
-			t.Errorf("%s 删成功后应填退休时刻，got %d", h, rec.RetiredAt)
+		if rec.RemovedAt <= 0 {
+			t.Errorf("%s 删成功后应填移除时刻，got %d", h, rec.RemovedAt)
 		}
 		if rec.Reason != archive.ReasonManual {
-			t.Errorf("%s 退休理由应为 manual，got %q", h, rec.Reason)
+			t.Errorf("%s 移除理由应为 manual，got %q", h, rec.Reason)
 		}
 		if rec.Magnet == "" || rec.SavePath == "" {
 			t.Errorf("%s 记录缺磁链或路径：%+v", h, rec)
@@ -365,29 +365,29 @@ func TestArchiveRetire_BypassesDryRunAndKeepsFiles(t *testing.T) {
 	}
 }
 
-func TestArchiveRetire_SkipsHashNotInQB(t *testing.T) {
+func TestArchiveRemove_SkipsHashNotInQB(t *testing.T) {
 	e := newArchiveEnv(t, "", twoTasksJSON)
-	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/retire", `{"hashes":["aaa","ghost"]}`)
+	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/remove", `{"hashes":["aaa","ghost"]}`)
 	if w.Code != 200 {
 		t.Fatalf("应返回 200，got %d body=%s", w.Code, w.Body.String())
 	}
 	var data struct {
-		Retired int `json:"retired"`
+		Removed int `json:"removed"`
 	}
 	decodeAPI(t, w).bindData(t, &data)
-	if data.Retired != 1 {
-		t.Errorf("qB 里没有的 hash 不该计数，got %d", data.Retired)
+	if data.Removed != 1 {
+		t.Errorf("qB 里没有的 hash 不该计数，got %d", data.Removed)
 	}
 	if _, ok := e.store.Get("ghost"); ok {
 		t.Error("qB 里没有的任务不该建档")
 	}
 }
 
-func TestArchiveRetire_BlankAndEmptyHashes(t *testing.T) {
+func TestArchiveRemove_BlankAndEmptyHashes(t *testing.T) {
 	e := newArchiveEnv(t, "", twoTasksJSON)
 	r := archiveRouter(e.srv)
 	for _, body := range []string{`{"hashes":[]}`, `{"hashes":["  ",""]}`, `{}`} {
-		w := serveJSON(t, r, "POST", "/api/archive/retire", body)
+		w := serveJSON(t, r, "POST", "/api/archive/remove", body)
 		if w.Code != 400 {
 			t.Errorf("body=%s 应返回 400，got %d", body, w.Code)
 		}
@@ -403,11 +403,11 @@ func TestArchiveRetire_BlankAndEmptyHashes(t *testing.T) {
 // 非法 body 一律 400 且零副作用。绑定失败与「hash 列表为空」都会落到 400，
 // 但前者必须报「参数错误」而不是「缺少任务 hash」——前端要能区分
 // 「请求体坏了」和「你一条都没选」。
-func TestArchiveRetire_InvalidJSON(t *testing.T) {
+func TestArchiveRemove_InvalidJSON(t *testing.T) {
 	e := newArchiveEnv(t, "", twoTasksJSON)
 	r := archiveRouter(e.srv)
 	for _, body := range []string{`not-json`, `{"hashes":["aaa"`, `{"hashes":"aaa"}`} {
-		w := serveJSON(t, r, "POST", "/api/archive/retire", body)
+		w := serveJSON(t, r, "POST", "/api/archive/remove", body)
 		if w.Code != 400 {
 			t.Errorf("body=%s 应返回 400，got %d", body, w.Code)
 		}
@@ -424,10 +424,10 @@ func TestArchiveRetire_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestArchiveRetire_UpstreamFailureKeepsCandidate(t *testing.T) {
+func TestArchiveRemove_UpstreamFailureKeepsCandidate(t *testing.T) {
 	e := newArchiveEnv(t, "", twoTasksJSON)
 	e.qb.actionStatus = http.StatusInternalServerError
-	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/retire", `{"hashes":["aaa"]}`)
+	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/remove", `{"hashes":["aaa"]}`)
 	if w.Code != 500 {
 		t.Fatalf("qB 删除失败应返回 500，got %d body=%s", w.Code, w.Body.String())
 	}
@@ -438,28 +438,28 @@ func TestArchiveRetire_UpstreamFailureKeepsCandidate(t *testing.T) {
 	if !ok {
 		t.Fatal("删失败也要留档，下轮才能重试")
 	}
-	if rec.RetiredAt != 0 {
-		t.Errorf("删失败不该标记已退休，got %d", rec.RetiredAt)
+	if rec.RemovedAt != 0 {
+		t.Errorf("删失败不该标记已移除，got %d", rec.RemovedAt)
 	}
 }
 
-func TestArchiveRetire_ModuleNotLoaded(t *testing.T) {
+func TestArchiveRemove_ModuleNotLoaded(t *testing.T) {
 	s := setupTestServerFull(t, t.TempDir(), "", "")
-	w := serveJSON(t, archiveRouter(s), "POST", "/api/archive/retire", `{"hashes":["aaa"]}`)
+	w := serveJSON(t, archiveRouter(s), "POST", "/api/archive/remove", `{"hashes":["aaa"]}`)
 	if w.Code != 500 {
-		t.Fatalf("未注入退休器应返回 500，got %d", w.Code)
+		t.Fatalf("未注入移除扫描器应返回 500，got %d", w.Code)
 	}
 }
 
-// 退休会把任务从 qB 移除，直连列表缓存必须一起失效，
-// 否则快照未就绪的那条回退路径上，页面还会显示已退休的任务最长 5 秒。
-func TestArchiveRetire_InvalidatesTorrentListCache(t *testing.T) {
+// 移除会把任务从 qB 移除，直连列表缓存必须一起失效，
+// 否则快照未就绪的那条回退路径上，页面还会显示已移除的任务最长 5 秒。
+func TestArchiveRemove_InvalidatesTorrentListCache(t *testing.T) {
 	e := newArchiveEnv(t, "", twoTasksJSON)
 	e.srv.tcacheMu.Lock()
 	e.srv.tcache["all||"] = &cacheEntry{data: []models.QBTorrent{}, expiresAt: time.Now().Add(time.Minute)}
 	e.srv.tcacheMu.Unlock()
 
-	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/retire", `{"hashes":["aaa"]}`)
+	w := serveJSON(t, archiveRouter(e.srv), "POST", "/api/archive/remove", `{"hashes":["aaa"]}`)
 	if w.Code != 200 {
 		t.Fatalf("应返回 200，got %d body=%s", w.Code, w.Body.String())
 	}
@@ -467,7 +467,7 @@ func TestArchiveRetire_InvalidatesTorrentListCache(t *testing.T) {
 	n := len(e.srv.tcache)
 	e.srv.tcacheMu.Unlock()
 	if n != 0 {
-		t.Errorf("退休后直连列表缓存应被清空，还剩 %d 条", n)
+		t.Errorf("移除后直连列表缓存应被清空，还剩 %d 条", n)
 	}
 }
 
@@ -489,9 +489,9 @@ func TestArchiveAuth_WriteEndpointsRequireToken(t *testing.T) {
 	if _, ok := e.store.Get("h1"); !ok {
 		t.Error("401 之后记录必须还在")
 	}
-	w = serveJSON(t, r, "POST", "/api/archive/retire", `{"hashes":["aaa"]}`)
+	w = serveJSON(t, r, "POST", "/api/archive/remove", `{"hashes":["aaa"]}`)
 	if w.Code != 401 {
-		t.Errorf("未登录手动退休应 401，got %d", w.Code)
+		t.Errorf("未登录手动移除应 401，got %d", w.Code)
 	}
 	if len(mockDeletes(e.qb)) != 0 {
 		t.Error("401 之后不该向 qB 发删除请求")
@@ -548,7 +548,7 @@ func TestArchiveRoutesRegisteredInStart(t *testing.T) {
 	// 无令牌：三条路由都必须是 401 而不是 404（404 说明根本没注册）
 	for _, tc := range []struct{ method, path, body string }{
 		{"GET", "/api/archive", ""},
-		{"POST", "/api/archive/retire", `{"hashes":[]}`},
+		{"POST", "/api/archive/remove", `{"hashes":[]}`},
 		{"DELETE", "/api/archive/h1", ""},
 	} {
 		if code, _ := archiveHTTP(t, tc.method, base+tc.path, tc.body); code != 401 {
@@ -565,8 +565,8 @@ func TestArchiveRoutesRegisteredInStart(t *testing.T) {
 	if _, ok := e.store.Get("h1"); ok {
 		t.Error("h1 应已被移除")
 	}
-	if code, body := archiveHTTP(t, "POST", base+"/api/archive/retire?token=secret123", `{"hashes":["aaa"]}`); code != 200 || !strings.Contains(body, `"retired":1`) {
-		t.Errorf("带令牌手动退休应退休 1 条，got %d %s", code, body)
+	if code, body := archiveHTTP(t, "POST", base+"/api/archive/remove?token=secret123", `{"hashes":["aaa"]}`); code != 200 || !strings.Contains(body, `"removed":1`) {
+		t.Errorf("带令牌手动移除应移除 1 条，got %d %s", code, body)
 	}
 }
 
@@ -673,9 +673,9 @@ func TestArchiveConfig_Validation(t *testing.T) {
 		mutate func(*models.AppConfig)
 		want   string
 	}{
-		{"退休间隔 0", func(c *models.AppConfig) { c.Archive.Interval = 0 }, "归档退休扫描间隔"},
+		{"移除间隔 0", func(c *models.AppConfig) { c.Archive.Interval = 0 }, "移除扫描间隔"},
 		{"单轮批量 0", func(c *models.AppConfig) { c.Archive.BatchSize = 0 }, "归档单轮批量"},
-		{"静默期负数", func(c *models.AppConfig) { c.Archive.QuietMinutes = -1 }, "归档静默期"},
+		{"冷却时间负数", func(c *models.AppConfig) { c.Archive.QuietMinutes = -1 }, "归档冷却时间"},
 		{"守卫档位打错字", func(c *models.AppConfig) { c.Archive.Guard.Mode = "remove-file" }, "重复守卫档位"},
 		{"守卫间隔 0", func(c *models.AppConfig) { c.Archive.Guard.Interval = 0 }, "重复守卫扫描间隔"},
 		{"守卫单轮上限 0", func(c *models.AppConfig) { c.Archive.Guard.MaxPerRound = 0 }, "重复守卫单轮上限"},
@@ -704,7 +704,7 @@ func TestArchiveConfig_Validation(t *testing.T) {
 		mutate func(*models.AppConfig)
 	}{
 		{"合法基线", func(*models.AppConfig) {}},
-		{"退休停用时的零值", func(c *models.AppConfig) {
+		{"移除停用时的零值", func(c *models.AppConfig) {
 			c.Archive.Enabled = false
 			c.Archive.Interval = 0
 			c.Archive.BatchSize = 0

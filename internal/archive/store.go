@@ -1,8 +1,8 @@
-// Package archive 任务退休账本。
+// Package archive 任务移除与留存账本。
 //
-// 退休＝把完成并收敛的任务从 qB 移除（磁盘文件保留），元数据写进账本仍可检索。
+// 移除＝把已完成且文件处理完毕的任务从 qB 移除（磁盘文件保留），元数据写进账本仍可检索。
 // 账本同时是重复下载守卫的判据来源：qB 里出现的 infohash 若已在账本里且
-// 添加时刻晚于退休时刻，就是「退休后又重下」。
+// 添加时刻晚于移除时刻，就是「移除后又重下」。
 //
 // 存储沿用 filemgr 审计日志的 append-only JSONL + 同键修正行 + 原子重写，
 // 但有两处刻意不同：不设条目上限（历史库就是几千上万条），且追加必须 Sync——
@@ -25,16 +25,16 @@ import (
 const storeFile = "archive.jsonl"
 
 // storeCompactThreshold 原始行数超过此值触发压缩重写。
-// 每条退休记录会写两行（建档 + 填 RetiredAt 的修正行），阈值要留出这个倍数。
+// 每条移除记录会写两行（建档 + 填 RemovedAt 的修正行），阈值要留出这个倍数。
 const storeCompactThreshold = 20000
 
-// 退休原因
+// 移除原因
 const (
 	ReasonLostFiles = "lost-files" // 原片已被转码清理，任务只剩空壳
 	ReasonRatio     = "ratio"      // 分享比率达标
 	ReasonHours     = "hours"      // 做种时长达标
 	ReasonUploaded  = "uploaded"   // 上传量达标
-	ReasonManual    = "manual"     // 用户在历史页手动退休
+	ReasonManual    = "manual"     // 用户在历史页手动移除
 )
 
 // Record 一条归档记录。只存元数据与磁链，不存 .torrent 二进制、不解析转码产物路径。
@@ -52,9 +52,9 @@ type Record struct {
 	AddedOn     int64   `json:"addedOn"`
 	CompletedOn int64   `json:"completedOn"`
 	Ratio       float64 `json:"ratio"`
-	// RetiredAt 为 0 表示已建档但任务还没从 qB 移除（dryRun 候选）；
-	// 大于 0 表示已退休，守卫据此判定重复下载
-	RetiredAt int64  `json:"retiredAt,omitempty"`
+	// RemovedAt 为 0 表示已建档但任务还没从 qB 移除（dryRun 候选）；
+	// 大于 0 表示已移除，守卫据此判定重复下载
+	RemovedAt int64  `json:"removedAt,omitempty"`
 	Reason    string `json:"reason"`
 }
 
@@ -66,8 +66,8 @@ type Query struct {
 	Tag      string // 命中 Tags 里的任一标签
 	From     int64  // CompletedOn >= From，0 表示不限
 	To       int64  // CompletedOn <= To，0 表示不限
-	Pending  bool   // 只看已建档未退休的候选
-	Sort     string // name / size / addedOn / completedOn / retiredAt，默认 completedOn
+	Pending  bool   // 只看已建档未移除的候选
+	Sort     string // name / size / addedOn / completedOn / removedAt，默认 completedOn
 	Order    string // asc / desc，默认 desc
 	Offset   int
 	Limit    int
@@ -101,7 +101,7 @@ func (s *Store) load() {
 	f, err := os.Open(s.path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			logger.Warn.Printf("归档账本读取失败：%v", err)
+			logger.Warn.Printf("留存账本读取失败：%v", err)
 		}
 		return
 	}
@@ -116,7 +116,7 @@ func (s *Store) load() {
 		}
 		var r Record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			logger.Warn.Printf("归档账本存在无法解析的行已跳过：%v", err)
+			logger.Warn.Printf("留存账本存在无法解析的行已跳过：%v", err)
 			continue
 		}
 		if r.Hash == "" {
@@ -125,12 +125,12 @@ func (s *Store) load() {
 		s.records[r.Hash] = r // 修正行：同 hash 后者整条覆盖
 	}
 	if err := scanner.Err(); err != nil {
-		logger.Warn.Printf("归档账本扫描中断：%v", err)
+		logger.Warn.Printf("留存账本扫描中断：%v", err)
 	}
 	if s.rawLines > storeCompactThreshold {
 		s.rewrite()
 	}
-	logger.Info.Printf("归档账本已加载 %d 条记录（原始 %d 行）", len(s.records), s.rawLines)
+	logger.Info.Printf("留存账本已加载 %d 条记录（原始 %d 行）", len(s.records), s.rawLines)
 }
 
 // rewrite 把内存里的最新状态整体重写为紧凑文件（原子写）。
@@ -174,7 +174,7 @@ func (s *Store) rewrite() error {
 
 // Append 追加一条记录并落盘。
 //
-// 返回错误时内存状态不变：退休流程靠这个返回值决定「能不能删任务」，
+// 返回错误时内存状态不变：移除流程靠这个返回值决定「能不能删任务」，
 // 写失败却更新了内存，就会出现账本里没有、任务却已被删的不可逆丢失。
 func (s *Store) Append(r Record) error {
 	if r.Hash == "" {
@@ -197,7 +197,7 @@ func (s *Store) Append(r Record) error {
 		f.Close()
 		return err
 	}
-	// 必须 Sync：退休是「先建档后删任务」，只写进页缓存就删任务，
+	// 必须 Sync：移除是「先建档后删任务」，只写进页缓存就删任务，
 	// 掉电后账本里没有这条记录，任务却已经没了
 	if err := f.Sync(); err != nil {
 		f.Close()
@@ -210,21 +210,21 @@ func (s *Store) Append(r Record) error {
 	s.rawLines++
 	if s.rawLines > storeCompactThreshold {
 		if err := s.rewrite(); err != nil {
-			logger.Warn.Printf("归档账本压缩失败：%v", err)
+			logger.Warn.Printf("留存账本压缩失败：%v", err)
 		}
 	}
 	return nil
 }
 
-// MarkRetired 追加同 hash 的修正行，填上退休时刻
-func (s *Store) MarkRetired(hash string, ts int64) error {
+// MarkRemoved 追加同 hash 的修正行，填上移除时刻
+func (s *Store) MarkRemoved(hash string, ts int64) error {
 	s.mu.Lock()
 	r, ok := s.records[hash]
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("归档记录不存在：%s", hash)
 	}
-	r.RetiredAt = ts
+	r.RemovedAt = ts
 	return s.Append(r)
 }
 
@@ -290,7 +290,7 @@ func (s *Store) Search(q Query) ([]Record, int) {
 		if q.To > 0 && r.CompletedOn > q.To {
 			continue
 		}
-		if q.Pending && r.RetiredAt != 0 {
+		if q.Pending && r.RemovedAt != 0 {
 			continue
 		}
 		filtered = append(filtered, r)
@@ -339,8 +339,8 @@ func sortRecords(list []Record, field string, asc bool) {
 		less = func(a, b Record) bool { return a.Size < b.Size }
 	case "addedOn":
 		less = func(a, b Record) bool { return a.AddedOn < b.AddedOn }
-	case "retiredAt":
-		less = func(a, b Record) bool { return a.RetiredAt < b.RetiredAt }
+	case "removedAt":
+		less = func(a, b Record) bool { return a.RemovedAt < b.RemovedAt }
 	default:
 		less = func(a, b Record) bool { return a.CompletedOn < b.CompletedOn }
 	}

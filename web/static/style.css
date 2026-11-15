@@ -1930,7 +1930,7 @@ input::file-selector-button {
   margin: 0 3px;
 }
 
-/* 历史（退休账本）：名称与保存路径保留最小可读宽度，窄屏由外层横向滚动 */
+/* 历史（留存账本）：名称与保存路径保留最小可读宽度，窄屏由外层横向滚动 */
 .table--archive {
   min-width: 994px;
 }

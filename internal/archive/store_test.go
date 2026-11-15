@@ -28,7 +28,7 @@ func TestStore_AppendThenReload(t *testing.T) {
 	if err := s.Append(rec("a", "Alpha", 100)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	// 追加即落盘：退休流程「先建档后删任务」依赖这一点，
+	// 追加即落盘：移除流程「先建档后删任务」依赖这一点，
 	// 不能只在内存里可见
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -50,25 +50,25 @@ func TestStore_CorrectionLineOverrides(t *testing.T) {
 	if err := s.Append(rec("a", "Alpha", 100)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := s.MarkRetired("a", 500); err != nil {
-		t.Fatalf("MarkRetired: %v", err)
+	if err := s.MarkRemoved("a", 500); err != nil {
+		t.Fatalf("MarkRemoved: %v", err)
 	}
 	if s.Len() != 1 {
 		t.Fatalf("修正行不该新增记录，Len=%d", s.Len())
 	}
 	got, _ := s.Get("a")
-	if got.RetiredAt != 500 {
-		t.Errorf("RetiredAt=%d want 500", got.RetiredAt)
+	if got.RemovedAt != 500 {
+		t.Errorf("RemovedAt=%d want 500", got.RemovedAt)
 	}
 
 	reloaded := NewStore(path)
 	got, ok := reloaded.Get("a")
-	if !ok || got.RetiredAt != 500 || got.Name != "Alpha" {
+	if !ok || got.RemovedAt != 500 || got.Name != "Alpha" {
 		t.Fatalf("重启后修正行应整条覆盖，got %+v", got)
 	}
 }
 
-// 写失败必须返回错误且内存状态不变：退休流程靠这个返回值决定能不能删任务。
+// 写失败必须返回错误且内存状态不变：移除流程靠这个返回值决定能不能删任务。
 // 若失败还更新内存，就会出现「账本里没有、任务却已被删」的不可逆丢失。
 func TestStore_AppendFailureLeavesMemoryUntouched(t *testing.T) {
 	dir := t.TempDir()
@@ -129,14 +129,14 @@ func TestStore_SearchFilters(t *testing.T) {
 	b.Category, b.Tags = "剧集", "转码"
 	c := rec("c", "Movie.720p.mkv", 300)
 	c.Category, c.SavePath = "电影", "/data/电影/Movie.720p.mkv"
-	c.RetiredAt = 0
+	c.RemovedAt = 0
 	for _, r := range []Record{a, b, c} {
 		if err := s.Append(r); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
-	_ = s.MarkRetired("a", 900)
-	_ = s.MarkRetired("b", 900)
+	_ = s.MarkRemoved("a", 900)
+	_ = s.MarkRemoved("b", 900)
 
 	cases := []struct {
 		name string

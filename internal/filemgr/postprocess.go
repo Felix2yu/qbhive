@@ -85,7 +85,7 @@ func postTaskFiltered(t models.QBTorrent, pc models.PostProcessConfig) (bool, st
 
 // MatchLists 分类/标签名单判定，返回 (是否跳过, 原因)。
 // 四个名单全留空即不过滤；排除优先于包含；包含名单非空时未分类/无标签不命中。
-// 转码过滤与任务退休共用这一套语义，不各写一份。
+// 转码过滤与任务移除共用这一套语义，不各写一份。
 func MatchLists(category, tags, catInclude, catExclude, tagInclude, tagExclude string) (bool, string) {
 	// 名单一律先拆项：只写了逗号空格的「空名单」等价于没配，不能当成白名单把所有任务挡掉
 	catInc := splitNameList(catInclude)
@@ -514,8 +514,8 @@ func (m *Manager) runPostProcess(t models.QBTorrent, file string, pc models.Post
 	runPostCommandWithRetry(t, file, pc, func(tt models.QBTorrent, src string, started time.Time) {
 		m.postPrune(tt, src, started, pc)
 	})
-	// 成功与重试耗尽都算收尾：退休判定等的是「没有在跑的命令」，
-	// 不是「命令成功」，失败放弃的任务同样该能退休
+	// 成功与重试耗尽都算收尾：移除判定等的是「没有在跑的命令」，
+	// 不是「命令成功」，失败放弃的任务同样该能移除
 	m.markPostFinished(t.Hash)
 }
 
@@ -976,7 +976,7 @@ func (m *Manager) AuditGuardDelete(t models.QBTorrent, path string) bool {
 		Hash:    t.Hash,
 		Torrent: t.Name,
 		Old:     path,
-		New:     "（已删除，退休后重复下载）",
+		New:     "（已删除，移除后重复下载）",
 		Via:     auditViaGuard,
 		Status:  AuditPruned,
 	})

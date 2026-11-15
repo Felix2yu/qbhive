@@ -27,8 +27,8 @@ type FileDeleter interface {
 	AuditGuardDelete(t models.QBTorrent, path string) bool
 }
 
-// Guard 重复下载守卫：定期比对 qB 现有任务与归档账本，发现「退休后又被重新添加」
-// 的同一 infohash 就按档位处置。
+// Guard 重复下载守卫：定期比对 qB 现有任务与留存账本，发现「移除后又被重新添加」
+// 的同一 信息哈希 就按档位处置。
 //
 // 走事后检测而不是添加时拦截：qB WebUI、原生客户端、RSS 三条添加路径都被覆盖，
 // 用户不需要改在 qB 里加磁链的习惯。代价是检测窗口内会真的下几秒（见 README 已知限制）。
@@ -179,15 +179,15 @@ func (g *Guard) scan() {
 			continue
 		}
 		rec, ok := g.store.Get(t.Hash)
-		// RetiredAt==0 是干跑候选或正在退休：任务本来就该在 qB 里，不是重复下载。
-		// 这一条同时也挡住了「退休批次进行中」的窗口，不需要另维护在途集合。
-		if !ok || rec.RetiredAt <= 0 {
+		// RemovedAt==0 是试运行候选或正在移除：任务本来就该在 qB 里，不是重复下载。
+		// 这一条同时也挡住了「移除批次进行中」的窗口，不需要另维护在途集合。
+		if !ok || rec.RemovedAt <= 0 {
 			continue
 		}
-		// 严格大于：qB 的 added_on 与 RetiredAt 都是秒刻度，用 >= 会让
-		// 「添加与退休落在同一秒」的任务在快照残留窗口里被当成重复下载，
+		// 严格大于：qB 的 added_on 与 RemovedAt 都是秒刻度，用 >= 会让
+		// 「添加与移除落在同一秒」的任务在快照残留窗口里被当成重复下载，
 		// 进而删掉它刚下完的文件。宁可漏检一次重下，也不能误删。
-		if t.AddedOn <= rec.RetiredAt {
+		if t.AddedOn <= rec.RemovedAt {
 			continue
 		}
 		// 校验中/移动中：progress 与磁盘状态都不可信，等下一轮
@@ -215,7 +215,7 @@ func (g *Guard) scan() {
 	}
 }
 
-// act 按档位处置一条命中。notify 档什么都不动，就是干跑，用它核对判定准不准。
+// act 按档位处置一条命中。notify 档什么都不动，就是试运行，用它核对判定准不准。
 func (g *Guard) act(h dupHit, gc models.GuardConfig, now int64) {
 	t := h.t
 	body := dupBody(t, h.rec)
@@ -315,11 +315,11 @@ func isVolatileState(state string) bool {
 
 func dupBody(t models.QBTorrent, rec Record) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "任务「%s」的 infohash 已在归档里。", t.Name)
+	fmt.Fprintf(&b, "任务「%s」的 信息哈希 已在归档里。", t.Name)
 	appendLine(&b, "归档完成时间", fmtTS(rec.CompletedOn))
-	appendLine(&b, "归档退休时间", fmtTS(rec.RetiredAt))
+	appendLine(&b, "移除时间", fmtTS(rec.RemovedAt))
 	appendLine(&b, "本次添加时间", fmtTS(t.AddedOn))
-	appendLine(&b, "退休理由", rec.Reason)
+	appendLine(&b, "移除理由", rec.Reason)
 	appendLine(&b, "保存路径", t.SavePath)
 	return b.String()
 }

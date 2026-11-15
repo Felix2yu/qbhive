@@ -17,27 +17,27 @@ type AppConfig struct {
 // 缺省必须是 off：老 config.json 没有这个键，升级后不能凭空开始删文件。
 const (
 	GuardModeOff         = "off"          // 不扫描
-	GuardModeNotify      = "notify"       // 只告警，任务与文件都不动（干跑）
+	GuardModeNotify      = "notify"       // 只告警，任务与文件都不动（试运行）
 	GuardModeRemove      = "remove"       // 移除任务，文件留在磁盘
 	GuardModeRemoveFiles = "remove-files" // 先清掉本次重下写出的文件，再移除任务
 )
 
-// ArchiveConfig 任务退休与归档账本。
-// 退休＝把完成并收敛的任务从 qB 移除（磁盘文件保留），元数据写进账本仍可检索。
+// ArchiveConfig 任务移除与留存账本。
+// 移除＝把已完成且文件处理完毕的任务从 qB 移除（磁盘文件保留），元数据写进账本仍可检索。
 type ArchiveConfig struct {
 	Enabled  bool `json:"enabled"`
-	Interval int  `json:"interval"` // 退休扫描间隔，秒
+	Interval int  `json:"interval"` // 移除扫描间隔，秒
 	// DryRun 只建档不删任务。安全闸门，缺省视为 true（见 config.applyConfigDefaults）
 	DryRun    *bool `json:"dryRun"`
 	BatchSize int   `json:"batchSize"` // 单轮最多提交多少条删除，一次请求一批
-	// QuietMinutes 最后一条后处理命令结束后再静默多久才允许退休，
+	// QuietMinutes 最后一条后处理命令结束后再冷却多久才允许移除，
 	// 避免转码刚收尾就动任务
 	QuietMinutes int `json:"quietMinutes"`
-	// 做种门槛：三者任一满足即可退休（只对健康完成的任务生效）
+	// 做种门槛：三者任一满足即可移除（只对文件完好已完成的任务生效）
 	MinRatio      float64 `json:"minRatio"`
 	MinHours      int     `json:"minHours"`
 	MinUploadedMB int64   `json:"minUploadedMB"`
-	// ExemptLostFiles 失去实体（原片已被转码清理）的任务免做种门槛。
+	// ExemptLostFiles 实体缺失（原片已被转码清理）的任务免做种门槛。
 	// 安全闸门，缺省视为 true
 	ExemptLostFiles *bool       `json:"exemptLostFiles"`
 	CategoryInclude string      `json:"categoryInclude"`
@@ -48,7 +48,7 @@ type ArchiveConfig struct {
 }
 
 // GuardConfig 重复下载守卫：定期比对 qB 现有任务与账本，
-// 发现「退休后又被重新添加」的同一 infohash 就按档位处置。
+// 发现「移除后又被重新添加」的同一 信息哈希 就按档位处置。
 type GuardConfig struct {
 	Mode     string `json:"mode"`     // 见 GuardMode* 常量，缺省 off
 	Interval int    `json:"interval"` // 扫描间隔，秒
