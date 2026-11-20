@@ -205,6 +205,11 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 
 func (s *Server) Start(webRoot string) error {
 	r := gin.Default()
+	// 缺 Cache-Control 时浏览器按 Last-Modified 启发式缓存，部署后普通刷新仍复用旧前端文件；no-cache 强制每次回源校验，未变更走 304
+	r.Use(func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache")
+		c.Next()
+	})
 	r.Use(s.authMiddleware())
 
 	api := r.Group("/api")

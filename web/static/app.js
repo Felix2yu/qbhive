@@ -2311,7 +2311,7 @@ async function renderSettings(root) {
       return;
     }
     out.innerHTML = UI.table({
-      className: "cat-preview",
+      className: "stalled-audit",
       head: ["时间", "任务", "判定状态", "零速", "处置", "结果"],
       rows: r.data.map(e => `<div class="data-row">
         <span class="data-cell text-dim">${new Date(e.ts * 1000).toLocaleString("zh-CN")}</span>
@@ -2319,7 +2319,7 @@ async function renderSettings(root) {
         <span class="data-cell">${escapeHTML(e.state)}</span>
         <span class="data-cell">${e.idleMin} 分钟</span>
         <span class="data-cell">${stalledActionLabel(e.action)}</span>
-        <span class="data-cell ${e.ok ? "" : "text-dim"}">${e.ok ? "成功" : escapeHTML(e.detail || "失败")}</span>
+        <span class="data-cell ${e.ok ? "" : "text-dim"}" title="${e.ok ? "成功" : escapeHTML(e.detail || "失败")}">${e.ok ? "成功" : escapeHTML(e.detail || "失败")}</span>
       </div>`),
     });
   })();
@@ -2374,7 +2374,7 @@ async function renderSettings(root) {
       const out = $("#st-audit-out");
       if (out && ar.success && (ar.data || []).length) {
         out.innerHTML = UI.table({
-          className: "cat-preview",
+          className: "stalled-audit",
           head: ["时间", "任务", "判定状态", "零速", "处置", "结果"],
           rows: ar.data.map(e => `<div class="data-row">
             <span class="data-cell text-dim">${new Date(e.ts * 1000).toLocaleString("zh-CN")}</span>
@@ -2382,7 +2382,7 @@ async function renderSettings(root) {
             <span class="data-cell">${escapeHTML(e.state)}</span>
             <span class="data-cell">${e.idleMin} 分钟</span>
             <span class="data-cell">${stalledActionLabel(e.action)}</span>
-            <span class="data-cell ${e.ok ? "" : "text-dim"}">${e.ok ? "成功" : escapeHTML(e.detail || "失败")}</span>
+            <span class="data-cell ${e.ok ? "" : "text-dim"}" title="${e.ok ? "成功" : escapeHTML(e.detail || "失败")}">${e.ok ? "成功" : escapeHTML(e.detail || "失败")}</span>
           </div>`),
         });
       }

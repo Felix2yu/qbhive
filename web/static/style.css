@@ -1898,9 +1898,13 @@ input::file-selector-button {
   font-size: 11px;
 }
 
-/* 审计表 */
+/* 文件名审计表：六列，任务名与文件名变更都保留可读宽度 */
+.table--audit {
+  min-width: 900px;
+}
+
 .table--audit .data-row {
-  grid-template-columns: 152px minmax(0, 1fr) minmax(0, 2.1fr) 96px 86px 68px;
+  grid-template-columns: 152px minmax(180px, 1.2fr) minmax(220px, 1.8fr) 96px 86px 68px;
 }
 
 .table--audit .data-cell--time {
@@ -2144,6 +2148,15 @@ input::file-selector-button {
 /* 自动分类试算结果：五列，任务名占大头 */
 .data-table.cat-preview .data-row {
   grid-template-columns: minmax(0, 2.2fr) 96px 110px 88px minmax(0, 1.6fr);
+}
+
+/* 停滞回收处置审计：六列，任务名吃掉全部剩余宽度，结果列按内容收宽 */
+.data-table.stalled-audit {
+  min-width: 860px;
+}
+
+.data-table.stalled-audit .data-row {
+  grid-template-columns: 140px minmax(220px, 1fr) 104px 72px 92px auto;
 }
 
 .status-list {
