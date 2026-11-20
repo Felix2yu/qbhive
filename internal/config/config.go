@@ -33,6 +33,16 @@ var (
 			ScanInterval: 15,
 			CleanEnabled: false,
 		},
+		Stalled: models.StalledConfig{
+			Enabled:               false,
+			Interval:              60,
+			IdleMinutes:           30,
+			SpeedKiB:              5,
+			Mode:                  models.StalledModeNotify,
+			Tag:                   "零速回收",
+			MaxPerRound:           20,
+			NotifyCooldownMinutes: 60,
+		},
 		Archive: models.ArchiveConfig{
 			Enabled:      false,
 			Interval:     60,
@@ -107,7 +117,38 @@ func applyConfigDefaults(cfg *models.AppConfig) {
 	if ac.Interval <= 0 {
 		ac.Interval = 60
 	}
+	applyStalledDefaults(&cfg.Stalled)
 	applyArchiveDefaults(&cfg.Archive)
+}
+
+// applyStalledDefaults 补齐停滞回收的缺省值。
+// Mode 是安全闸门：未知档位一律降为 off，配错一个字绝不能变成「开始暂停任务」；
+// 缺省（空字符串，老配置没有这个键）落到 notify —— 只告警不动手，升级后最安全。
+func applyStalledDefaults(s *models.StalledConfig) {
+	switch s.Mode {
+	case models.StalledModeOff, models.StalledModeNotify, models.StalledModePause, models.StalledModeDemote:
+	default:
+		s.Mode = models.StalledModeNotify
+	}
+	if s.Interval <= 0 {
+		s.Interval = 60
+	}
+	if s.IdleMinutes <= 0 {
+		s.IdleMinutes = 30
+	}
+	// SpeedKiB 允许 0（严格零速），负数才回落默认值
+	if s.SpeedKiB < 0 {
+		s.SpeedKiB = 5
+	}
+	if s.Tag == "" {
+		s.Tag = "零速回收"
+	}
+	if s.MaxPerRound <= 0 {
+		s.MaxPerRound = 20
+	}
+	if s.NotifyCooldownMinutes <= 0 {
+		s.NotifyCooldownMinutes = 60
+	}
 }
 
 // applyArchiveDefaults 补齐归档/守卫的缺省值。

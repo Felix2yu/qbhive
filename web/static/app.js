@@ -388,7 +388,27 @@ function validateConfigJS(cfg) {
     }
     if ((g.notifyCooldownMinutes || 0) < 0) return "重复守卫通知冷却不能为负数";
   }
+  // 停滞回收：与后端 validateConfig 同一套下限
+  if (c.stalled) {
+    const st = c.stalled;
+    if (!["", "off", "notify", "pause", "demote"].includes(st.mode)) return "停滞回收档位非法";
+    if (st.enabled && st.mode && st.mode !== "off") {
+      if ((st.interval || 0) < 1) return "停滞回收扫描间隔必须 ≥ 1 秒";
+      if ((st.idleMinutes || 0) < 1) return "停滞回收零速时长门槛必须 ≥ 1 分钟";
+      if ((st.speedKiB || 0) < 0) return "停滞回收速度阈值不能为负数";
+      if ((st.maxPerRound || 0) < 1) return "停滞回收单轮上限必须 ≥ 1";
+    }
+    if ((st.notifyCooldownMinutes || 0) < 0) return "停滞回收告警冷却不能为负数";
+  }
   return "";
+}
+
+// 停滞回收审计的处置列文案：notify/paused/demoted 三种，未知值原样显示
+function stalledActionLabel(action) {
+  if (action === "paused") return "暂停";
+  if (action === "demoted") return "下沉队尾";
+  if (action === "notify") return "告警";
+  return escapeHTML(action || "");
 }
 
 // ---------- 路由 ----------
@@ -1481,6 +1501,20 @@ function syncFormToCfg() {
     ag.maxPerRound = parseInt($("#ar-guard-max").value, 10) || 0;
     ag.notifyCooldownMinutes = parseInt($("#ar-guard-cool").value, 10) || 0;
   }
+  if ($("#st-enabled")) {
+    const st = c.stalled || (c.stalled = {});
+    st.enabled = $("#st-enabled").checked;
+    st.mode = $("#st-mode").value;
+    // 数值留空落成 0 交给校验报错，静默兜底会让人以为关掉了实际按默认值在跑
+    st.interval = parseInt($("#st-interval").value, 10) || 0;
+    st.idleMinutes = parseInt($("#st-idle").value, 10) || 0;
+    st.speedKiB = parseInt($("#st-speed").value, 10);
+    if (isNaN(st.speedKiB)) st.speedKiB = 0;
+    st.maxPerRound = parseInt($("#st-max").value, 10) || 0;
+    st.notifyCooldownMinutes = parseInt($("#st-cool").value, 10) || 0;
+    st.tag = ($("#st-tag").value || "").trim();
+    st.excludeTag = ($("#st-exclude").value || "").trim();
+  }
 }
 
 // ---------- 自动分类 ----------
@@ -1772,6 +1806,8 @@ async function renderSettings(root) {
   // 归档：同上。两个安全闸门（dryRun / exemptLostFiles）缺键视为开启，与后端一致
   const ar = cfg.archive || { enabled: false, interval: 60, batchSize: 100, quietMinutes: 5, minRatio: 0, minHours: 0, minUploadedMB: 0 };
   const ag = ar.guard || { mode: "off", interval: 5, maxPerRound: 20, notifyCooldownMinutes: 10 };
+  // 停滞回收：老配置文件可能还没有这一段，兜底成默认结构
+  const st = cfg.stalled || { enabled: false, mode: "notify", interval: 60, idleMinutes: 30, speedKiB: 5, maxPerRound: 20, notifyCooldownMinutes: 60, tag: "零速回收", excludeTag: "" };
 
   root.innerHTML = `
     ${UI.page({
@@ -2067,6 +2103,62 @@ async function renderSettings(root) {
       `,
     })}
 
+    <!-- 停滞回收 -->
+    ${UI.panel({
+      title: "停滞任务回收",
+      desc: "定期找出长期零速、却仍占着活动下载名额的任务（死种子、卡元数据的磁链），告警或暂停，让排队的任务能启动",
+      iconName: "zap",
+      actions: UI.btn("立即扫描", { size: "sm", iconName: "refresh", id: "st-scan" }),
+      body: `
+        ${field("启用", toggle(st.enabled, { id: "st-enabled" }),
+          "开启后按下面的档位与间隔定期扫描。<b>默认只告警，不会暂停任何任务</b>。")}
+        ${field("处置档位", `<select id="st-mode" class="ctrl">
+          <option value="notify"${st.mode === "notify" || !st.mode ? " selected" : ""}>只告警（试运行，任务不动）</option>
+          <option value="pause"${st.mode === "pause" ? " selected" : ""}>告警并暂停（打标签 + 暂停，释放名额）</option>
+          <option value="demote"${st.mode === "demote" ? " selected" : ""}>告警并下沉队尾（打标签 + 移到底部，释放名额）</option>
+          <option value="off"${st.mode === "off" ? " selected" : ""}>关闭（不扫描）</option>
+        </select>`,
+          "先开着「只告警」跑几天，用试算核对判定后再动手。<b>下沉队尾</b>：把死种子移到队列底部，qB 会自动放行前面的排队任务；任务不暂停、源恢复后轮到它会自行重试，比暂停更省心。<b>暂停</b>：任务停在 qB 里，需手动恢复。两者都不删文件。")}
+        ${field("扫描间隔",
+          `<div class="controls"><input type="number" id="st-interval" class="w-xs" value="${st.interval ?? 60}" min="1"><span class="unit">秒</span></div>`,
+          "读的是共享任务快照，一轮扫描不产生额外 qB 请求；只在告警/暂停时才写。")}
+        ${field("零速时长门槛",
+          `<div class="controls"><input type="number" id="st-idle" class="w-xs" value="${st.idleMinutes ?? 30}" min="1"><span class="unit">分钟</span></div>`,
+          "速度持续为 0 <b>且最后活动超过这么久</b>才算长期零速。qB 自带的「慢速种子」计时器默认才 60 秒，远不够过滤死种子，所以这里独立判定。")}
+        ${field("速度阈值",
+          `<div class="controls"><input type="number" id="st-speed" class="w-xs" value="${st.speedKiB ?? 5}" min="0"><span class="unit">KiB/s</span></div>`,
+          "上下行速度都 ≤ 这个值才算零速。填 0 表示严格为 0；默认 5 KiB/s 可容忍零星的心跳流量。")}
+        ${UI.section({
+          title: "安全护栏",
+          desc: "防止阈值配错时一次性停掉大量任务",
+          body: `
+            ${field("单轮上限",
+              `<div class="controls"><input type="number" id="st-max" class="w-xs" value="${st.maxPerRound ?? 20}" min="1"><span class="unit">条/轮</span></div>`,
+              "一轮最多处置多少条，超过的本轮不动手。首次切到暂停建议先填 5 观察一轮。")}
+            ${field("告警冷却",
+              `<div class="controls"><input type="number" id="st-cool" class="w-xs" value="${st.notifyCooldownMinutes ?? 60}" min="0"><span class="unit">分钟</span></div>`,
+              "同一任务的告警冷却，避免只告警模式下每轮刷屏。只影响通知，不影响暂停档位。")}
+            ${field("回收标签",
+              `<input type="text" id="st-tag" class="ctrl w-sm" value="${escapeHTML(st.tag || "")}" placeholder="零速回收" />`,
+              "暂停档位下给任务追加这个标签（保留原有标签），方便事后在 qB 里筛选恢复。留空则不打标。")}
+            ${field("保护标签",
+              `<input type="text" id="st-exclude" class="ctrl w-sm" value="${escapeHTML(st.excludeTag || "")}" placeholder="留空表示不设" />`,
+              "带这个标签的任务一律不回收，用于手动保活个别任务。强制启动的任务无论如何都不会被回收。")}
+          `,
+        })}
+        ${UI.notice("只处理下载侧的活动任务；做种、校验中、已排队、强制启动的任务都不碰。暂停只是停止任务，不删除任何文件。", "warn")}
+        ${UI.section({
+          title: "试算与处置审计",
+          desc: "按上面<b>当前填写</b>的阈值列出会被判定的任务，不用先保存；审计记录显示实际告警/暂停过的任务",
+          body: `
+            <div class="controls">${UI.btn("试算", { size: "sm", id: "st-preview" })}</div>
+            <div id="st-preview-out"></div>
+            <div id="st-audit-out" style="margin-top:12px"></div>
+          `,
+        })}
+      `,
+    })}
+
     <!-- 保存 -->
     ${UI.saveBar(
       "保存前会先做一次本地校验（URL 协议、正则、间隔下限等）。",
@@ -2209,12 +2301,102 @@ async function renderSettings(root) {
     toast(r.message || (r.success ? "测试通知已发送 ✓" : "失败"), r.success ? "ok" : "err");
   };
 
+  // 停滞回收：页面加载时拉取审计记录
+  (async () => {
+    const out = $("#st-audit-out");
+    if (!out) return;
+    const r = await api("GET", "/stalled/audit?limit=30");
+    if (!r.success || !(r.data || []).length) {
+      out.innerHTML = UI.notice("暂无处置记录", "");
+      return;
+    }
+    out.innerHTML = UI.table({
+      className: "cat-preview",
+      head: ["时间", "任务", "判定状态", "零速", "处置", "结果"],
+      rows: r.data.map(e => `<div class="data-row">
+        <span class="data-cell text-dim">${new Date(e.ts * 1000).toLocaleString("zh-CN")}</span>
+        <span class="data-cell" title="${escapeHTML(e.name)}">${escapeHTML(e.name)}</span>
+        <span class="data-cell">${escapeHTML(e.state)}</span>
+        <span class="data-cell">${e.idleMin} 分钟</span>
+        <span class="data-cell">${stalledActionLabel(e.action)}</span>
+        <span class="data-cell ${e.ok ? "" : "text-dim"}">${e.ok ? "成功" : escapeHTML(e.detail || "失败")}</span>
+      </div>`),
+    });
+  })();
+
+  $("#st-preview").onclick = async () => {
+    syncFormToCfg();
+    const out = $("#st-preview-out");
+    out.innerHTML = UI.loading("试算中…");
+    const r = await api("POST", "/stalled/preview", { config: _settingsCfg.stalled });
+    if (!r.success) {
+      out.innerHTML = UI.notice(escapeHTML(r.message || "试算失败"), "warn");
+      return;
+    }
+    const items = r.data || [];
+    if (items.length === 0) {
+      out.innerHTML = UI.notice("没有处于活动下载态的任务", "");
+      return;
+    }
+    const hit = items.filter(it => it.wouldAct).length;
+    out.innerHTML = UI.notice(`命中 ${hit} 个（零速已达门槛），其余 ${items.length - hit} 个在观察中或未达标`, "") +
+      UI.table({
+        className: "cat-preview",
+        head: ["任务名", "状态", "零速时长", "速度↓/↑", "判定"],
+        rows: items.map(it => `<div class="data-row">
+          <span class="data-cell" title="${escapeHTML(it.name)}">${escapeHTML(it.name)}</span>
+          <span class="data-cell">${escapeHTML(it.state)}</span>
+          <span class="data-cell">${it.idleMin} 分</span>
+          <span class="data-cell">${it.dl}/${it.ul}</span>
+          <span class="data-cell ${it.wouldAct ? "" : "text-dim"}">${escapeHTML(it.reason)}</span>
+        </div>`),
+      });
+  };
+
+  $("#st-scan").onclick = async () => {
+    syncFormToCfg();
+    const st = _settingsCfg.stalled || {};
+    if (!st.enabled || !st.mode || st.mode === "off") {
+      toast("请先启用停滞回收并选好档位，再保存设置", "err");
+      return;
+    }
+    // 暂停/下沉都会改变 qB 队列状态（虽可恢复），执行前必须二次确认
+    if (st.mode === "pause" && !confirm("当前档位为「告警并暂停」，本轮将暂停命中的长期零速任务（不删文件）。确认执行？")) {
+      return;
+    }
+    if (st.mode === "demote" && !confirm("当前档位为「告警并下沉队尾」，本轮将把命中的长期零速任务移到队列底部，让排队任务上位（任务不暂停、不删文件）。确认执行？")) {
+      return;
+    }
+    const r = await api("POST", "/stalled/scan", {});
+    if (r.success) {
+      toast("扫描已执行，请查看运行日志与处置审计", "ok");
+      const ar = await api("GET", "/stalled/audit?limit=30");
+      const out = $("#st-audit-out");
+      if (out && ar.success && (ar.data || []).length) {
+        out.innerHTML = UI.table({
+          className: "cat-preview",
+          head: ["时间", "任务", "判定状态", "零速", "处置", "结果"],
+          rows: ar.data.map(e => `<div class="data-row">
+            <span class="data-cell text-dim">${new Date(e.ts * 1000).toLocaleString("zh-CN")}</span>
+            <span class="data-cell" title="${escapeHTML(e.name)}">${escapeHTML(e.name)}</span>
+            <span class="data-cell">${escapeHTML(e.state)}</span>
+            <span class="data-cell">${e.idleMin} 分钟</span>
+            <span class="data-cell">${stalledActionLabel(e.action)}</span>
+            <span class="data-cell ${e.ok ? "" : "text-dim"}">${e.ok ? "成功" : escapeHTML(e.detail || "失败")}</span>
+          </div>`),
+        });
+      }
+    } else {
+      toast(r.message || "扫描失败", "err");
+    }
+  };
+
   $("#save-all").onclick = async () => {
     syncFormToCfg();
     const out = _settingsCfg; // 掩码值已在 syncFormToCfg 里被忽略，后端会保留原密码/apiKey
     const vmsg = validateConfigJS(out);
     if (vmsg) { toast("❌ " + vmsg, "err"); return; }
-    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy,autoCategory,archive", out);
+    const res = await api("POST", "/config?only=qbittorrent,server,notifier,limiter,fileManager,proxy,autoCategory,archive,stalled", out);
     if (res.success) clearDirty("settings");
     toast(res.success ? "设置已保存" : (res.message || "保存失败"), res.success ? "ok" : "err");
     // 保存成功后重新 GET 一次，让密码/API key 回到掩码状态

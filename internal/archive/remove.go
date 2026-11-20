@@ -46,6 +46,10 @@ type Remover struct {
 	stop       chan struct{}
 	tickerStop chan struct{}
 
+	// lifeMu 串行化 Start/Reload/Stop 对 tickerStop 的读-close-重建。
+	// 两次并发的配置保存会同时走到 Reload，不加锁就是 close of closed channel。
+	lifeMu sync.Mutex
+
 	mu     sync.Mutex
 	notify func(title, body string)
 }
@@ -81,6 +85,8 @@ func (r *Remover) interval() time.Duration {
 }
 
 func (r *Remover) Start() {
+	r.lifeMu.Lock()
+	defer r.lifeMu.Unlock()
 	if !r.cfg.Get().Archive.Enabled {
 		logger.Info.Println("归档移除已停用")
 		return
@@ -90,6 +96,8 @@ func (r *Remover) Start() {
 }
 
 func (r *Remover) Reload(c *qb.Client) {
+	r.lifeMu.Lock()
+	defer r.lifeMu.Unlock()
 	if c != nil {
 		r.client = c
 	}
@@ -105,6 +113,7 @@ func (r *Remover) Reload(c *qb.Client) {
 	r.runTicker(r.interval())
 }
 
+// runTicker 调用方必须持有 lifeMu
 func (r *Remover) runTicker(interval time.Duration) {
 	r.tickerStop = make(chan struct{})
 	stop := r.tickerStop
@@ -124,7 +133,15 @@ func (r *Remover) runTicker(interval time.Duration) {
 	}()
 }
 
-func (r *Remover) Stop() { close(r.stop) }
+func (r *Remover) Stop() {
+	r.lifeMu.Lock()
+	defer r.lifeMu.Unlock()
+	close(r.stop)
+	if r.tickerStop != nil {
+		close(r.tickerStop)
+		r.tickerStop = nil
+	}
+}
 
 // allTorrents 优先读共享快照，未就绪时回退直连
 func (r *Remover) allTorrents() ([]models.QBTorrent, error) {

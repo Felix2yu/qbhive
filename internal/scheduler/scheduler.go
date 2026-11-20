@@ -19,6 +19,7 @@ import (
 	"github.com/Felix2yu/qbhive/internal/notifier"
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
 	"github.com/Felix2yu/qbhive/internal/rss"
+	"github.com/Felix2yu/qbhive/internal/stalled"
 )
 
 // Scheduler 是所有后台模块的统一调度入口，同时负责完成通知事件
@@ -34,6 +35,14 @@ type Scheduler struct {
 	finished  map[string]bool // 已经发过完成通知的 hash；持久化到文件
 	stateFile string
 
+	// saveMu 串行化落盘：60s ticker、scanCompleted、prefillFinished、Stop 都会调
+	// saveFinished，而它们共用同一个 .tmp 路径。mu 只护内存快照，放开后两个写者
+	// 会互相截断临时文件，rename 出去的就是半截 JSON，重启时已完成集合整份丢失
+	// → 老任务被当成新完成，重发一遍通知。
+	saveMu sync.Mutex
+	// saveDone 关闭即表示持久化协程已退出，Stop 据此确保关停后不再有人写文件。
+	saveDone chan struct{}
+
 	// 共享任务快照：就绪后扫描不再拉 qB 全表（7158 条约 20MB / 每 10s）
 	torrentCache *qb.TorrentCache
 
@@ -45,6 +54,17 @@ type Scheduler struct {
 
 	// 重复下载守卫：5s 一轮只读快照，与移除扫描互不依赖
 	guard *archive.Guard
+
+	// 停滞回收：自带 ticker，长期零速任务告警或暂停，释放活动下载名额
+	stalled *stalled.Manager
+}
+
+// SetStalled 注入停滞回收引擎（可选；nil 时跳过启停与重载）
+func (s *Scheduler) SetStalled(m *stalled.Manager) {
+	s.stalled = m
+	if m != nil && s.torrentCache != nil {
+		m.SetTorrentCache(s.torrentCache)
+	}
 }
 
 // SetGuard 注入重复下载守卫（可选；nil 时跳过启停与重载）
@@ -134,6 +154,9 @@ func (s *Scheduler) ReloadAll(qbCfg models.QBConfig) {
 	if s.guard != nil {
 		s.guard.Reload(nil)
 	}
+	if s.stalled != nil {
+		s.stalled.Reload(nil)
+	}
 
 	// 3) notifier 内部已经 Reload，在 web.server.saveConfig 里单独调
 	logger.Info.Println("调度器：ReloadAll 完成（qB 凭据 + 所有子系统）")
@@ -169,6 +192,8 @@ func (s *Scheduler) loadFinished() {
 }
 
 func (s *Scheduler) saveFinished() {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.Lock()
 	list := make([]string, 0, len(s.finished))
 	for h := range s.finished {
@@ -199,6 +224,9 @@ func (s *Scheduler) Start() {
 	if s.guard != nil {
 		s.guard.Start()
 	}
+	if s.stalled != nil {
+		s.stalled.Start()
+	}
 
 	// 启动后先扫一遍历史已完成任务，预填充 finished map，避免重启后给老任务重发通知
 	go s.prefillFinished()
@@ -221,7 +249,10 @@ func (s *Scheduler) Start() {
 	}()
 
 	// 每 60 秒持久化一次 finished map（避免进程异常退出丢太多）
+	s.saveDone = make(chan struct{})
+	saveDone := s.saveDone
 	go func() {
+		defer close(saveDone)
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -266,6 +297,11 @@ func (s *Scheduler) prefillFinished() {
 
 func (s *Scheduler) Stop() {
 	close(s.stop)
+	// 持久化协程也会走 <-s.stop 分支存一次。等它退出再存，两次落盘就是先后而非并发，
+	// 且 Stop 返回后不会再有人写文件。协程只取 saveMu/mu，等待不会死锁。
+	if s.saveDone != nil {
+		<-s.saveDone
+	}
 	s.saveFinished()
 	s.limiter.Stop()
 	s.fileMgr.Stop()
@@ -278,6 +314,9 @@ func (s *Scheduler) Stop() {
 	}
 	if s.guard != nil {
 		s.guard.Stop()
+	}
+	if s.stalled != nil {
+		s.stalled.Stop()
 	}
 }
 

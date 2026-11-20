@@ -521,6 +521,26 @@ func (c *Client) StartTorrents(hashes ...string) error {
 	return nil
 }
 
+// BottomPrio 把一个或多条 torrent 移到队列底部。
+// qB 队列调度在活动名额满时会停掉队尾的活动任务、放行前面的 queuedDL，
+// 因此下沉队尾与暂停一样能释放名额，但任务保持未暂停、轮到时会自行重试。
+// qBittorrent 5.x 端点为 /api/v2/torrents/bottomPrio。
+func (c *Client) BottomPrio(hashes ...string) error {
+	form := url.Values{}
+	form.Set("hashes", strings.Join(hashes, "|"))
+	resp, err := c.do("POST", "/api/v2/torrents/bottomPrio",
+		strings.NewReader(form.Encode()),
+		"application/x-www-form-urlencoded")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bottomPrio status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Recheck 强制校验：让 qB 重新扫描磁盘文件与 torrent 元数据是否一致。
 // 归档回退把文件挪到新位置后，必须让 qB 重新对上，否则任务会一直停在 missingFiles。
 func (c *Client) Recheck(hashes ...string) error {
@@ -659,6 +679,15 @@ func (c *Client) SetTags(hashes []string, tags string) error {
 		}
 	}
 	return nil
+}
+
+// AddTags 只追加标签、不碰已有标签。用于停滞回收给任务打标记：
+// SetTags 是覆盖式（会抹掉用户原有标签），这里必须走 addTags 端点。
+func (c *Client) AddTags(hashes []string, tags []string) error {
+	if len(hashes) == 0 || len(tags) == 0 {
+		return nil
+	}
+	return c.postTags("/api/v2/torrents/addTags", hashes, tags)
 }
 
 // postTags 提交 addTags / removeTags 请求（两个端点的参数形式一致）

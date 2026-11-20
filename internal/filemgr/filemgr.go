@@ -29,6 +29,10 @@ type Manager struct {
 	// 运行中的 ticker 控制
 	tickerStop chan struct{}
 
+	// lifeMu 串行化 Start/Reload/Stop 对 tickerStop 的读-close-重建。
+	// 两次并发的配置保存会同时走到 Reload，不加锁就是 close of closed channel。
+	lifeMu sync.Mutex
+
 	// 上一周期已完成的 hash 集合，避免重复通知/处理
 	done map[string]bool
 
@@ -39,6 +43,12 @@ type Manager struct {
 	rulesCache []*regexp.Regexp        // 自定义规则编译缓存
 	rulesKey   string                  // rulesCache 对应的规则指纹
 	audit      *auditLog               // 重命名审计日志
+
+	// saveMu 串行化清理状态落盘：postprocess 协程、batch、scan、Stop 共 13 处调用
+	// saveCleanState，全都共用同一个 .tmp 路径。mu 只护内存快照，放开后两个写者会
+	// 互相截断临时文件，rename 出去的就是半截 JSON，重启时清理进度整份丢失
+	// → 已清理过的文件被重新处理一遍。
+	saveMu sync.Mutex
 
 	// notify 由装配层注入的通知通道（nil 表示不通知）。
 	// 只在「需要人介入」或「不可逆」的事件上调用：归档本地回退、失联回滚、清理删原片、
@@ -193,6 +203,8 @@ func (m *Manager) notifyEvent(title, body string) {
 
 // Reload 根据最新配置重启（或停止）扫描轮询
 func (m *Manager) Reload(c *qb.Client) {
+	m.lifeMu.Lock()
+	defer m.lifeMu.Unlock()
 	if c != nil {
 		m.client = c
 	}
@@ -221,6 +233,8 @@ func (m *Manager) scanEnabled() bool {
 }
 
 func (m *Manager) Start() {
+	m.lifeMu.Lock()
+	defer m.lifeMu.Unlock()
 	c := m.cfg.Get().FileManager
 	if !m.scanEnabled() {
 		if c.PostProcess.Enabled {
@@ -238,6 +252,7 @@ func (m *Manager) Start() {
 	m.runTicker(interval)
 }
 
+// runTicker 调用方必须持有 lifeMu
 func (m *Manager) runTicker(interval time.Duration) {
 	m.tickerStop = make(chan struct{})
 	stop := m.tickerStop
@@ -258,7 +273,13 @@ func (m *Manager) runTicker(interval time.Duration) {
 }
 
 func (m *Manager) Stop() {
+	m.lifeMu.Lock()
 	close(m.stop)
+	if m.tickerStop != nil {
+		close(m.tickerStop)
+		m.tickerStop = nil
+	}
+	m.lifeMu.Unlock()
 	m.saveCleanState()
 }
 
@@ -1186,6 +1207,8 @@ func (m *Manager) loadCleanState() {
 
 // saveCleanState 原子写清理进度（tmp + rename）
 func (m *Manager) saveCleanState() {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	m.mu.Lock()
 	data, err := json.Marshal(m.cleanState)
 	m.mu.Unlock()

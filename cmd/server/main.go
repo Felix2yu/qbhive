@@ -17,6 +17,7 @@ import (
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
 	"github.com/Felix2yu/qbhive/internal/rss"
 	"github.com/Felix2yu/qbhive/internal/scheduler"
+	"github.com/Felix2yu/qbhive/internal/stalled"
 	"github.com/Felix2yu/qbhive/internal/web"
 )
 
@@ -70,12 +71,17 @@ func main() {
 	guard := archive.NewGuard(cfgMgr, qbCli, archStore, fm)
 	guard.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
 	sch.SetGuard(guard)
+	// 停滞回收：长期零速任务告警或暂停，释放活动下载名额；默认只告警
+	stallMgr := stalled.New(cfgMgr, qbCli)
+	stallMgr.SetNotifier(func(title, body string) { _ = notif.Notify(title, body) })
+	sch.SetStalled(stallMgr)
 	sch.Start()
 
 	srv := web.New(cfgMgr, qbCli, lim, rssE, notif, sch, fm)
 	srv.SetTorrentCache(torrents)
 	srv.SetCategorizer(cat)
 	srv.SetArchive(archStore, ret)
+	srv.SetStalled(stallMgr)
 
 	go func() {
 		logger.Info.Printf("QBHive 监听地址 %s", cfg.Server.Listen)

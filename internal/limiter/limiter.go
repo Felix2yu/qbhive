@@ -3,6 +3,7 @@ package limiter
 import (
 	"math"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/Felix2yu/qbhive/internal/config"
@@ -53,6 +54,10 @@ type Limiter struct {
 	tickerStop chan struct{}
 	running    bool
 
+	// lifeMu 串行化 Start/Reload/Stop 对 tickerStop 的读-close-重建。
+	// 两次并发的配置保存会同时走到 Reload，不加锁就是 close of closed channel。
+	lifeMu sync.Mutex
+
 	// 上一次下发的限速（hash → limit 字节/秒），避免对值未变的 torrent 重复调用 qB API
 	lastLimits map[string]int64
 }
@@ -84,6 +89,8 @@ func (l *Limiter) allTorrents() ([]models.QBTorrent, error) {
 // Reload 根据最新配置重启（或停止）限速轮询。
 // client 和 cfg 可分别传入 nil / 空，Reload 会沿用已有指针。
 func (l *Limiter) Reload(c *qb.Client) {
+	l.lifeMu.Lock()
+	defer l.lifeMu.Unlock()
 	if c != nil {
 		l.client = c
 	}
@@ -109,6 +116,8 @@ func (l *Limiter) Reload(c *qb.Client) {
 }
 
 func (l *Limiter) Start() {
+	l.lifeMu.Lock()
+	defer l.lifeMu.Unlock()
 	c := l.cfg.Get().Limiter
 	if !c.Enabled {
 		logger.Info.Println("限速器已停用")
@@ -122,6 +131,7 @@ func (l *Limiter) Start() {
 	l.runTicker(interval)
 }
 
+// runTicker 调用方必须持有 lifeMu
 func (l *Limiter) runTicker(interval time.Duration) {
 	l.tickerStop = make(chan struct{})
 	l.running = true
@@ -143,7 +153,14 @@ func (l *Limiter) runTicker(interval time.Duration) {
 }
 
 func (l *Limiter) Stop() {
+	l.lifeMu.Lock()
+	defer l.lifeMu.Unlock()
 	close(l.stop)
+	if l.tickerStop != nil {
+		close(l.tickerStop)
+		l.tickerStop = nil
+		l.running = false
+	}
 }
 
 func (l *Limiter) apply() {

@@ -11,6 +11,50 @@ type AppConfig struct {
 	Proxy        ProxyConfig        `json:"proxy"`
 	AutoCategory AutoCategoryConfig `json:"autoCategory"`
 	Archive      ArchiveConfig      `json:"archive"`
+	Stalled      StalledConfig      `json:"stalled"`
+}
+
+// 停滞任务回收档位，逐级放开不可逆程度。默认 notify（只告警），
+// 老配置缺键时由 config 层补成 notify，升级后不能凭空开始暂停用户的任务。
+const (
+	StalledModeOff    = "off"    // 不扫描
+	StalledModeNotify = "notify" // 只告警 + 审计 + 打标？否：纯只读，任务与文件都不动
+	StalledModePause  = "pause"  // 打标签 + 暂停任务，释放活动下载名额
+	// demote 把停滞任务移到队列底部。qB 队列调度在活动名额满时会停掉队尾的
+	// 活动任务，让前面的 queuedDL 上位——与暂停同样释放名额，但任务仍是
+	// 未暂停状态，源恢复后轮到它会自动重试，不需要人工/定时唤醒。
+	StalledModeDemote = "demote"
+)
+
+// StalledConfig 长期零速任务回收：定期扫描处于活动下载态、但速度长期为 0
+// 的任务（死种子 / 卡元数据的磁链），按档位告警或暂停，把被白白占用的
+// 活动下载名额释放给后面 queuedDL 的任务。
+//
+// 判定只看三件事：状态属于活动下载态、上下行速度都低于阈值、
+// 最后活动时间距今超过 IdleMinutes。三者同时满足才算候选，避免误伤
+// 刚启动的瞬时零速、正在校验的任务，以及用户手动强制启动的任务。
+type StalledConfig struct {
+	Enabled bool `json:"enabled"` // 主开关
+	// Interval 扫描间隔（秒），默认 60
+	Interval int `json:"interval"`
+	// IdleMinutes 零速持续时间门槛（分钟）：最后活动时间距今超过它才算长期零速。
+	// 默认 30。qB 自己的「慢速种子非活动计时器」默认才 60 秒，远不足以过滤死种子。
+	IdleMinutes int `json:"idleMinutes"`
+	// SpeedKiB 速度阈值（KiB/s）：上下行都 ≤ 它才视为零速。默认 5；
+	// 填 0 表示严格为 0（dl=0 且 up=0）。
+	SpeedKiB int `json:"speedKiB"`
+	// Mode 处置档位，见 StalledMode* 常量
+	Mode string `json:"mode"`
+	// Tag 处置时给任务打的标签，便于事后在 qB 里筛选与手动恢复。默认「零速回收」
+	Tag string `json:"tag"`
+	// ExcludeTag 保护标签：带此标签的任务一律不回收，用于手动保活个别任务
+	ExcludeTag string `json:"excludeTag"`
+	// MaxPerRound 单轮最多处置多少条，超出的留待后续轮次逐轮排空，
+	// 并发一条「本轮超限」告警——阈值配错时同样表现为每轮超限，不能只写日志。
+	// 计数只算真正动手的条数：notify 档处于告警冷却中的候选不占配额。默认 20
+	MaxPerRound int `json:"maxPerRound"`
+	// NotifyCooldownMinutes 同一任务的告警冷却（分钟），notify 模式下避免刷屏。默认 60
+	NotifyCooldownMinutes int `json:"notifyCooldownMinutes"`
 }
 
 // 重复下载守卫的档位，逐级放开不可逆动作。

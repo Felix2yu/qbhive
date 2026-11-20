@@ -41,6 +41,10 @@ type Manager struct {
 	stop       chan struct{}
 	tickerStop chan struct{}
 
+	// lifeMu 串行化 Start/Reload/Stop 对 tickerStop 的读-close-重建。
+	// 两次并发的配置保存会同时走到 Reload，不加锁就是 close of closed channel。
+	lifeMu sync.Mutex
+
 	mu        sync.Mutex
 	statePath string
 	state     map[string]*catRecord
@@ -116,6 +120,8 @@ func (m *Manager) saveState() {
 
 // Reload 按最新配置重启（或停止）扫描轮询
 func (m *Manager) Reload(c *qb.Client) {
+	m.lifeMu.Lock()
+	defer m.lifeMu.Unlock()
 	if c != nil {
 		m.client = c
 	}
@@ -141,6 +147,8 @@ func (m *Manager) interval() time.Duration {
 }
 
 func (m *Manager) Start() {
+	m.lifeMu.Lock()
+	defer m.lifeMu.Unlock()
 	ac := m.cfg.Get().AutoCategory
 	if !ac.Enabled {
 		logger.Info.Println("自动分类已停用")
@@ -150,6 +158,7 @@ func (m *Manager) Start() {
 	m.runTicker(m.interval())
 }
 
+// runTicker 调用方必须持有 lifeMu
 func (m *Manager) runTicker(interval time.Duration) {
 	m.tickerStop = make(chan struct{})
 	stop := m.tickerStop
@@ -179,7 +188,13 @@ func (m *Manager) runTicker(interval time.Duration) {
 }
 
 func (m *Manager) Stop() {
+	m.lifeMu.Lock()
 	close(m.stop)
+	if m.tickerStop != nil {
+		close(m.tickerStop)
+		m.tickerStop = nil
+	}
+	m.lifeMu.Unlock()
 	m.saveState()
 }
 

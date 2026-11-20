@@ -122,10 +122,21 @@ type Engine struct {
 	// 运行中的后台协程控制（Reload/Stop 时重建/关闭）
 	fetchStop chan struct{} // fetchAll 的 ticker
 	saveStop  chan struct{} // saveSeen 的 ticker
+	// saveDone 关闭即表示 saveSeen 协程已退出。Stop 要等它退出再自己落盘，
+	// 否则关停时会有两个写者，且写入可能发生在 Stop 返回之后。
+	saveDone chan struct{}
+
+	// lifeMu 串行化 Start/Reload/Stop 对 fetchStop/saveStop 的读-close-重建。
+	// 两次并发的配置保存会同时走到 Reload，不加锁就是 close of closed channel。
+	lifeMu sync.Mutex
 
 	// 已处理的条目，按 feed ID 分组去重
 	seen map[string]map[string]bool
 	mu   sync.Mutex
+
+	// saveMu 串行化落盘：ticker、fetchFeed 的首次快照、Stop 都会调 saveSeen，
+	// 而它们共用同一个 .tmp 路径，不串行化就会互相截断对方正在写的临时文件。
+	saveMu sync.Mutex
 
 	// 每个 feed ID 的运行态（状态面板用）
 	states map[string]*feedState
@@ -179,6 +190,8 @@ func (e *Engine) loadSeen() {
 }
 
 func (e *Engine) saveSeen() {
+	e.saveMu.Lock()
+	defer e.saveMu.Unlock()
 	e.mu.Lock()
 	p := make(seenPersist, len(e.seen))
 	for feedID, m := range e.seen {
@@ -356,18 +369,13 @@ func (e *Engine) SetClient(c *qb.Client) {
 // Reload 根据最新配置重启（或停止）RSS 轮询。
 // 换了 qB 凭据、改了开关或间隔后调用。
 func (e *Engine) Reload(c *qb.Client) {
+	e.lifeMu.Lock()
+	defer e.lifeMu.Unlock()
 	if c != nil {
 		e.client = c
 	}
 	// 停掉旧 goroutine
-	if e.fetchStop != nil {
-		close(e.fetchStop)
-		e.fetchStop = nil
-	}
-	if e.saveStop != nil {
-		close(e.saveStop)
-		e.saveStop = nil
-	}
+	e.stopPollerLocked()
 	cfg := e.cfg.Get().RSS
 	if !cfg.Enabled {
 		logger.Info.Println("RSS 已停用（重载）")
@@ -376,10 +384,34 @@ func (e *Engine) Reload(c *qb.Client) {
 	e.runPoller()
 }
 
+// stopPollerLocked 关掉轮询协程并等落盘协程真正退出。调用方必须持有 lifeMu。
+//
+// 必须等：只 close 不 wait 的话，上一轮的落盘协程可能还没被调度到，
+// 随后 e.stop 一关它就随机选中 <-e.stop 分支再存一次——而 Stop 只等最新那个协程，
+// 这些残留协程会在 Stop 返回之后继续写状态文件。等待也保证任一时刻只有一个落盘协程。
+// 协程只取 saveMu/mu，不取 lifeMu，所以在锁内等待不会死锁。
+func (e *Engine) stopPollerLocked() {
+	if e.fetchStop != nil {
+		close(e.fetchStop)
+		e.fetchStop = nil
+	}
+	if e.saveStop != nil {
+		close(e.saveStop)
+		e.saveStop = nil
+	}
+	if e.saveDone != nil {
+		<-e.saveDone
+		e.saveDone = nil
+	}
+}
+
 func (e *Engine) Start() {
+	e.lifeMu.Lock()
+	defer e.lifeMu.Unlock()
 	e.runPoller()
 }
 
+// runPoller 调用方必须持有 lifeMu
 func (e *Engine) runPoller() {
 	c := e.cfg.Get().RSS
 	if !c.Enabled {
@@ -397,12 +429,13 @@ func (e *Engine) runPoller() {
 
 	// fetchAll ticker
 	e.fetchStop = make(chan struct{})
+	fetchStop := e.fetchStop
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-e.fetchStop:
+			case <-fetchStop:
 				return
 			case <-e.stop:
 				return
@@ -414,12 +447,16 @@ func (e *Engine) runPoller() {
 
 	// saveSeen ticker（常驻，不受 enabled 影响）
 	e.saveStop = make(chan struct{})
+	saveStop := e.saveStop
+	e.saveDone = make(chan struct{})
+	saveDone := e.saveDone
 	go func() {
+		defer close(saveDone)
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-e.saveStop:
+			case <-saveStop:
 				return
 			case <-e.stop:
 				e.saveSeen()
@@ -432,13 +469,12 @@ func (e *Engine) runPoller() {
 }
 
 func (e *Engine) Stop() {
-	if e.fetchStop != nil {
-		close(e.fetchStop)
-	}
-	if e.saveStop != nil {
-		close(e.saveStop)
-	}
+	e.lifeMu.Lock()
+	// 先关 saveStop 并等协程退出，再关 e.stop：协程这时只会走 <-saveStop 静默退出，
+	// 最后一次落盘统一由下面做，关停路径上只有一个写者。
+	e.stopPollerLocked()
 	close(e.stop)
+	e.lifeMu.Unlock()
 	e.saveSeen()
 }
 

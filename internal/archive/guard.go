@@ -45,6 +45,10 @@ type Guard struct {
 	stop       chan struct{}
 	tickerStop chan struct{}
 
+	// lifeMu 串行化 Start/Reload/Stop 对 tickerStop 的读-close-重建。
+	// 两次并发的配置保存会同时走到 Reload，不加锁就是 close of closed channel。
+	lifeMu sync.Mutex
+
 	mu         sync.Mutex
 	notify     func(title, body string)
 	lastNotify map[string]int64 // hash → 上次告警时刻，用于冷却
@@ -105,6 +109,8 @@ func (g *Guard) enabled() bool {
 }
 
 func (g *Guard) Start() {
+	g.lifeMu.Lock()
+	defer g.lifeMu.Unlock()
 	if !g.enabled() {
 		logger.Info.Println("重复下载守卫已停用")
 		return
@@ -115,6 +121,8 @@ func (g *Guard) Start() {
 }
 
 func (g *Guard) Reload(c *qb.Client) {
+	g.lifeMu.Lock()
+	defer g.lifeMu.Unlock()
 	if c != nil {
 		g.client = c
 	}
@@ -131,6 +139,7 @@ func (g *Guard) Reload(c *qb.Client) {
 	g.runTicker(g.interval())
 }
 
+// runTicker 调用方必须持有 lifeMu
 func (g *Guard) runTicker(interval time.Duration) {
 	g.tickerStop = make(chan struct{})
 	stop := g.tickerStop
@@ -150,7 +159,15 @@ func (g *Guard) runTicker(interval time.Duration) {
 	}()
 }
 
-func (g *Guard) Stop() { close(g.stop) }
+func (g *Guard) Stop() {
+	g.lifeMu.Lock()
+	defer g.lifeMu.Unlock()
+	close(g.stop)
+	if g.tickerStop != nil {
+		close(g.tickerStop)
+		g.tickerStop = nil
+	}
+}
 
 type dupHit struct {
 	t   models.QBTorrent

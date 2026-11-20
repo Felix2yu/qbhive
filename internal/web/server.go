@@ -26,6 +26,7 @@ import (
 	qb "github.com/Felix2yu/qbhive/internal/qbittorrent"
 	"github.com/Felix2yu/qbhive/internal/rss"
 	"github.com/Felix2yu/qbhive/internal/scheduler"
+	"github.com/Felix2yu/qbhive/internal/stalled"
 
 	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
@@ -62,7 +63,13 @@ type Server struct {
 	// 留存账本与移除扫描器（可选；未注入时归档接口返回「未加载」）
 	archiveStore *archive.Store
 	remover      *archive.Remover
+
+	// 停滞回收引擎，仅用于试算/审计/手动扫描接口（可选）
+	stalled *stalled.Manager
 }
+
+// SetStalled 注入停滞回收引擎（可选；nil 时相关接口返回「未加载」）。
+func (s *Server) SetStalled(m *stalled.Manager) { s.stalled = m }
 
 // SetTorrentCache 注入共享任务快照（装配层调用一次）。
 func (s *Server) SetTorrentCache(c *qb.TorrentCache) { s.torrentCache = c }
@@ -247,6 +254,11 @@ func (s *Server) Start(webRoot string) error {
 
 		// 自动分类：试算（只读，不写 qB、不落状态）
 		api.POST("/category/preview", s.categoryPreview)
+
+		// 停滞回收：试算（只读）、手动扫一轮、审计记录
+		api.POST("/stalled/preview", s.stalledPreview)
+		api.POST("/stalled/scan", s.stalledScan)
+		api.GET("/stalled/audit", s.stalledAudit)
 
 		// 归档：移除后的任务元数据检索、手动移除、以及「我确实想重下」的逃生口
 		api.GET("/archive", s.archiveSearch)
@@ -448,6 +460,30 @@ func validateConfig(in *models.AppConfig) string {
 			return "自动分类兜底分类不合法：" + msg
 		}
 	}
+	// 停滞回收：档位枚举 + 数值下限。与归档一样按「是否启用」判，
+	// 局部保存（如 RSS 页）不该因为没填停滞段而被拒。
+	switch in.Stalled.Mode {
+	case "", models.StalledModeOff, models.StalledModeNotify, models.StalledModePause, models.StalledModeDemote:
+	default:
+		return "停滞回收档位只能是 关闭 / 只告警 / 告警并暂停 / 告警并下沉队尾"
+	}
+	if in.Stalled.Enabled && in.Stalled.Mode != models.StalledModeOff {
+		if in.Stalled.Interval < 1 {
+			return "停滞回收扫描间隔必须 ≥ 1 秒"
+		}
+		if in.Stalled.IdleMinutes < 1 {
+			return "停滞回收零速时长门槛必须 ≥ 1 分钟"
+		}
+		if in.Stalled.SpeedKiB < 0 {
+			return "停滞回收速度阈值不能为负数"
+		}
+		if in.Stalled.MaxPerRound < 1 {
+			return "停滞回收单轮上限必须 ≥ 1"
+		}
+	}
+	if in.Stalled.NotifyCooldownMinutes < 0 {
+		return "停滞回收告警冷却不能为负数"
+	}
 	// 归档移除与重复守卫：这几个数值在运行时会被静默兜底成默认值
 	// （interval/batchSize/maxPerRound ≤0 → 60/100/20），填 0 的人以为关掉了，
 	// 实际是按默认值在跑，所以在入口就拦下来。
@@ -498,7 +534,7 @@ func (s *Server) saveConfig(c *gin.Context) {
 		known := map[string]bool{
 			"qbittorrent": true, "server": true, "notifier": true, "rss": true,
 			"limiter": true, "fileManager": true, "proxy": true, "autoCategory": true,
-			"archive": true,
+			"archive": true, "stalled": true,
 		}
 		keep := make(map[string]bool, 4)
 		for _, name := range strings.Split(only, ",") {
@@ -538,6 +574,9 @@ func (s *Server) saveConfig(c *gin.Context) {
 		}
 		if !keep["archive"] {
 			in.Archive = cur.Archive
+		}
+		if !keep["stalled"] {
+			in.Stalled = cur.Stalled
 		}
 	}
 	// P1: 后端校验——在任何持久化/热生效之前拦截非法输入
@@ -1284,6 +1323,51 @@ func (s *Server) categoryPreview(c *gin.Context) {
 		return
 	}
 	c.JSON(200, models.APIResponse{Success: true, Data: items})
+}
+
+// stalledPreview 停滞回收试算：按表单里尚未保存的配置，列出会被判为长期零速的任务。
+// 纯只读，不调用 qB 的暂停/打标接口，也不写状态。
+func (s *Server) stalledPreview(c *gin.Context) {
+	if s.stalled == nil {
+		c.JSON(200, models.APIResponse{Success: false, Message: "停滞回收引擎未加载"})
+		return
+	}
+	var body struct {
+		Config *models.StalledConfig `json:"config"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	items, err := s.stalled.Preview(body.Config)
+	if err != nil {
+		c.JSON(200, models.APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c.JSON(200, models.APIResponse{Success: true, Data: items})
+}
+
+// stalledScan 手动触发一轮停滞回收扫描。是否真的动手由保存的档位决定
+// （notify 只告警，pause 才暂停）；前端必须在档位为暂停时二次确认。
+func (s *Server) stalledScan(c *gin.Context) {
+	if s.stalled == nil {
+		c.JSON(200, models.APIResponse{Success: false, Message: "停滞回收引擎未加载"})
+		return
+	}
+	cfg := s.cfg.Get().Stalled
+	if !cfg.Enabled || cfg.Mode == models.StalledModeOff {
+		c.JSON(200, models.APIResponse{Success: false, Message: "停滞回收未启用或档位为关闭"})
+		return
+	}
+	s.stalled.ScanNow()
+	c.JSON(200, models.APIResponse{Success: true, Message: "本轮扫描已执行，详见运行日志与审计记录"})
+}
+
+// stalledAudit 返回停滞回收的处置审计（新→旧）
+func (s *Server) stalledAudit(c *gin.Context) {
+	if s.stalled == nil {
+		c.JSON(200, models.APIResponse{Success: false, Message: "停滞回收引擎未加载"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	c.JSON(200, models.APIResponse{Success: true, Data: s.stalled.AuditList(limit)})
 }
 
 // postProcessTest 手动跑一次后处理命令（设置页「测试运行」），同步执行并返回退出码与输出尾部。
