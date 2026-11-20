@@ -40,6 +40,7 @@ func (f postFixture) restart(t *testing.T, pc models.PostProcessConfig) *Manager
 	cfg := m.cfg.Get()
 	cfg.FileManager.PostProcess = pc
 	m.cfg.Set(cfg)
+	t.Cleanup(func() { waitPostIdle(t, m) })
 	return m
 }
 
@@ -66,6 +67,10 @@ func setupPostFixture(t *testing.T, pc models.PostProcessConfig, filesJSON ...st
 	cfg := m.cfg.Get()
 	cfg.FileManager.PostProcess = pc
 	m.cfg.Set(cfg)
+	// 派发出的转码协程必须在本用例结束前收干。否则它会活到 TempDir 被删之后，
+	// chdir 失败进入重试退避，去读后续用例正在改写的包级 postRetryDelay（-race 报红）。
+	// 注册在 srv.Close 之后 → LIFO 先执行：先收干协程，再关 mock、删临时目录。
+	t.Cleanup(func() { waitPostIdle(t, m) })
 	return postFixture{m: m, cfgPth: cfgPath, qbURL: srv.URL}
 }
 
